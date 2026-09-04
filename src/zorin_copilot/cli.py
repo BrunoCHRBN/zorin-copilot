@@ -12,6 +12,7 @@ from .ai.actions import ActionPlan, ActionType, DesktopAction
 from .ai.engine import IntentEngine
 from .core.a11y import DesktopInspector
 from .core.config import CopilotConfig
+from .core.memory import MemoryManager
 from .shell.executor import ActionExecutor
 
 
@@ -39,8 +40,21 @@ def build_parser() -> argparse.ArgumentParser:
     config_cmd = sub.add_parser("config", help="gerencia configurações de IA")
     config_cmd.add_argument("--show", action="store_true", help="exibe configuração atual")
     config_cmd.add_argument("--set-gemini-key", help="define a chave de API do Gemini")
-    config_cmd.add_argument("--set-gemini-model", help="define o modelo Gemini (ex: gemini-2.5-flash, gemini-2.5-pro)")
+    config_cmd.add_argument("--set-gemini-model", help="define o modelo Gemini (ex: gemini-3.8-flash, gemini-3.6-flash)")
     config_cmd.add_argument("--set-provider", choices=["gemini", "ollama", "openai"], help="define o provedor ativo")
+
+    # memory
+    memory_cmd = sub.add_parser("memory", help="gerencia a base de conhecimento e histórico de execuções")
+    mem_sub = memory_cmd.add_subparsers(dest="mem_action", required=True)
+    mem_sub.add_parser("list", help="lista fatos e preferências aprendidas")
+    mem_sub.add_parser("history", help="exibe histórico recente de ações no desktop")
+    mem_sub.add_parser("profile", help="exibe perfil do sistema detectado")
+    mem_sub.add_parser("clear", help="limpa toda a base de memória")
+    add_mem = mem_sub.add_parser("add", help="adiciona um fato manualmente à base")
+    add_mem.add_argument("key", help="identificador único do fato (ex: 'navegador_preferido')")
+    add_mem.add_argument("content", help="conteúdo descritivo do fato")
+    del_mem = mem_sub.add_parser("remove", help="remove um fato da base pela chave")
+    del_mem.add_argument("key", help="chave do fato a remover")
 
     # action
     action_cmd = sub.add_parser("action", help="executa uma ação direta no desktop")
@@ -204,6 +218,58 @@ def cmd_action(args: argparse.Namespace) -> int:
     return 0 if all(r.success for r in reports) else 1
 
 
+def cmd_memory(args: argparse.Namespace) -> int:
+    mem = MemoryManager()
+
+    if args.mem_action == "list":
+        facts = mem.get_all_facts()
+        if not facts:
+            print("Nenhum fato memorizado na base de conhecimento.")
+            return 0
+        print(f"Base de Conhecimento ({len(facts)} fatos):")
+        for f in facts:
+            print(f"  • [{f['key']}] {f['content']} ({f['source']} - {f['updated_at'][:10]})")
+        return 0
+
+    if args.mem_action == "history":
+        actions = mem.get_recent_actions(limit=15)
+        if not actions:
+            print("Nenhum histórico de ações registrado.")
+            return 0
+        print(f"Histórico de ações no desktop ({len(actions)}):")
+        for a in actions:
+            status = "✓" if a["success"] else "✗"
+            print(f"  {status} [{a['action_type']}] {a['target']} — pedido: '{a['prompt']}' ({a['timestamp'][:19]})")
+        return 0
+
+    if args.mem_action == "profile":
+        profile = mem.get_system_profile()
+        print("Perfil do Sistema Detectado:")
+        for k, v in profile.items():
+            print(f"  • {k}: {v}")
+        return 0
+
+    if args.mem_action == "add":
+        mem.save_fact(args.key, args.content, category="usuario", source="cli")
+        print(f"Fato '{args.key}' salvo na base de conhecimento.")
+        return 0
+
+    if args.mem_action == "remove":
+        ok = mem.delete_fact_by_key(args.key)
+        if ok:
+            print(f"Fato '{args.key}' removido.")
+        else:
+            print(f"Fato com chave '{args.key}' não encontrado.")
+        return 0
+
+    if args.mem_action == "clear":
+        mem.clear_all()
+        print("Base de memória e histórico limpos com sucesso.")
+        return 0
+
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -213,6 +279,7 @@ def main(argv: list[str] | None = None) -> int:
         "action": cmd_action,
         "ask": cmd_ask,
         "config": cmd_config,
+        "memory": cmd_memory,
     }
     return handlers[args.command](args)
 

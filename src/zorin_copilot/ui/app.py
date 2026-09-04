@@ -248,7 +248,18 @@ class CopilotWindow(Adw.ApplicationWindow):
         if not self.current_plan:
             return
 
+        prompt_text = self.entry.get_text().strip()
         reports = self.executor.execute_plan(self.current_plan, dry_run=False)
+        for r in reports:
+            self.engine.memory.log_action(
+                prompt=prompt_text,
+                action_type=r.action.action_type.value,
+                target=r.action.target,
+                params=r.action.params,
+                success=r.success,
+                message=r.message,
+            )
+
         msgs = [r.message for r in reports]
         self.exec_status.set_text(" • ".join(msgs))
         self.exec_btn.set_sensitive(False)

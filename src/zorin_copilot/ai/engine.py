@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from typing import Any
 
 from .actions import ActionPlan, ActionType, DesktopAction
@@ -13,6 +14,7 @@ from .providers import BaseLLMProvider, get_llm_provider
 from ..core.a11y import DesktopInspector
 from ..core.apps import AppManager
 from ..core.config import CopilotConfig
+from ..core.memory import MemoryManager
 
 logger = logging.getLogger(__name__)
 
@@ -20,9 +22,15 @@ logger = logging.getLogger(__name__)
 class IntentEngine:
     """Interpreta solicitações do usuário e gera planos de ação para o desktop."""
 
-    def __init__(self, inspector: DesktopInspector | None = None, config: CopilotConfig | None = None):
+    def __init__(
+        self,
+        inspector: DesktopInspector | None = None,
+        config: CopilotConfig | None = None,
+        memory: MemoryManager | None = None,
+    ):
         self.inspector = inspector or DesktopInspector()
         self.config = config or CopilotConfig.load()
+        self.memory = memory or MemoryManager()
         self.llm_provider: BaseLLMProvider = get_llm_provider(self.config)
 
     def reload_config(self, config: CopilotConfig | None = None) -> None:
@@ -33,6 +41,33 @@ class IntentEngine:
     def parse(self, prompt: str) -> ActionPlan:
         prompt_clean = prompt.strip()
         low = prompt_clean.lower()
+
+        # =========================================================================
+        # 0. BASE DE CONHECIMENTO: Memorização e Aprendizado Explícito
+        # =========================================================================
+        learn_match = re.match(
+            r"^(?:lembre-se que|lembre que|guarde que|salve que|anote que|grave que)\s+(.+)$",
+            prompt_clean,
+            flags=re.I,
+        )
+        if learn_match:
+            fact_content = learn_match.group(1).strip()
+            fact_key = f"fato_{int(time.time())}"
+            self.memory.save_fact(fact_key, fact_content, category="usuario", source="usuario")
+            return ActionPlan(
+                thought=(
+                    f"Entendido! Guardei na minha base de conhecimento:\n\n"
+                    f"• \"{fact_content}\"\n\n"
+                    "Eu levarei essa informação em conta em todas as próximas respostas e ações."
+                ),
+                actions=[
+                    DesktopAction(
+                        ActionType.ANSWER,
+                        f"Conhecimento memorizado: '{fact_content}'",
+                        description="Salvo na base de conhecimento permanente",
+                    )
+                ],
+            )
 
         # =========================================================================
         # 1. CAMADA RÁPIDA LOCAL: Configurações do Sistema Operacional (0ms)
@@ -196,7 +231,12 @@ class IntentEngine:
             try:
                 # Obtém nomes de alguns apps instalados para dar contexto ao LLM
                 app_names = [a.get_name() for a in AppManager.get_all_apps() if a.get_name()]
-                explanation, actions = self.llm_provider.chat(prompt_clean, app_list=app_names)
+                context_summary = self.memory.get_context_summary()
+                explanation, actions = self.llm_provider.chat(
+                    prompt_clean,
+                    app_list=app_names,
+                    context_summary=context_summary,
+                )
 
                 if not actions:
                     actions = [

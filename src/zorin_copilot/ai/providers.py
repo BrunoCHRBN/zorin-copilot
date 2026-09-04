@@ -57,7 +57,12 @@ class BaseLLMProvider(ABC):
         pass
 
     @abstractmethod
-    def chat(self, prompt: str, app_list: list[str] | None = None) -> tuple[str, list[DesktopAction]]:
+    def chat(
+        self,
+        prompt: str,
+        app_list: list[str] | None = None,
+        context_summary: str | None = None,
+    ) -> tuple[str, list[DesktopAction]]:
         """Processa a solicitação do usuário e retorna (explicação, lista de ações propostas)."""
         pass
 
@@ -142,7 +147,12 @@ class GeminiProvider(BaseLLMProvider):
 
         return False, f"Falha ao conectar com Gemini: {last_error}"
 
-    def chat(self, prompt: str, app_list: list[str] | None = None) -> tuple[str, list[DesktopAction]]:
+    def chat(
+        self,
+        prompt: str,
+        app_list: list[str] | None = None,
+        context_summary: str | None = None,
+    ) -> tuple[str, list[DesktopAction]]:
         if not self.is_configured():
             return (
                 "Chave de API do Google Gemini não configurada. "
@@ -151,6 +161,8 @@ class GeminiProvider(BaseLLMProvider):
             )
 
         sys_instruction = SYSTEM_PROMPT
+        if context_summary:
+            sys_instruction += f"\n\n{context_summary}"
         if app_list:
             sys_instruction += f"\n\nAplicativos atualmente instalados no desktop do usuário:\n{', '.join(app_list[:40])}"
 
@@ -218,9 +230,16 @@ class OllamaProvider(BaseLLMProvider):
         except Exception as exc:
             return False, f"Não foi possível conectar ao Ollama em {self.host_url}: {exc}"
 
-    def chat(self, prompt: str, app_list: list[str] | None = None) -> tuple[str, list[DesktopAction]]:
+    def chat(
+        self,
+        prompt: str,
+        app_list: list[str] | None = None,
+        context_summary: str | None = None,
+    ) -> tuple[str, list[DesktopAction]]:
         url = f"{self.host_url}/api/chat"
         sys_instruction = SYSTEM_PROMPT
+        if context_summary:
+            sys_instruction += f"\n\n{context_summary}"
         if app_list:
             sys_instruction += f"\n\nAplicativos instalados no computador:\n{', '.join(app_list[:30])}"
 
@@ -274,13 +293,20 @@ class OpenAICompatProvider(BaseLLMProvider):
         except Exception as exc:
             return False, f"Falha de conexão: {exc}"
 
-    def chat(self, prompt: str, app_list: list[str] | None = None) -> tuple[str, list[DesktopAction]]:
+    def chat(
+        self,
+        prompt: str,
+        app_list: list[str] | None = None,
+        context_summary: str | None = None,
+    ) -> tuple[str, list[DesktopAction]]:
         if not self.is_configured():
             return "Chave de API ou URL não configurada.", []
 
         url = f"{self.api_url}/chat/completions"
         headers = {"Authorization": f"Bearer {self.api_key}"}
         sys_instruction = SYSTEM_PROMPT
+        if context_summary:
+            sys_instruction += f"\n\n{context_summary}"
         if app_list:
             sys_instruction += f"\n\nAplicativos disponíveis:\n{', '.join(app_list[:30])}"
 

@@ -15,6 +15,7 @@ from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
 from ..ai.providers import GeminiProvider, OllamaProvider, OpenAICompatProvider
 from ..core.config import CopilotConfig
+from ..core.memory import MemoryManager
 
 
 class PreferencesDialog(Adw.PreferencesDialog):
@@ -25,6 +26,7 @@ class PreferencesDialog(Adw.PreferencesDialog):
         self.set_title("Configurações do Copilot")
         self.on_saved = on_saved
         self.config = CopilotConfig.load()
+        self.memory = MemoryManager()
 
         self._build_ui()
         self._load_values()
@@ -149,6 +151,97 @@ class PreferencesDialog(Adw.PreferencesDialog):
 
         action_group.add(test_row)
         page.add(action_group)
+
+        self._build_memory_page()
+
+    def _build_memory_page(self) -> None:
+        page = Adw.PreferencesPage(title="Base de Conhecimento", icon_name="document-properties-symbolic")
+        self.add(page)
+
+        # 1. Estatísticas de Ações e Perfil do Sistema
+        stats = self.memory.get_action_stats()
+        profile = self.memory.get_system_profile()
+
+        info_group = Adw.PreferencesGroup(title="Métricas e Perfil Local")
+        stats_row = Adw.ActionRow(
+            title="Ações Executadas no Desktop",
+            subtitle=f"Total: {stats['total']} ações | {stats['successful']} com sucesso ({stats['success_rate']}%)",
+        )
+        info_group.add(stats_row)
+
+        os_info = profile.get("os_name", "Zorin OS 18")
+        session = profile.get("session_type", "wayland")
+        browser = profile.get("default_browser", "Detectando...")
+        profile_row = Adw.ActionRow(
+            title="Perfil do Computador",
+            subtitle=f"{os_info} ({session}) • Navegador: {browser}",
+        )
+        info_group.add(profile_row)
+        page.add(info_group)
+
+        # 2. Fatos e Preferências
+        self.facts_group = Adw.PreferencesGroup(
+            title="Fatos e Preferências Aprendidas",
+            description="Informações que o Copilot memorizou para personalizar suas respostas e ações.",
+        )
+        self.fact_rows: list[Adw.ActionRow] = []
+        self._populate_facts_group()
+        page.add(self.facts_group)
+
+        # 3. Gerenciamento
+        mgmt_group = Adw.PreferencesGroup(title="Privacidade e Controle")
+        clear_row = Adw.ActionRow(
+            title="Limpar Toda a Memória",
+            subtitle="Remove o histórico de ações e conhecimentos aprendidos localmente",
+        )
+        clear_btn = Gtk.Button(label="Limpar Memória", valign=Gtk.Align.CENTER)
+        clear_btn.add_css_class("destructive-action")
+        clear_btn.connect("clicked", self._on_clear_memory)
+        clear_row.add_suffix(clear_btn)
+        mgmt_group.add(clear_row)
+        page.add(mgmt_group)
+
+    def _populate_facts_group(self) -> None:
+        for r in self.fact_rows:
+            self.facts_group.remove(r)
+        self.fact_rows.clear()
+
+        facts = self.memory.get_all_facts()
+        if not facts:
+            empty_row = Adw.ActionRow(
+                title="Nenhum fato memorizado ainda",
+                subtitle="Diga 'lembre-se que...' no Copilot para ensinar preferências à IA.",
+            )
+            self.facts_group.add(empty_row)
+            self.fact_rows.append(empty_row)
+            return
+
+        for f in facts:
+            row = Adw.ActionRow(
+                title=f["content"],
+                subtitle=f"Origem: {f['source']} • Atualizado em {f['updated_at'][:10]}",
+            )
+            del_btn = Gtk.Button.new_from_icon_name("user-trash-symbolic")
+            del_btn.add_css_class("flat")
+            del_btn.set_tooltip_text("Excluir este conhecimento")
+            del_btn.set_valign(Gtk.Align.CENTER)
+            fact_id = f["id"]
+            del_btn.connect("clicked", lambda _b, fid=fact_id: self._on_delete_fact(fid))
+            row.add_suffix(del_btn)
+            self.facts_group.add(row)
+            self.fact_rows.append(row)
+
+    def _on_delete_fact(self, fact_id: int) -> None:
+        self.memory.delete_fact(fact_id)
+        self._populate_facts_group()
+        toast = Adw.Toast.new("Conhecimento removido da base.")
+        self.add_toast(toast)
+
+    def _on_clear_memory(self, _btn: Gtk.Button) -> None:
+        self.memory.clear_all()
+        self._populate_facts_group()
+        toast = Adw.Toast.new("Base de conhecimento e histórico limpos!")
+        self.add_toast(toast)
 
     def _load_values(self) -> None:
         # Define provedor ativo no ComboRow
