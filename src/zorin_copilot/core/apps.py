@@ -50,48 +50,107 @@ class AppManager:
     get_installed_apps = get_all_apps
 
     @classmethod
-    def find_app(cls, query: str) -> tuple[Gio.AppInfo | None, str]:
-        """Busca o melhor aplicativo para a consulta do usuário. Devolve (app, nome_amigavel)."""
+    def is_app_launch_intent(cls, text: str) -> tuple[bool, str]:
+        """Identifica se a intenção do usuário é abrir/executar um programa."""
+        t = text.strip()
+        low = t.lower()
+        if not t:
+            return False, ""
+
+        # 1. Padrões explícitos com verbos de lançamento
+        launch_prefixes = [
+            r"^(?:abrir|abre|abra|iniciar|inicia|execute|executa|rodar|roda|lançar|lança|open|start)\s+(?:o\s+|a\s+|o\s+app\s+|o\s+aplicativo\s+)?(.+)$",
+        ]
+        for pattern in launch_prefixes:
+            m = re.match(pattern, low)
+            if m:
+                target = m.group(1).strip(" ?.!\"'")
+                return True, target
+
+        # 2. Se for um termo curto (até 3 palavras) que não seja uma pergunta conversacional
+        question_starters = (
+            "como", "onde", "qual", "quem", "por que", "porque",
+            "o que", "quando", "quanto", "pesquise", "pesquisar",
+            "busque", "buscar", "lembre", "guarde", "salve",
+        )
+        words = low.split()
+        if not any(low.startswith(q) for q in question_starters) and len(words) <= 3:
+            return True, t
+
+        return False, ""
+
+    @classmethod
+    def suggest_apps(cls, query: str, limit: int = 3) -> list[Gio.AppInfo]:
+        """Retorna uma lista ordenada com os melhores aplicativos compatíveis com a busca."""
         clean_query = cls._sanitize_query(query)
         if not clean_query:
-            return None, ""
+            return []
 
         all_apps = cls.get_all_apps()
         if not all_apps:
-            return None, ""
+            return []
 
-        # 1. Checa apelidos comuns (ex: 'navegador' -> Firefox)
+        results: list[Gio.AppInfo] = []
+        seen_ids: set[str] = set()
+
+        def add_app(app: Gio.AppInfo):
+            app_id = app.get_id() or app.get_name()
+            if app_id not in seen_ids:
+                seen_ids.add(app_id)
+                results.append(app)
+
+        # 1. Checa apelidos comuns (ex: 'navegador' -> Brave/Chrome/Firefox)
         if clean_query in COMMON_ALIASES:
             for alias in COMMON_ALIASES[clean_query]:
                 for app in all_apps:
                     app_id = (app.get_id() or "").lower()
                     exe = (app.get_executable() or "").lower()
                     if alias in app_id or alias in exe:
-                        return app, app.get_name()
+                        add_app(app)
 
-        # 2. Correspondência exata por nome ou executável
+        # 2. Correspondência exata por nome
         for app in all_apps:
             name = (app.get_name() or "").lower()
-            exe = (app.get_executable() or "").lower()
-            app_id = (app.get_id() or "").lower()
-            if clean_query == name or clean_query == exe or clean_query == app_id:
-                return app, app.get_name()
+            if name == clean_query:
+                add_app(app)
 
-        # 3. Correspondência por contenção (substring)
+        # 3. Nome do app começa com o termo digitado (prefix match)
+        for app in all_apps:
+            name = (app.get_name() or "").lower()
+            if name.startswith(clean_query):
+                add_app(app)
+
+        # 4. Correspondência em limite de palavras (\btermo)
+        pattern = r"\b" + re.escape(clean_query)
+        for app in all_apps:
+            name = (app.get_name() or "").lower()
+            if re.search(pattern, name):
+                add_app(app)
+
+        # 5. Correspondência por substring no nome, executável ou display
         for app in all_apps:
             name = (app.get_name() or "").lower()
             exe = (app.get_executable() or "").lower()
             display = (app.get_display_name() or "").lower()
             if clean_query in name or clean_query in exe or clean_query in display:
-                return app, app.get_name()
+                add_app(app)
 
-        # 4. Correspondência aproximada (Fuzzy matching)
-        names = {app.get_name().lower(): app for app in all_apps if app.get_name()}
-        matches = difflib.get_close_matches(clean_query, names.keys(), n=1, cutoff=0.55)
-        if matches:
-            best_match = matches[0]
-            matched_app = names[best_match]
-            return matched_app, matched_app.get_name()
+        # 6. Fallback para Fuzzy matching se nada foi encontrado
+        if not results:
+            names = {app.get_name().lower(): app for app in all_apps if app.get_name()}
+            matches = difflib.get_close_matches(clean_query, names.keys(), n=limit, cutoff=0.55)
+            for m in matches:
+                add_app(names[m])
+
+        return results[:limit]
+
+    @classmethod
+    def find_app(cls, query: str) -> tuple[Gio.AppInfo | None, str]:
+        """Busca o melhor aplicativo para a consulta do usuário. Devolve (app, nome_amigavel)."""
+        suggestions = cls.suggest_apps(query, limit=1)
+        if suggestions:
+            top_app = suggestions[0]
+            return top_app, top_app.get_name()
 
         return None, ""
 

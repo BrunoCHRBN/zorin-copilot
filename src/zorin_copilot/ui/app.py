@@ -18,6 +18,7 @@ from .. import __app_id__, __version__
 from ..ai.actions import ActionPlan, ActionType, DesktopAction
 from ..ai.engine import IntentEngine
 from ..core.a11y import DesktopInspector
+from ..core.apps import AppManager
 from ..core.config import CopilotConfig
 from ..shell.executor import ActionExecutor
 from .preferences import PreferencesDialog
@@ -103,6 +104,8 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.current_plan: ActionPlan | None = None
         self._raw_answer_text: str = ""
         self._is_busy = False
+        self._search_debounce_timer: int | None = None
+        self._matched_preview_app: Gio.AppInfo | None = None
 
         self._build_ui()
         self._update_provider_badge()
@@ -144,9 +147,11 @@ class CopilotWindow(Adw.ApplicationWindow):
         input_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         
         self.entry = Gtk.Entry()
-        self.entry.set_placeholder_text("Ex: 'como acessar o gmail', 'abrir steam', 'modo escuro', 'aumentar volume'...")
+        self.entry.set_placeholder_text("Ex: 'abrir zorin look', 'como acessar o gmail', 'modo escuro'...")
+        self.entry.set_icon_from_icon_name(Gtk.EntryIconPosition.PRIMARY, "system-search-symbolic")
         self.entry.set_hexpand(True)
         self.entry.connect("activate", self._on_submit)
+        self.entry.connect("changed", self._on_entry_changed)
         input_box.append(self.entry)
 
         self.spinner = Gtk.Spinner(valign=Gtk.Align.CENTER)
@@ -154,10 +159,64 @@ class CopilotWindow(Adw.ApplicationWindow):
 
         self.submit_btn = Gtk.Button(label="Pedir", valign=Gtk.Align.CENTER)
         self.submit_btn.add_css_class("suggested-action")
+        self.submit_btn.add_css_class("pill")
         self.submit_btn.connect("clicked", self._on_submit)
         input_box.append(self.submit_btn)
 
         main_box.append(input_box)
+
+        # ---------------------------------------------------------------------
+        # Barra Dinâmica de Detecção de Aplicativos Instalados (Revealer)
+        # ---------------------------------------------------------------------
+        self.app_preview_revealer = Gtk.Revealer()
+        self.app_preview_revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_DOWN)
+        self.app_preview_revealer.set_transition_duration(180)
+        self.app_preview_revealer.set_reveal_child(False)
+
+        self.app_preview_card = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.app_preview_card.add_css_class("card")
+        self.app_preview_card.set_margin_top(0)
+        self.app_preview_card.set_margin_bottom(2)
+        self.app_preview_card.set_margin_start(2)
+        self.app_preview_card.set_margin_end(2)
+
+        self.app_preview_icon = Gtk.Image()
+        self.app_preview_icon.set_pixel_size(26)
+        self.app_preview_icon.set_margin_start(10)
+        self.app_preview_icon.set_margin_top(8)
+        self.app_preview_icon.set_margin_bottom(8)
+        self.app_preview_card.append(self.app_preview_icon)
+
+        info_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        info_box.set_hexpand(True)
+        info_box.set_valign(Gtk.Align.CENTER)
+
+        self.app_preview_title = Gtk.Label(xalign=0)
+        self.app_preview_title.add_css_class("heading")
+        info_box.append(self.app_preview_title)
+
+        self.app_preview_subtitle = Gtk.Label(xalign=0)
+        self.app_preview_subtitle.add_css_class("caption")
+        self.app_preview_subtitle.add_css_class("dim-label")
+        info_box.append(self.app_preview_subtitle)
+
+        self.app_preview_card.append(info_box)
+
+        self.app_preview_badge = Gtk.Label(xalign=1)
+        self.app_preview_badge.add_css_class("caption")
+        self.app_preview_badge.set_valign(Gtk.Align.CENTER)
+        self.app_preview_card.append(self.app_preview_badge)
+
+        self.app_preview_launch_btn = Gtk.Button(label="Abrir Agora ↵")
+        self.app_preview_launch_btn.add_css_class("suggested-action")
+        self.app_preview_launch_btn.add_css_class("pill")
+        self.app_preview_launch_btn.set_valign(Gtk.Align.CENTER)
+        self.app_preview_launch_btn.set_margin_end(10)
+        self.app_preview_launch_btn.connect("clicked", self._on_quick_launch_app)
+        self.app_preview_card.append(self.app_preview_launch_btn)
+
+        self.app_preview_revealer.set_child(self.app_preview_card)
+        main_box.append(self.app_preview_revealer)
 
         # ---------------------------------------------------------------------
         # Área Rolável de Conteúdo (Respostas e Ações)
@@ -352,7 +411,85 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.entry.set_text(text)
         self._on_submit(self.entry)
 
+    def _on_entry_changed(self, entry: Gtk.Entry) -> None:
+        """Monitora a digitação em tempo real para verificar se o app está instalado."""
+        if self._search_debounce_timer:
+            GLib.source_remove(self._search_debounce_timer)
+            self._search_debounce_timer = None
+
+        text = entry.get_text().strip()
+        if not text or len(text) < 2:
+            self.app_preview_revealer.set_reveal_child(False)
+            self._matched_preview_app = None
+            return
+
+        def check_app():
+            self._search_debounce_timer = None
+            self._update_app_preview(text)
+            return GLib.SOURCE_REMOVE
+
+        self._search_debounce_timer = GLib.timeout_add(120, check_app)
+
+    def _update_app_preview(self, text: str) -> None:
+        """Verifica se há um app correspondente e atualiza a barra de prévia dinâmica."""
+        is_launch, target_name = AppManager.is_app_launch_intent(text)
+        if not is_launch or not target_name:
+            self.app_preview_revealer.set_reveal_child(False)
+            self._matched_preview_app = None
+            return
+
+        app, friendly_name = AppManager.find_app(target_name)
+        if app:
+            self._matched_preview_app = app
+            if app.get_icon():
+                self.app_preview_icon.set_from_gicon(app.get_icon())
+            else:
+                self.app_preview_icon.set_from_icon_name("application-x-executable-symbolic")
+
+            self.app_preview_title.set_markup(f"<b>{html.escape(friendly_name)}</b>")
+            exe_or_id = app.get_id() or app.get_executable() or "desktop"
+            self.app_preview_subtitle.set_text(f"{exe_or_id} • Aplicativo instalado no Zorin OS")
+
+            self.app_preview_badge.set_markup("<span foreground='#2ec27e'><b>✓ Instalado</b></span>")
+            self.app_preview_launch_btn.set_visible(True)
+            self.app_preview_revealer.set_reveal_child(True)
+        else:
+            self._matched_preview_app = None
+            # Se for pedido explícito de abertura (ex: "abrir discord") e não estiver instalado:
+            if any(text.lower().startswith(p) for p in ("abrir ", "abre ", "iniciar ", "inicia ", "rodar ", "executar ", "open ")):
+                self.app_preview_icon.set_from_icon_name("dialog-warning-symbolic")
+                self.app_preview_title.set_markup(f"<b>{html.escape(target_name)}</b> não encontrado")
+                self.app_preview_subtitle.set_text("Nenhum aplicativo com este nome foi detectado no sistema.")
+                self.app_preview_badge.set_markup("<span foreground='#e5a50a'><b>⚠️ Não instalado</b></span>")
+                self.app_preview_launch_btn.set_visible(False)
+                self.app_preview_revealer.set_reveal_child(True)
+            else:
+                self.app_preview_revealer.set_reveal_child(False)
+
+    def _on_quick_launch_app(self, _btn: Gtk.Button) -> None:
+        """Executa imediatamente o app detectado na barra de prévia sem precisar da IA."""
+        if not self._matched_preview_app:
+            return
+
+        app = self._matched_preview_app
+        ok, msg = AppManager.launch(app)
+        self.exec_status.set_text(f"{'✓' if ok else '✗'} {msg}")
+        self.engine.memory.log_action(
+            prompt=self.entry.get_text().strip(),
+            action_type=ActionType.LAUNCH_APP.value,
+            target=app.get_name(),
+            params={"app_id": app.get_id(), "executable": app.get_executable()},
+            success=ok,
+            message=msg,
+        )
+        self.app_preview_revealer.set_reveal_child(False)
+
     def _on_submit(self, _widget: Gtk.Widget) -> None:
+        if self._search_debounce_timer:
+            GLib.source_remove(self._search_debounce_timer)
+            self._search_debounce_timer = None
+        self.app_preview_revealer.set_reveal_child(False)
+
         text = self.entry.get_text().strip()
         if not text or self._is_busy:
             return
