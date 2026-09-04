@@ -15,6 +15,7 @@ from ..core.a11y import DesktopInspector
 from ..core.apps import AppManager
 from ..core.config import CopilotConfig
 from ..core.memory import MemoryManager
+from ..core.web_search import WebSearchClient
 
 logger = logging.getLogger(__name__)
 
@@ -27,10 +28,12 @@ class IntentEngine:
         inspector: DesktopInspector | None = None,
         config: CopilotConfig | None = None,
         memory: MemoryManager | None = None,
+        search_client: WebSearchClient | None = None,
     ):
         self.inspector = inspector or DesktopInspector()
         self.config = config or CopilotConfig.load()
         self.memory = memory or MemoryManager()
+        self.search_client = search_client or WebSearchClient()
         self.llm_provider: BaseLLMProvider = get_llm_provider(self.config)
 
     def reload_config(self, config: CopilotConfig | None = None) -> None:
@@ -231,12 +234,33 @@ class IntentEngine:
             try:
                 # Obtém nomes de alguns apps instalados para dar contexto ao LLM
                 app_names = [a.get_name() for a in AppManager.get_all_apps() if a.get_name()]
-                context_summary = self.memory.get_context_summary()
+                context_parts = [self.memory.get_context_summary()]
+
+                search_results = []
+                if self.config.web_search_enabled and self.search_client.is_search_needed(prompt_clean):
+                    clean_q = self.search_client.clean_search_query(prompt_clean)
+                    search_results = self.search_client.search(clean_q, max_results=3)
+                    if search_results:
+                        context_parts.append(self.search_client.format_results_for_prompt(search_results))
+
+                context_summary = "\n\n".join(p for p in context_parts if p)
+
                 explanation, actions = self.llm_provider.chat(
                     prompt_clean,
                     app_list=app_names,
                     context_summary=context_summary,
                 )
+
+                # Se houve busca na web e a IA não gerou ação de link, oferece a fonte primária
+                if search_results and not any(a.action_type == ActionType.OPEN_URL for a in actions):
+                    primary = search_results[0]
+                    actions.append(
+                        DesktopAction(
+                            ActionType.OPEN_URL,
+                            primary.url,
+                            description=f"Abrir fonte: {primary.title[:45]}...",
+                        )
+                    )
 
                 if not actions:
                     actions = [

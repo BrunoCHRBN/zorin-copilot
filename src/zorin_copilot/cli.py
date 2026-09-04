@@ -13,6 +13,7 @@ from .ai.engine import IntentEngine
 from .core.a11y import DesktopInspector
 from .core.config import CopilotConfig
 from .core.memory import MemoryManager
+from .core.web_search import WebSearchClient
 from .shell.executor import ActionExecutor
 
 
@@ -62,6 +63,11 @@ def build_parser() -> argparse.ArgumentParser:
     action_cmd.add_argument("target", help="alvo da ação")
     action_cmd.add_argument("--param", default="", help="parâmetro adicional")
     action_cmd.add_argument("--dry-run", action="store_true")
+
+    # search
+    search_cmd = sub.add_parser("search", help="realiza pesquisa na web em tempo real")
+    search_cmd.add_argument("query", help="termo a pesquisar na internet")
+    search_cmd.add_argument("--limit", type=int, default=4, help="número máximo de resultados")
 
     return parser
 
@@ -270,6 +276,24 @@ def cmd_memory(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_search(args: argparse.Namespace) -> int:
+    client = WebSearchClient()
+    print(f"Pesquisando na web: '{args.query}'...\n")
+    results = client.search(args.query, max_results=args.limit)
+    if not results:
+        print("Nenhum resultado encontrado na web.")
+        return 1
+
+    print(f"Resultados encontrados ({len(results)}):\n")
+    for idx, res in enumerate(results, 1):
+        print(f"{idx}. {res.title}")
+        print(f"   URL: {res.url}")
+        if res.snippet:
+            print(f"   {res.snippet}")
+        print()
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -280,6 +304,7 @@ def main(argv: list[str] | None = None) -> int:
         "ask": cmd_ask,
         "config": cmd_config,
         "memory": cmd_memory,
+        "search": cmd_search,
     }
     return handlers[args.command](args)
 

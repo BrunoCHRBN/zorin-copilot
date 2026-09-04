@@ -140,7 +140,7 @@ class ProviderParsingTest(unittest.TestCase):
 class IntentEngineTest(unittest.TestCase):
     def setUp(self):
         from zorin_copilot.ai.engine import IntentEngine
-        self.engine = IntentEngine()
+        self.engine = IntentEngine(config=CopilotConfig())
 
     def test_parse_dark_mode(self):
         plan = self.engine.parse("ativar modo escuro")

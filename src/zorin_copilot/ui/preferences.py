@@ -127,6 +127,17 @@ class PreferencesDialog(Adw.PreferencesDialog):
         page.add(self.openai_group)
 
         # ---------------------------------------------------------------------
+        # Grupo: Recursos Adicionais (Pesquisa na Web)
+        # ---------------------------------------------------------------------
+        features_group = Adw.PreferencesGroup(title="Recursos Adicionais")
+        self.web_search_row = Adw.SwitchRow(
+            title="Pesquisa na Web em Tempo Real",
+            subtitle="Permite à IA buscar fatos recentes na internet para responder sobre atualidades.",
+        )
+        features_group.add(self.web_search_row)
+        page.add(features_group)
+
+        # ---------------------------------------------------------------------
         # Grupo: Ações e Teste
         # ---------------------------------------------------------------------
         action_group = Adw.PreferencesGroup(title="Validação e Salvamento")
@@ -269,6 +280,9 @@ class PreferencesDialog(Adw.PreferencesDialog):
         self.openai_key_row.set_text(self.config.openai_api_key)
         self.openai_model_row.set_text(self.config.openai_model)
 
+        # Pesquisa Web
+        self.web_search_row.set_active(self.config.web_search_enabled)
+
         self._update_visibility()
 
     def _on_gemini_model_changed(self, *_args) -> None:
@@ -307,6 +321,9 @@ class PreferencesDialog(Adw.PreferencesDialog):
         cfg.openai_url = self.openai_url_row.get_text().strip() or "https://api.openai.com/v1"
         cfg.openai_api_key = self.openai_key_row.get_text().strip()
         cfg.openai_model = self.openai_model_row.get_text().strip() or "gpt-4o-mini"
+
+        # Pesquisa Web
+        cfg.web_search_enabled = self.web_search_row.get_active()
 
         return cfg
 

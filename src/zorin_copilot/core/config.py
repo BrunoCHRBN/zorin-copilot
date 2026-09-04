@@ -28,6 +28,9 @@ class CopilotConfig:
     openai_url: str = "https://api.openai.com/v1"
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
+
+    # Pesquisa na Web em tempo real
+    web_search_enabled: bool = True
     
     # Prompt de sistema customizável
     system_prompt: str = (
