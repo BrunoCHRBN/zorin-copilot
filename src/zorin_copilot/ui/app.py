@@ -190,10 +190,44 @@ class CopilotWindow(Adw.ApplicationWindow):
         info_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         info_box.set_hexpand(True)
         info_box.set_valign(Gtk.Align.CENTER)
+        info_box.set_margin_end(8)
+
+        # Linha superior: Nome da aplicação + Badge de status + Botão compacto ao lado
+        title_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        title_row.set_valign(Gtk.Align.CENTER)
 
         self.app_preview_title = Gtk.Label(xalign=0)
         self.app_preview_title.add_css_class("heading")
-        info_box.append(self.app_preview_title)
+        title_row.append(self.app_preview_title)
+
+        self.app_preview_badge = Gtk.Label(xalign=0)
+        self.app_preview_badge.add_css_class("caption")
+        self.app_preview_badge.set_valign(Gtk.Align.CENTER)
+        title_row.append(self.app_preview_badge)
+
+        # Botão encolhido e discreto ao lado da aplicação
+        self.app_preview_launch_btn = Gtk.Button()
+        self.app_preview_launch_btn.set_tooltip_text("Abrir este aplicativo agora")
+        self.app_preview_launch_btn.add_css_class("flat")
+        self.app_preview_launch_btn.add_css_class("pill")
+        self.app_preview_launch_btn.set_valign(Gtk.Align.CENTER)
+
+        btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        btn_box.set_margin_start(6)
+        btn_box.set_margin_end(6)
+        btn_icon = Gtk.Image.new_from_icon_name("media-playback-start-symbolic")
+        btn_icon.set_pixel_size(12)
+        btn_box.append(btn_icon)
+
+        btn_label = Gtk.Label(label="Abrir")
+        btn_label.add_css_class("caption")
+        btn_box.append(btn_label)
+
+        self.app_preview_launch_btn.set_child(btn_box)
+        self.app_preview_launch_btn.connect("clicked", self._on_quick_launch_app)
+        title_row.append(self.app_preview_launch_btn)
+
+        info_box.append(title_row)
 
         self.app_preview_subtitle = Gtk.Label(xalign=0)
         self.app_preview_subtitle.add_css_class("caption")
@@ -201,19 +235,6 @@ class CopilotWindow(Adw.ApplicationWindow):
         info_box.append(self.app_preview_subtitle)
 
         self.app_preview_card.append(info_box)
-
-        self.app_preview_badge = Gtk.Label(xalign=1)
-        self.app_preview_badge.add_css_class("caption")
-        self.app_preview_badge.set_valign(Gtk.Align.CENTER)
-        self.app_preview_card.append(self.app_preview_badge)
-
-        self.app_preview_launch_btn = Gtk.Button(label="Abrir Agora ↵")
-        self.app_preview_launch_btn.add_css_class("suggested-action")
-        self.app_preview_launch_btn.add_css_class("pill")
-        self.app_preview_launch_btn.set_valign(Gtk.Align.CENTER)
-        self.app_preview_launch_btn.set_margin_end(10)
-        self.app_preview_launch_btn.connect("clicked", self._on_quick_launch_app)
-        self.app_preview_card.append(self.app_preview_launch_btn)
 
         self.app_preview_revealer.set_child(self.app_preview_card)
         main_box.append(self.app_preview_revealer)
@@ -452,6 +473,7 @@ class CopilotWindow(Adw.ApplicationWindow):
 
             self.app_preview_badge.set_markup("<span foreground='#2ec27e'><b>✓ Instalado</b></span>")
             self.app_preview_launch_btn.set_visible(True)
+            self.app_preview_launch_btn.set_tooltip_text(f"Abrir {friendly_name} agora")
             self.app_preview_revealer.set_reveal_child(True)
         else:
             self._matched_preview_app = None
