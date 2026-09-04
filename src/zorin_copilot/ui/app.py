@@ -90,6 +90,24 @@ def get_action_icon(action: DesktopAction) -> str:
     return "system-run-symbolic"
 
 
+def get_app_subtitle(app: Gio.AppInfo) -> str:
+    """Retorna uma descrição legível e amigável para o aplicativo."""
+    desc = app.get_description()
+    if desc and len(desc) < 65:
+        return desc.strip()
+
+    app_id = (app.get_id() or "").lower()
+    if "chrome-" in app_id or "msedge-" in app_id or "brave-" in app_id:
+        return "Aplicativo Web • Integrado ao desktop"
+
+    exe = app.get_executable()
+    if exe:
+        exe_name = exe.split("/")[-1]
+        return f"Comando '{exe_name}' • Aplicativo instalado"
+
+    return "Aplicativo instalado no Zorin OS"
+
+
 class CopilotWindow(Adw.ApplicationWindow):
     def __init__(self, app: Adw.Application):
         super().__init__(application=app)
@@ -111,35 +129,53 @@ class CopilotWindow(Adw.ApplicationWindow):
         self._update_provider_badge()
 
     def _build_ui(self) -> None:
-        clamp = Adw.Clamp(maximum_size=720)
-        main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
-        main_box.set_margin_top(16)
-        main_box.set_margin_bottom(16)
-        main_box.set_margin_start(18)
-        main_box.set_margin_end(18)
+        self.toolbar_view = Adw.ToolbarView()
 
-        # ---------------------------------------------------------------------
-        # Header / Barra Superior
-        # ---------------------------------------------------------------------
-        header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        
-        title_label = Gtk.Label(label="<b>Zorin Copilot</b>", use_markup=True, xalign=0)
-        title_label.add_css_class("title-2")
-        header_box.append(title_label)
+        # HeaderBar nativa do GNOME / Zorin OS com controles de janela integrados
+        header = Adw.HeaderBar()
+        header.set_title_widget(Adw.WindowTitle(title="Zorin Copilot", subtitle="Assistente Inteligente"))
 
-        self.status_badge = Gtk.Label(xalign=1)
+        # Botão indicador de IA no HeaderBar (clicável para abrir preferências)
+        self.status_badge_btn = Gtk.Button()
+        self.status_badge_btn.add_css_class("flat")
+        self.status_badge_btn.add_css_class("pill")
+        self.status_badge_btn.set_tooltip_text("Clique para alterar modelo ou provedor de IA")
+        self.status_badge_btn.connect("clicked", self._open_settings)
+
+        self.status_badge = Gtk.Label()
+        self.status_badge.add_css_class("caption")
         self.status_badge.add_css_class("dim-label")
-        self.status_badge.set_hexpand(True)
-        header_box.append(self.status_badge)
+        self.status_badge_btn.set_child(self.status_badge)
+        header.pack_end(self.status_badge_btn)
 
-        # Botão de Configurações (⚙️)
         settings_btn = Gtk.Button.new_from_icon_name("preferences-system-symbolic")
         settings_btn.set_tooltip_text("Configurações do Assistente e Chaves de IA")
         settings_btn.add_css_class("flat")
         settings_btn.connect("clicked", self._open_settings)
-        header_box.append(settings_btn)
+        header.pack_end(settings_btn)
 
-        main_box.append(header_box)
+        self.toolbar_view.add_top_bar(header)
+
+        # Controlador de teclado para tecla Escape (limpa busca ou fecha)
+        key_ctrl = Gtk.EventControllerKey()
+        def on_key_pressed(_ctrl, keyval, _keycode, _state):
+            if keyval == Gdk.KEY_Escape:
+                if self.entry.get_text():
+                    self.entry.set_text("")
+                    return True
+                else:
+                    self.close()
+                    return True
+            return False
+        key_ctrl.connect("key-pressed", on_key_pressed)
+        self.add_controller(key_ctrl)
+
+        clamp = Adw.Clamp(maximum_size=720)
+        main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        main_box.set_margin_top(12)
+        main_box.set_margin_bottom(12)
+        main_box.set_margin_start(16)
+        main_box.set_margin_end(16)
 
         # ---------------------------------------------------------------------
         # Campo de Entrada (Prompt)
@@ -248,45 +284,56 @@ class CopilotWindow(Adw.ApplicationWindow):
 
         content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
 
-        # 1. Tela de Boas-vindas com Sugestões de 1-Clique (Empty State)
-        self.welcome_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        # 1. Tela de Boas-vindas com Sugestões Rápidas (Compacta e Elegante)
+        self.welcome_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
         self.welcome_box.set_valign(Gtk.Align.CENTER)
-        self.welcome_box.set_vexpand(True)
-        self.welcome_box.set_margin_top(8)
-        self.welcome_box.set_margin_bottom(8)
+        self.welcome_box.set_halign(Gtk.Align.CENTER)
+        self.welcome_box.set_margin_top(20)
+        self.welcome_box.set_margin_bottom(12)
 
-        welcome_status = Adw.StatusPage()
-        welcome_status.set_icon_name("system-help-symbolic")
-        welcome_status.set_title("Como posso ajudar?")
-        welcome_status.set_description("Peça tarefas do desktop, consulte seus projetos ou pesquise na web em tempo real.")
+        header_welcome = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        header_welcome.set_halign(Gtk.Align.CENTER)
 
-        chips_flow = Gtk.FlowBox()
-        chips_flow.set_selection_mode(Gtk.SelectionMode.NONE)
-        chips_flow.set_max_children_per_line(2)
-        chips_flow.set_min_children_per_line(1)
-        chips_flow.set_row_spacing(8)
-        chips_flow.set_column_spacing(8)
-        chips_flow.set_halign(Gtk.Align.CENTER)
-        chips_flow.set_margin_top(10)
+        welcome_icon = Gtk.Image.new_from_icon_name("system-help-symbolic")
+        welcome_icon.set_pixel_size(36)
+        welcome_icon.add_css_class("accent")
+        header_welcome.append(welcome_icon)
+
+        welcome_title = Gtk.Label(label="<b>Como posso ajudar hoje?</b>", use_markup=True)
+        welcome_title.add_css_class("title-3")
+        header_welcome.append(welcome_title)
+
+        welcome_desc = Gtk.Label(label="Peça tarefas no desktop, consulte seus projetos ou pesquise na web")
+        welcome_desc.add_css_class("caption")
+        welcome_desc.add_css_class("dim-label")
+        header_welcome.append(welcome_desc)
+
+        self.welcome_box.append(header_welcome)
+
+        # Grid 2x2 com chips rápidos e compactos
+        grid = Gtk.Grid()
+        grid.set_column_spacing(10)
+        grid.set_row_spacing(10)
+        grid.set_halign(Gtk.Align.CENTER)
+        grid.set_margin_top(6)
 
         suggestions = [
-            ("📁 Onde fica meu projeto de trabalho?", "onde fica meu projeto de trabalho ?"),
-            ("⚡ Ativar modo escuro", "ativar modo escuro"),
-            ("🌐 Notícias recentes sobre Linux", "pesquise notícias recentes sobre Linux"),
-            ("🖥️ Abrir o Terminal", "abrir terminal"),
+            ("📁 Onde fica meu projeto de trabalho?", "onde fica meu projeto de trabalho ?", 0, 0),
+            ("⚡ Ativar modo escuro", "ativar modo escuro", 1, 0),
+            ("🌐 Notícias recentes sobre Linux", "pesquise notícias recentes sobre Linux", 0, 1),
+            ("🖥️ Abrir o Terminal", "abrir terminal", 1, 1),
         ]
 
-        for label_text, prompt_val in suggestions:
+        for label_text, prompt_val, col, row in suggestions:
             btn = Gtk.Button(label=label_text)
+            btn.add_css_class("card")
             btn.add_css_class("pill")
-            btn.add_css_class("flat")
             def make_chip_click(p=prompt_val):
                 return lambda _: self._trigger_prompt(p)
             btn.connect("clicked", make_chip_click())
-            chips_flow.append(btn)
+            grid.attach(btn, col, row, 1, 1)
 
-        welcome_status.set_child(chips_flow)
-        self.welcome_box.append(welcome_status)
+        self.welcome_box.append(grid)
         content_box.append(self.welcome_box)
 
         # 2. Grupo: Resposta / Explicação em Card Nativo
@@ -405,7 +452,8 @@ class CopilotWindow(Adw.ApplicationWindow):
         main_box.append(scrolled)
 
         clamp.set_child(main_box)
-        self.set_content(clamp)
+        self.toolbar_view.set_content(clamp)
+        self.set_content(self.toolbar_view)
 
     def _update_provider_badge(self) -> None:
         if self.config.is_configured():
@@ -439,7 +487,17 @@ class CopilotWindow(Adw.ApplicationWindow):
             self._search_debounce_timer = None
 
         text = entry.get_text().strip()
-        if not text or len(text) < 2:
+        if not text:
+            self.app_preview_revealer.set_reveal_child(False)
+            self._matched_preview_app = None
+            if not self.answer_group.get_visible():
+                self.welcome_box.set_visible(True)
+            return
+
+        # Esconde imediatamente a tela de sugestões ao começar a digitar
+        self.welcome_box.set_visible(False)
+
+        if len(text) < 2:
             self.app_preview_revealer.set_reveal_child(False)
             self._matched_preview_app = None
             return
@@ -468,8 +526,8 @@ class CopilotWindow(Adw.ApplicationWindow):
                 self.app_preview_icon.set_from_icon_name("application-x-executable-symbolic")
 
             self.app_preview_title.set_markup(f"<b>{html.escape(friendly_name)}</b>")
-            exe_or_id = app.get_id() or app.get_executable() or "desktop"
-            self.app_preview_subtitle.set_text(f"{exe_or_id} • Aplicativo instalado no Zorin OS")
+            subtitle = get_app_subtitle(app)
+            self.app_preview_subtitle.set_text(subtitle)
 
             self.app_preview_badge.set_markup("<span foreground='#2ec27e'><b>✓ Instalado</b></span>")
             self.app_preview_launch_btn.set_visible(True)
