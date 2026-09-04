@@ -63,10 +63,16 @@ class PreferencesDialog(Adw.PreferencesDialog):
         self.gemini_key_row = Adw.PasswordEntryRow(title="Chave de API (Gemini)")
         self.gemini_group.add(self.gemini_key_row)
 
-        self.gemini_models_list = ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
+        self.gemini_models_list = [
+            "gemini-2.5-flash",
+            "gemini-2.5-pro",
+            "gemini-2.0-flash",
+            "gemini-1.5-flash",
+            "gemini-1.5-pro",
+        ]
         self.gemini_model_row = Adw.ComboRow(
             title="Modelo Gemini",
-            subtitle="gemini-2.5-flash é ultrarrápido e ideal para o desktop",
+            subtitle="gemini-2.5-flash (rápido) ou gemini-2.5-pro (raciocínio avançado)",
             model=Gtk.StringList.new(self.gemini_models_list),
         )
         self.gemini_group.add(self.gemini_model_row)

@@ -39,6 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
     config_cmd = sub.add_parser("config", help="gerencia configurações de IA")
     config_cmd.add_argument("--show", action="store_true", help="exibe configuração atual")
     config_cmd.add_argument("--set-gemini-key", help="define a chave de API do Gemini")
+    config_cmd.add_argument("--set-gemini-model", help="define o modelo Gemini (ex: gemini-2.5-flash, gemini-2.5-pro)")
     config_cmd.add_argument("--set-provider", choices=["gemini", "ollama", "openai"], help="define o provedor ativo")
 
     # action
@@ -130,6 +131,11 @@ def cmd_config(args: argparse.Namespace) -> int:
         cfg.gemini_api_key = args.set_gemini_key
         changed = True
         print("Chave Gemini atualizada.")
+
+    if args.set_gemini_model:
+        cfg.gemini_model = args.set_gemini_model
+        changed = True
+        print(f"Modelo Gemini alterado para '{args.set_gemini_model}'.")
 
     if args.set_provider:
         cfg.provider = args.set_provider
