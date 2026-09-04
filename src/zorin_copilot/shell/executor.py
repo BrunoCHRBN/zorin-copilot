@@ -55,6 +55,9 @@ class ActionExecutor:
         if action.action_type == ActionType.LAUNCH_APP:
             return self._launch_app(action.target)
 
+        if action.action_type == ActionType.OPEN_URL:
+            return self._open_url(action.target)
+
         if action.action_type == ActionType.SYSTEM_CONTROL:
             return self._control_system(action.target, action.params)
 
@@ -97,6 +100,24 @@ class ActionExecutor:
             success=False,
             message=f"Aplicativo '{app_name}' não foi encontrado no Zorin OS.",
         )
+
+    def _open_url(self, url: str) -> ExecutionReport:
+        act = DesktopAction(ActionType.OPEN_URL, url)
+        if not url.startswith(("http://", "https://", "mailto:")):
+            url = f"https://{url}"
+        try:
+            from gi.repository import Gio
+            ok = Gio.AppInfo.launch_default_for_uri(url, None)
+            if ok:
+                return ExecutionReport(action=act, success=True, message=f"Endereço '{url}' aberto no navegador padrão.")
+        except Exception:
+            pass
+
+        try:
+            subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return ExecutionReport(action=act, success=True, message=f"Endereço '{url}' aberto com xdg-open.")
+        except Exception as exc:
+            return ExecutionReport(action=act, success=False, message=f"Erro ao abrir endereço '{url}': {exc}")
 
     def _control_system(self, target: str, params: dict) -> ExecutionReport:
         act = DesktopAction(ActionType.SYSTEM_CONTROL, target, params)

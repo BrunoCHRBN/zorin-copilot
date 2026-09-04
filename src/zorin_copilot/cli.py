@@ -1,4 +1,4 @@
-# Decisão de design: CLI espelha todas as capacidades do núcleo para que qualquer fluxo possa ser testado e auditado via terminal.
+# Decisão de design: CLI espelha todas as capacidades do núcleo para que qualquer fluxo possa ser testado, scriptado e auditado via terminal.
 
 """Interface de linha de comando para o Zorin Copilot."""
 
@@ -9,25 +9,41 @@ import sys
 
 from . import __version__
 from .ai.actions import ActionPlan, ActionType, DesktopAction
+from .ai.engine import IntentEngine
 from .core.a11y import DesktopInspector
+from .core.config import CopilotConfig
 from .shell.executor import ActionExecutor
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="zorin-copilot",
+        prog="zorin-copilot-cli",
         description="Assistente de IA integrado ao desktop Zorin OS.",
     )
     parser.add_argument("--version", action="version", version=f"zorin-copilot {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    # doctor
     sub.add_parser("doctor", help="diagnostica os barramentos AT-SPI2, Wayland e GNOME")
 
+    # inspect
     inspect_cmd = sub.add_parser("inspect", help="inspeciona elementos de acessibilidade na tela")
     inspect_cmd.add_argument("app_name", nargs="?", default="", help="nome da aplicação a inspecionar")
 
+    # ask
+    ask_cmd = sub.add_parser("ask", help="envia uma pergunta ou comando para a IA")
+    ask_cmd.add_argument("prompt", help="texto da solicitação (ex: 'como acessar o gmail', 'abrir steam')")
+    ask_cmd.add_argument("--execute", action="store_true", help="executa automaticamente as ações propostas")
+
+    # config
+    config_cmd = sub.add_parser("config", help="gerencia configurações de IA")
+    config_cmd.add_argument("--show", action="store_true", help="exibe configuração atual")
+    config_cmd.add_argument("--set-gemini-key", help="define a chave de API do Gemini")
+    config_cmd.add_argument("--set-provider", choices=["gemini", "ollama", "openai"], help="define o provedor ativo")
+
+    # action
     action_cmd = sub.add_parser("action", help="executa uma ação direta no desktop")
-    action_cmd.add_argument("action_type", choices=["launch", "notify", "click"])
+    action_cmd.add_argument("action_type", choices=["launch", "notify", "click", "url"])
     action_cmd.add_argument("target", help="alvo da ação")
     action_cmd.add_argument("--param", default="", help="parâmetro adicional")
     action_cmd.add_argument("--dry-run", action="store_true")
@@ -61,7 +77,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     except Exception as exc:
         checks.append(("Barramento AT-SPI2 (A11y)", False, str(exc)))
 
-    # 3. notify-send
+    # 3. Provedor de IA
+    cfg = CopilotConfig.load()
+    configured = cfg.is_configured()
+    checks.append((f"Provedor IA ({cfg.provider})", configured, "configurado" if configured else "chave não informada (use ⚙️ na UI)"))
+
+    # 4. notify-send
     import shutil
     has_notify = shutil.which("notify-send") is not None
     checks.append(("Comando notify-send", has_notify, "para notificações de desktop"))
@@ -75,6 +96,59 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     print(f"\n{len(checks) - failed}/{len(checks)} verificações OK")
     return 1 if failed else 0
+
+
+def cmd_ask(args: argparse.Namespace) -> int:
+    engine = IntentEngine()
+    print(f"Analisando: '{args.prompt}'...\n")
+    plan = engine.parse(args.prompt)
+
+    print(f"💡 Resposta / Pensamento:\n{plan.thought}\n")
+
+    if plan.actions:
+        print("🎯 Ações Propostas:")
+        for idx, act in enumerate(plan.actions, 1):
+            print(f"  {idx}. [{act.action_type.value}] {act.describe()}")
+
+        if args.execute:
+            print("\nExecutando plano...")
+            executor = ActionExecutor()
+            reports = executor.execute_plan(plan)
+            for r in reports:
+                print(f"  {'✓' if r.success else '✗'} {r.message}")
+    else:
+        print("Nenhuma ação de desktop necessária.")
+
+    return 0
+
+
+def cmd_config(args: argparse.Namespace) -> int:
+    cfg = CopilotConfig.load()
+    changed = False
+
+    if args.set_gemini_key:
+        cfg.gemini_api_key = args.set_gemini_key
+        changed = True
+        print("Chave Gemini atualizada.")
+
+    if args.set_provider:
+        cfg.provider = args.set_provider
+        changed = True
+        print(f"Provedor alterado para '{args.set_provider}'.")
+
+    if changed:
+        cfg.save()
+        print("Configuração salva com sucesso.")
+
+    if args.show or not changed:
+        print("Configuração do Zorin Copilot:")
+        print(f"  Provedor ativo: {cfg.provider}")
+        print(f"  Gemini Configurado: {'Sim' if bool(cfg.gemini_api_key) else 'Não'}")
+        print(f"  Gemini Modelo: {cfg.gemini_model}")
+        print(f"  Ollama URL: {cfg.ollama_url} (Modelo: {cfg.ollama_model})")
+        print(f"  Arquivo: {cfg.config_file()}")
+
+    return 0
 
 
 def cmd_inspect(args: argparse.Namespace) -> int:
@@ -107,6 +181,7 @@ def cmd_action(args: argparse.Namespace) -> int:
         "launch": ActionType.LAUNCH_APP,
         "notify": ActionType.NOTIFY,
         "click": ActionType.CLICK,
+        "url": ActionType.OPEN_URL,
     }
     action_type = type_map[args.action_type]
     params = {}
@@ -130,6 +205,8 @@ def main(argv: list[str] | None = None) -> int:
         "doctor": cmd_doctor,
         "inspect": cmd_inspect,
         "action": cmd_action,
+        "ask": cmd_ask,
+        "config": cmd_config,
     }
     return handlers[args.command](args)
 

@@ -13,6 +13,7 @@ class ActionType(str, Enum):
     CLICK = "click"
     TYPE_TEXT = "type_text"
     LAUNCH_APP = "launch_app"
+    OPEN_URL = "open_url"
     SYSTEM_CONTROL = "system_control"
     NOTIFY = "notify"
     WINDOW_LAYOUT = "window_layout"
@@ -33,6 +34,8 @@ class DesktopAction:
             return self.description
         if self.action_type == ActionType.LAUNCH_APP:
             return f"Abrir aplicativo '{self.target}'"
+        if self.action_type == ActionType.OPEN_URL:
+            return f"Abrir link no navegador: '{self.target}'"
         if self.action_type == ActionType.SYSTEM_CONTROL:
             return f"Ajustar sistema: {self.target}"
         if self.action_type == ActionType.CLICK:
