@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zorin-copilot"
+version = "0.1.0"
+description = "Assistente de IA integrado ao desktop Zorin OS (GNOME 46 / Wayland)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "Bruno" },
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: X11 Applications :: Gnome",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+]
+dependencies = [
+    "PyGObject>=3.42.0",
+    "requests>=2.28.0",
+]
+
+[project.scripts]
+zorin-copilot = "zorin_copilot.ui.app:main"
+zorin-copilot-cli = "zorin_copilot.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
