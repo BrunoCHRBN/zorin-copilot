@@ -74,6 +74,22 @@ class MemoryManager:
                     updated_at TEXT NOT NULL
                 )
             """)
+
+            # 4. Tabela de tópicos e sessões de chat salvas
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS chat_topics (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    turn_count INTEGER NOT NULL,
+                    is_pinned INTEGER NOT NULL DEFAULT 1,
+                    turns_json TEXT NOT NULL
+                )
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_chat_topics_updated ON chat_topics (updated_at DESC)
+            """)
             conn.commit()
 
     # =========================================================================
@@ -287,10 +303,128 @@ class MemoryManager:
 
         return "\n".join(lines)
 
+    # =========================================================================
+    # Histórico de Tópicos e Sessões de Chat
+    # =========================================================================
+
+    def save_chat_topic(
+        self,
+        topic_id: str,
+        title: str,
+        turns: list[dict[str, Any]],
+        is_pinned: bool = True,
+        created_at: str | None = None,
+    ) -> str:
+        """Salva ou atualiza um tópico de chat no banco de dados."""
+        now = datetime.now().isoformat()
+        created = created_at or now
+        turns_json = json.dumps(turns, ensure_ascii=False)
+        turn_count = len(turns)
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO chat_topics (id, title, created_at, updated_at, turn_count, is_pinned, turns_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    title=excluded.title,
+                    updated_at=excluded.updated_at,
+                    turn_count=excluded.turn_count,
+                    is_pinned=excluded.is_pinned,
+                    turns_json=excluded.turns_json
+                """,
+                (topic_id, title, created, now, turn_count, 1 if is_pinned else 0, turns_json),
+            )
+            conn.commit()
+        return topic_id
+
+    def list_chat_topics(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Lista tópicos salvos ordenados pelo mais recente."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, title, created_at, updated_at, turn_count, is_pinned, turns_json
+                FROM chat_topics
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            rows = cursor.fetchall()
+
+        topics: list[dict[str, Any]] = []
+        for r in rows:
+            try:
+                parsed_turns = json.loads(r["turns_json"])
+            except Exception:
+                parsed_turns = []
+            preview = parsed_turns[-1]["answer"][:120] if parsed_turns else ""
+            topics.append({
+                "id": r["id"],
+                "title": r["title"],
+                "created_at": r["created_at"],
+                "updated_at": r["updated_at"],
+                "turn_count": r["turn_count"],
+                "is_pinned": bool(r["is_pinned"]),
+                "turns": parsed_turns,
+                "preview": preview,
+            })
+        return topics
+
+    def get_chat_topic(self, topic_id: str) -> dict[str, Any] | None:
+        """Busca um tópico específico com todas as suas mensagens."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, title, created_at, updated_at, turn_count, is_pinned, turns_json
+                FROM chat_topics
+                WHERE id = ?
+                """,
+                (topic_id,),
+            )
+            row = cursor.fetchone()
+
+        if not row:
+            return None
+
+        try:
+            turns = json.loads(row["turns_json"])
+        except Exception:
+            turns = []
+
+        return {
+            "id": row["id"],
+            "title": row["title"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "turn_count": row["turn_count"],
+            "is_pinned": bool(row["is_pinned"]),
+            "turns": turns,
+        }
+
+    def delete_chat_topic(self, topic_id: str) -> bool:
+        """Exclui um tópico do histórico."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM chat_topics WHERE id = ?", (topic_id,))
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def clear_all_chat_topics(self) -> None:
+        """Remove todos os tópicos salvos."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM chat_topics")
+            conn.commit()
+
     def clear_all(self) -> None:
         """Limpa toda a base de memória e histórico."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM action_logs")
             cursor.execute("DELETE FROM knowledge_facts")
+            cursor.execute("DELETE FROM chat_topics")
             conn.commit()

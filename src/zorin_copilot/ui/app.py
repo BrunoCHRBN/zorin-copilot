@@ -7,6 +7,7 @@ from __future__ import annotations
 import html
 import re
 import threading
+from datetime import datetime
 import gi
 
 gi.require_version("Gtk", "4.0")
@@ -25,6 +26,26 @@ from ..core.shortcuts import ShortcutManager
 from ..shell.executor import ActionExecutor
 from .preferences import PreferencesDialog
 from .style import setup_glass_window
+
+
+def format_relative_timestamp(iso_str: str) -> str:
+    """Formata timestamp ISO de forma amigável para exibição no histórico de tópicos."""
+    if not iso_str:
+        return ""
+    try:
+        dt = datetime.fromisoformat(iso_str)
+        now = datetime.now()
+        time_part = dt.strftime("%H:%M")
+        if dt.date() == now.date():
+            return f"Hoje às {time_part}"
+        elif (now.date() - dt.date()).days == 1:
+            return f"Ontem às {time_part}"
+        elif dt.year == now.year:
+            return dt.strftime("%d/%m") + f" às {time_part}"
+        else:
+            return dt.strftime("%d/%m/%Y")
+    except Exception:
+        return iso_str[:16].replace("T", " ")
 
 
 def format_markdown_to_markup(text: str) -> str:
@@ -159,6 +180,23 @@ class CopilotWindow(Adw.ApplicationWindow):
         header = Adw.HeaderBar()
         header.set_title_widget(Adw.WindowTitle(title="Zorin Copilot", subtitle="Assistente Inteligente"))
 
+        # Botão de Configurações
+        settings_btn = Gtk.Button.new_from_icon_name("preferences-system-symbolic")
+        settings_btn.set_tooltip_text("Configurações do Assistente e Chaves de IA")
+        settings_btn.add_css_class("flat")
+        settings_btn.add_css_class("circular")
+        settings_btn.add_css_class("glass-icon-btn")
+        settings_btn.connect("clicked", self._open_settings)
+
+        # Botão de Histórico de Tópicos
+        self.history_btn = Gtk.MenuButton()
+        self.history_btn.set_icon_name("document-open-recent-symbolic")
+        self.history_btn.set_tooltip_text("Histórico de Tópicos Salvos (Ctrl+H)")
+        self.history_btn.add_css_class("flat")
+        self.history_btn.add_css_class("circular")
+        self.history_btn.add_css_class("glass-icon-btn")
+        self._build_history_popover()
+
         # Botão indicador de IA no HeaderBar (clicável para abrir preferências)
         self.status_badge_btn = Gtk.Button()
         self.status_badge_btn.add_css_class("flat")
@@ -170,19 +208,15 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.status_badge = Gtk.Label()
         self.status_badge.add_css_class("caption")
         self.status_badge_btn.set_child(self.status_badge)
-        header.pack_end(self.status_badge_btn)
 
-        settings_btn = Gtk.Button.new_from_icon_name("preferences-system-symbolic")
-        settings_btn.set_tooltip_text("Configurações do Assistente e Chaves de IA")
-        settings_btn.add_css_class("flat")
-        settings_btn.add_css_class("circular")
-        settings_btn.add_css_class("glass-icon-btn")
-        settings_btn.connect("clicked", self._open_settings)
+        # Ordem pack_end: settings (direita), history (meio), status badge (esquerda)
         header.pack_end(settings_btn)
+        header.pack_end(self.history_btn)
+        header.pack_end(self.status_badge_btn)
 
         self.toolbar_view.add_top_bar(header)
 
-        # Controlador de teclado para tecla Escape e atalhos de tópico (Ctrl+P, Ctrl+N, Ctrl+Q)
+        # Controlador de teclado para tecla Escape e atalhos de tópico (Ctrl+P, Ctrl+N, Ctrl+H, Ctrl+Q)
         key_ctrl = Gtk.EventControllerKey()
         def on_key_pressed(_ctrl, keyval, _keycode, state):
             is_ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
@@ -191,6 +225,12 @@ class CopilotWindow(Adw.ApplicationWindow):
                 if app:
                     app.quit()
                 return True
+            if is_ctrl and keyval in (Gdk.KEY_h, Gdk.KEY_H):
+                if self.history_popover.get_visible():
+                    self.history_popover.popdown()
+                else:
+                    self.history_popover.popup()
+                return True
             if is_ctrl and keyval in (Gdk.KEY_p, Gdk.KEY_P):
                 self._on_toggle_pin()
                 return True
@@ -198,6 +238,9 @@ class CopilotWindow(Adw.ApplicationWindow):
                 self._on_new_topic()
                 return True
             if keyval == Gdk.KEY_Escape:
+                if self.history_popover.get_visible():
+                    self.history_popover.popdown()
+                    return True
                 if self.entry.get_text():
                     self.entry.set_text("")
                     return True
@@ -560,8 +603,15 @@ class CopilotWindow(Adw.ApplicationWindow):
         main_box.append(scrolled)
 
         clamp.set_child(main_box)
-        self.toolbar_view.set_content(clamp)
+        self.toast_overlay = Adw.ToastOverlay()
+        self.toast_overlay.set_child(clamp)
+        self.toolbar_view.set_content(self.toast_overlay)
         self.set_content(self.toolbar_view)
+
+    def show_toast(self, message: str) -> None:
+        """Exibe uma notificação flutuante elegante na janela."""
+        toast = Adw.Toast.new(message)
+        self.toast_overlay.add_toast(toast)
 
     def _update_provider_badge(self) -> None:
         if self.config.is_configured():
@@ -715,6 +765,8 @@ class CopilotWindow(Adw.ApplicationWindow):
             # Registra o turno na sessão de tópicos
             if prompt_text:
                 self.session.record_turn(prompt=prompt_text, answer=explanation_text)
+                if self.session.is_pinned:
+                    self._save_current_session()
                 self._update_pin_ui()
 
             # Badge da fonte: Web ou Memória
@@ -859,43 +911,223 @@ class CopilotWindow(Adw.ApplicationWindow):
 
             GLib.timeout_add(2000, reset_copy)
 
+    def _build_history_popover(self) -> None:
+        """Constrói o popover de histórico de tópicos associado ao botão do HeaderBar."""
+        self.history_popover = Gtk.Popover()
+        self.history_popover.set_size_request(360, 420)
+        self.history_btn.set_popover(self.history_popover)
+
+        popover_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        popover_box.set_margin_top(12)
+        popover_box.set_margin_bottom(12)
+        popover_box.set_margin_start(12)
+        popover_box.set_margin_end(12)
+
+        # Cabeçalho do Popover
+        hdr_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        title_lbl = Gtk.Label(label="<b>Histórico de Tópicos</b>", use_markup=True, xalign=0)
+        title_lbl.set_hexpand(True)
+        hdr_box.append(title_lbl)
+
+        new_btn = Gtk.Button(label="+ Novo Chat")
+        new_btn.set_tooltip_text("Iniciar um novo chat pontual limpo (Ctrl+N)")
+        new_btn.add_css_class("flat")
+        new_btn.add_css_class("suggested-action")
+        new_btn.connect("clicked", self._on_popover_new_chat)
+        hdr_box.append(new_btn)
+
+        popover_box.append(hdr_box)
+
+        sep = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
+        popover_box.append(sep)
+
+        # Lista rolável de tópicos
+        self.history_scrolled = Gtk.ScrolledWindow()
+        self.history_scrolled.set_vexpand(True)
+        self.history_scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+
+        self.history_listbox = Gtk.ListBox()
+        self.history_listbox.add_css_class("boxed-list")
+        self.history_listbox.connect("row-activated", self._on_history_row_activated)
+        self.history_scrolled.set_child(self.history_listbox)
+        popover_box.append(self.history_scrolled)
+
+        # Rodapé com botão para limpar tudo
+        self.clear_history_btn = Gtk.Button(label="Limpar Todo o Histórico")
+        self.clear_history_btn.add_css_class("flat")
+        self.clear_history_btn.add_css_class("destructive-action")
+        self.clear_history_btn.connect("clicked", self._on_clear_all_history)
+        popover_box.append(self.clear_history_btn)
+
+        self.history_popover.set_child(popover_box)
+        self.history_popover.connect("show", lambda _p: self._populate_history_list())
+
+    def _on_popover_new_chat(self, _btn: Gtk.Button) -> None:
+        self.history_popover.popdown()
+        self._on_new_topic()
+
+    def _populate_history_list(self) -> None:
+        """Preenche o ListBox com os tópicos históricos recuperados do SQLite."""
+        while row := self.history_listbox.get_first_child():
+            self.history_listbox.remove(row)
+
+        topics = self.engine.memory.list_chat_topics(limit=50)
+        if not topics:
+            empty_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            empty_box.set_valign(Gtk.Align.CENTER)
+            empty_box.set_margin_top(40)
+            empty_box.set_margin_bottom(40)
+
+            icon = Gtk.Image.new_from_icon_name("document-open-recent-symbolic")
+            icon.set_pixel_size(36)
+            icon.add_css_class("dim-label")
+            empty_box.append(icon)
+
+            lbl = Gtk.Label(
+                label="<b>Nenhum tópico salvo ainda</b>\n<span size='small' alpha='70%'>Fixe um tópico (📌) para mantê-lo\ne continuar o raciocínio depois.</span>",
+                use_markup=True,
+                justify=Gtk.Justification.CENTER,
+            )
+            empty_box.append(lbl)
+            self.history_listbox.append(empty_box)
+            self.clear_history_btn.set_visible(False)
+            return
+
+        self.clear_history_btn.set_visible(True)
+
+        for topic in topics:
+            row = Adw.ActionRow()
+            is_current = bool(self.session.is_pinned and self.session.id == topic["id"])
+            bullet = "● " if is_current else ""
+            clean_title = topic["title"] or "Tópico Sem Título"
+            if len(clean_title) > 42:
+                clean_title = clean_title[:39] + "..."
+            row.set_title(f"{bullet}{html.escape(clean_title)}")
+
+            turns_num = topic["turn_count"]
+            msg_str = f"{turns_num} {'pergunta' if turns_num == 1 else 'perguntas'}"
+            time_str = format_relative_timestamp(topic["updated_at"])
+            row.set_subtitle(f"{msg_str} • {time_str}")
+
+            row.set_activatable(True)
+            row._topic_id = topic["id"]
+
+            del_btn = Gtk.Button.new_from_icon_name("user-trash-symbolic")
+            del_btn.add_css_class("flat")
+            del_btn.add_css_class("circular")
+            del_btn.set_tooltip_text("Excluir este tópico")
+            del_btn.set_valign(Gtk.Align.CENTER)
+            tid = topic["id"]
+            del_btn.connect("clicked", lambda _b, t_id=tid: self._on_delete_topic(t_id))
+            row.add_suffix(del_btn)
+
+            self.history_listbox.append(row)
+
+    def _on_history_row_activated(self, _listbox, row) -> None:
+        topic_id = getattr(row, "_topic_id", None)
+        if not topic_id:
+            return
+        self.history_popover.popdown()
+        self._resume_topic(topic_id)
+
+    def _resume_topic(self, topic_id: str) -> None:
+        """Carrega e retoma uma sessão histórica de tópicos."""
+        # Se a sessão atual estiver fixada e possuir turnos, garante seu salvamento prévio
+        if self.session.is_pinned and self.session.turns:
+            self._save_current_session()
+
+        topic_data = self.engine.memory.get_chat_topic(topic_id)
+        if not topic_data:
+            return
+
+        self.session.load_from_dict(topic_data)
+        self._update_pin_ui()
+
+        if self.session.turns:
+            last_turn = self.session.turns[-1]
+            self.entry.set_text("")
+            self._raw_answer_text = last_turn.answer
+            self.answer_label.set_markup(format_markdown_to_markup(last_turn.answer))
+            self.actions_group.set_visible(False)
+            self.answer_group.set_visible(True)
+            self.welcome_box.set_visible(False)
+            self.exec_status.set_text("📌 Tópico retomado! Digite sua próxima pergunta para continuar o raciocínio.")
+        else:
+            self.welcome_box.set_visible(True)
+            self.answer_group.set_visible(False)
+
+        self.entry.grab_focus()
+        self.show_toast(f'Tópico "{self.session.title}" retomado!')
+
+    def _save_current_session(self) -> None:
+        """Persiste a sessão atual no banco de dados de tópicos."""
+        if not self.session.is_pinned or not self.session.turns:
+            return
+        self.engine.memory.save_chat_topic(
+            topic_id=self.session.id,
+            title=self.session.title or (self.session.turns[0].prompt[:50] if self.session.turns else "Tópico"),
+            turns=[t.to_dict() for t in self.session.turns],
+            is_pinned=True,
+            created_at=self.session.created_at,
+        )
+
+    def _on_delete_topic(self, topic_id: str) -> None:
+        self.engine.memory.delete_chat_topic(topic_id)
+        if self.session.id == topic_id:
+            self._on_new_topic()
+        self._populate_history_list()
+        self.show_toast("Tópico excluído do histórico.")
+
+    def _on_clear_all_history(self, _btn: Gtk.Button) -> None:
+        self.engine.memory.clear_all_chat_topics()
+        self.session.reset_new()
+        self._update_pin_ui()
+        self._populate_history_list()
+        self.show_toast("Histórico de tópicos completamente limpo.")
+
     def _update_pin_ui(self) -> None:
         """Atualiza a aparência do botão de alfinete e o banner do tópico ativo."""
         turns = self.session.turn_count
         if self.session.is_pinned:
             self.pin_btn.add_css_class("suggested-action")
-            self.pin_btn.set_tooltip_text("Tópico fixado. Clique ou pressione Ctrl+P para desafixar.")
+            self.pin_btn.set_tooltip_text("Tópico fixado no histórico. Clique ou pressione Ctrl+P para desafixar.")
             self.pin_btn_label.set_text("Tópico Fixado ✓")
             msg_str = f"{turns} {'mensagem' if turns == 1 else 'mensagens'}"
+            title_display = f' "{html.escape(self.session.title)}"' if self.session.title else ""
             self.topic_info_lbl.set_markup(
-                f"<b>📌 Tópico Fixado</b> ({msg_str}) • As próximas perguntas manterão este contexto"
+                f"<b>📌 Tópico{title_display}</b> ({msg_str}) • As próximas perguntas manterão este contexto"
             )
             self.topic_revealer.set_reveal_child(True)
         else:
             self.pin_btn.remove_css_class("suggested-action")
-            self.pin_btn.set_tooltip_text("Fixar este tópico para manter o contexto em perguntas seguintes (Ctrl+P)")
+            self.pin_btn.set_tooltip_text("Fixar este tópico para manter o contexto e salvar no histórico (Ctrl+P)")
             self.pin_btn_label.set_text("Fixar Tópico")
             self.topic_revealer.set_reveal_child(False)
 
     def _on_toggle_pin(self, _btn: Gtk.Button | None = None) -> None:
         """Alterna o estado de fixação do tópico ativo."""
+        was_pinned = self.session.is_pinned
         self.session.toggle_pin()
         self._update_pin_ui()
-        if self.session.is_pinned:
-            self.exec_status.set_text("📌 Tópico fixado! As próximas perguntas manterão este contexto.")
+        if not was_pinned and self.session.is_pinned:
+            if self.session.turns:
+                self._save_current_session()
+            self.exec_status.set_text("📌 Tópico fixado e salvo no histórico! Próximas perguntas manterão este contexto.")
         else:
-            self.exec_status.set_text("Contexto desafixado. As próximas perguntas serão independentes.")
+            self.exec_status.set_text("Contexto desafixado. O 'Chat de Agora' voltou a ser pontual e independente.")
 
     def _on_new_topic(self, _btn: Gtk.Button | None = None) -> None:
-        """Desafixa o tópico e reinicia a tela com contexto limpo."""
-        self.session.unpin()
+        """Salva o tópico atual (se fixado) e reinicia a tela com contexto limpo (Chat de Agora)."""
+        if self.session.is_pinned and self.session.turns:
+            self._save_current_session()
+        self.session.reset_new()
         self._update_pin_ui()
         self.entry.set_text("")
         self.answer_group.set_visible(False)
         self.actions_group.set_visible(False)
         self.welcome_box.set_visible(True)
         self.entry.grab_focus()
-        self.exec_status.set_text("Novo tópico limpo iniciado.")
+        self.exec_status.set_text("Novo chat de agora iniciado (perguntas pontuais).")
 
 
 class ZorinCopilotApp(Adw.Application):
