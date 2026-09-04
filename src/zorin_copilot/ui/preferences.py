@@ -64,18 +64,25 @@ class PreferencesDialog(Adw.PreferencesDialog):
         self.gemini_group.add(self.gemini_key_row)
 
         self.gemini_models_list = [
+            "gemini-3.8-flash",
             "gemini-2.5-flash",
             "gemini-2.5-pro",
             "gemini-2.0-flash",
             "gemini-1.5-flash",
             "gemini-1.5-pro",
+            "Outro (Personalizado)",
         ]
         self.gemini_model_row = Adw.ComboRow(
             title="Modelo Gemini",
-            subtitle="gemini-2.5-flash (rápido) ou gemini-2.5-pro (raciocínio avançado)",
+            subtitle="gemini-3.8-flash (geração 3.8 / ultrarrápido) ou selecione outro",
             model=Gtk.StringList.new(self.gemini_models_list),
         )
+        self.gemini_model_row.connect("notify::selected", self._on_gemini_model_changed)
         self.gemini_group.add(self.gemini_model_row)
+
+        self.gemini_custom_model_row = Adw.EntryRow(title="Nome do Modelo Personalizado")
+        self.gemini_custom_model_row.set_visible(False)
+        self.gemini_group.add(self.gemini_custom_model_row)
 
         link_row = Adw.ActionRow(title="Obter chave gratuita")
         link_btn = Gtk.LinkButton(
@@ -151,11 +158,15 @@ class PreferencesDialog(Adw.PreferencesDialog):
 
         # Gemini
         self.gemini_key_row.set_text(self.config.gemini_api_key)
-        try:
+        if self.config.gemini_model in self.gemini_models_list[:-1]:
             m_idx = self.gemini_models_list.index(self.config.gemini_model)
             self.gemini_model_row.set_selected(m_idx)
-        except ValueError:
-            self.gemini_model_row.set_selected(0)
+            self.gemini_custom_model_row.set_visible(False)
+        else:
+            custom_idx = len(self.gemini_models_list) - 1
+            self.gemini_model_row.set_selected(custom_idx)
+            self.gemini_custom_model_row.set_text(self.config.gemini_model)
+            self.gemini_custom_model_row.set_visible(True)
 
         # Ollama
         self.ollama_url_row.set_text(self.config.ollama_url)
@@ -167,6 +178,10 @@ class PreferencesDialog(Adw.PreferencesDialog):
         self.openai_model_row.set_text(self.config.openai_model)
 
         self._update_visibility()
+
+    def _on_gemini_model_changed(self, *_args) -> None:
+        is_custom = self.gemini_model_row.get_selected() == len(self.gemini_models_list) - 1
+        self.gemini_custom_model_row.set_visible(is_custom)
 
     def _on_provider_changed(self, *_args) -> None:
         self._update_visibility()
@@ -185,7 +200,12 @@ class PreferencesDialog(Adw.PreferencesDialog):
         # Gemini
         cfg.gemini_api_key = self.gemini_key_row.get_text().strip()
         g_idx = self.gemini_model_row.get_selected()
-        cfg.gemini_model = self.gemini_models_list[g_idx] if g_idx < len(self.gemini_models_list) else "gemini-2.5-flash"
+        if g_idx == len(self.gemini_models_list) - 1:
+            cfg.gemini_model = self.gemini_custom_model_row.get_text().strip() or "gemini-3.8-flash"
+        elif g_idx < len(self.gemini_models_list):
+            cfg.gemini_model = self.gemini_models_list[g_idx]
+        else:
+            cfg.gemini_model = "gemini-3.8-flash"
 
         # Ollama
         cfg.ollama_url = self.ollama_url_row.get_text().strip() or "http://localhost:11434"
