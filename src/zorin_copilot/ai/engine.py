@@ -195,7 +195,7 @@ class IntentEngine:
         if self.llm_provider.is_configured():
             try:
                 # Obtém nomes de alguns apps instalados para dar contexto ao LLM
-                app_names = [a.get_name() for a in AppManager.get_installed_apps() if a.get_name()]
+                app_names = [a.get_name() for a in AppManager.get_all_apps() if a.get_name()]
                 explanation, actions = self.llm_provider.chat(prompt_clean, app_list=app_names)
 
                 if not actions:
@@ -213,7 +213,17 @@ class IntentEngine:
                     raw_response=explanation,
                 )
             except Exception as exc:
-                logger.warning(f"Falha na consulta ao provedor LLM: {exc}")
+                logger.error(f"Erro na consulta ao provedor LLM: {exc}")
+                return ActionPlan(
+                    thought=f"Ocorreu um erro ao comunicar com a IA ({self.config.provider}):\n\n{exc}",
+                    actions=[
+                        DesktopAction(
+                            ActionType.ANSWER,
+                            str(exc),
+                            description="Erro na consulta de IA",
+                        )
+                    ],
+                )
 
         # =========================================================================
         # 3. CAMADA DE FALLBACK INTELIGENTE (Sem Chave de IA configurada)

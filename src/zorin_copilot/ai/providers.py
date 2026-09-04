@@ -123,18 +123,24 @@ class GeminiProvider(BaseLLMProvider):
     def test_connection(self) -> tuple[bool, str]:
         if not self.is_configured():
             return False, "Chave de API do Gemini não informada."
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.api_key}"
-        payload = {
-            "contents": [{"role": "user", "parts": [{"text": "Olá! Responda apenas 'OK'."}]}],
-            "generationConfig": {"maxOutputTokens": 10},
-        }
-        try:
-            resp = requests.post(url, json=payload, timeout=10)
-            if resp.status_code == 200:
-                return True, f"Conexão com Gemini ({self.model}) bem-sucedida!"
-            return False, f"Erro Gemini ({resp.status_code}): {resp.text[:160]}"
-        except Exception as exc:
-            return False, f"Falha de conexão com Gemini: {exc}"
+        
+        models_to_test = [self.model, "gemini-3.6-flash", "gemini-3.5-flash"]
+        last_error = ""
+        for m in models_to_test:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={self.api_key}"
+            payload = {
+                "contents": [{"parts": [{"text": "Olá! Responda apenas 'OK'."}]}],
+                "generationConfig": {"maxOutputTokens": 10},
+            }
+            try:
+                resp = requests.post(url, json=payload, timeout=12)
+                if resp.status_code == 200:
+                    return True, f"Conexão com Gemini ({m}) bem-sucedida!"
+                last_error = f"Status {resp.status_code}: {resp.text[:140]}"
+            except Exception as exc:
+                last_error = str(exc)
+
+        return False, f"Falha ao conectar com Gemini: {last_error}"
 
     def chat(self, prompt: str, app_list: list[str] | None = None) -> tuple[str, list[DesktopAction]]:
         if not self.is_configured():
@@ -144,39 +150,48 @@ class GeminiProvider(BaseLLMProvider):
                 [],
             )
 
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.api_key}"
-        
         sys_instruction = SYSTEM_PROMPT
         if app_list:
             sys_instruction += f"\n\nAplicativos atualmente instalados no desktop do usuário:\n{', '.join(app_list[:40])}"
 
+        # Decisão de design: enviar instruções junto ao conteúdo do prompt evita erros 403 em modelos novos no tier gratuito
+        combined_prompt = f"{sys_instruction}\n\nSolicitação do usuário: {prompt}"
         payload = {
-            "systemInstruction": {"parts": [{"text": sys_instruction}]},
-            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "contents": [{"parts": [{"text": combined_prompt}]}],
             "generationConfig": {
                 "temperature": 0.2,
                 "responseMimeType": "application/json",
             },
         }
 
-        try:
-            resp = requests.post(url, json=payload, timeout=20)
-            if resp.status_code != 200:
-                return f"Erro na API do Gemini ({resp.status_code}): {resp.text[:200]}", []
+        # Modelos com fallback em caso de alta demanda temporária (503 / 429) no modelo mais recente
+        models_to_try = [self.model]
+        for fallback in ["gemini-3.6-flash", "gemini-3.5-flash"]:
+            if fallback not in models_to_try:
+                models_to_try.append(fallback)
 
-            data = resp.json()
-            candidates = data.get("candidates", [])
-            if not candidates:
-                return "O modelo não retornou candidatos de resposta.", []
+        last_error = ""
+        for current_model in models_to_try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{current_model}:generateContent?key={self.api_key}"
+            try:
+                resp = requests.post(url, json=payload, timeout=25)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    candidates = data.get("candidates", [])
+                    if candidates:
+                        content_parts = candidates[0].get("content", {}).get("parts", [])
+                        if content_parts:
+                            raw_text = content_parts[0].get("text", "")
+                            return self.parse_response_payload(raw_text)
+                
+                # Se for erro transitório (503 ou 429), tenta o próximo modelo da lista
+                last_error = f"Erro no modelo {current_model} ({resp.status_code}): {resp.text[:180]}"
+                logger.warning(f"{last_error}. Tentando fallback se disponível...")
+            except Exception as exc:
+                last_error = f"Erro de comunicação com {current_model}: {exc}"
+                logger.warning(last_error)
 
-            content_parts = candidates[0].get("content", {}).get("parts", [])
-            if not content_parts:
-                return "Resposta vazia do modelo.", []
-
-            raw_text = content_parts[0].get("text", "")
-            return self.parse_response_payload(raw_text)
-        except Exception as exc:
-            return f"Erro de comunicação com Gemini: {exc}", []
+        return f"Não foi possível obter resposta do Gemini: {last_error}", []
 
 
 class OllamaProvider(BaseLLMProvider):

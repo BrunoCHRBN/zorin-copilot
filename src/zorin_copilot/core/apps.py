@@ -47,6 +47,8 @@ class AppManager:
         except Exception:
             return []
 
+    get_installed_apps = get_all_apps
+
     @classmethod
     def find_app(cls, query: str) -> tuple[Gio.AppInfo | None, str]:
         """Busca o melhor aplicativo para a consulta do usuário. Devolve (app, nome_amigavel)."""

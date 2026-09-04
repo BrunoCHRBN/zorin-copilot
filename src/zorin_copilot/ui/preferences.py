@@ -65,11 +65,10 @@ class PreferencesDialog(Adw.PreferencesDialog):
 
         self.gemini_models_list = [
             "gemini-3.8-flash",
-            "gemini-2.5-flash",
+            "gemini-3.6-flash",
+            "gemini-3.5-flash",
             "gemini-2.5-pro",
-            "gemini-2.0-flash",
-            "gemini-1.5-flash",
-            "gemini-1.5-pro",
+            "gemini-2.5-flash",
             "Outro (Personalizado)",
         ]
         self.gemini_model_row = Adw.ComboRow(
