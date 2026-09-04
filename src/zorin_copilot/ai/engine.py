@@ -41,7 +41,7 @@ class IntentEngine:
         self.config = config or CopilotConfig.load()
         self.llm_provider = get_llm_provider(self.config)
 
-    def parse(self, prompt: str) -> ActionPlan:
+    def parse(self, prompt: str, history: list[dict[str, str]] | None = None) -> ActionPlan:
         prompt_clean = prompt.strip()
         low = prompt_clean.lower()
 
@@ -249,6 +249,7 @@ class IntentEngine:
                     prompt_clean,
                     app_list=app_names,
                     context_summary=context_summary,
+                    history=history,
                 )
 
                 # Se houve busca na web e a IA não gerou ação de link, oferece a fonte primária

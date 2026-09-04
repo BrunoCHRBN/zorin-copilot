@@ -237,6 +237,35 @@ window.dark-glass .glass-launch-btn:hover {
     border-color: rgba(98, 160, 234, 0.5);
 }
 
+/* --- Botão de Fixar Tópico no Header do Card (Pin) --- */
+.glass-pin-btn {
+    border-radius: 12px;
+    padding: 3px 10px;
+    transition: all 180ms ease;
+}
+
+window.light-glass .glass-pin-btn {
+    background-color: rgba(18, 51, 84, 0.06);
+    border: 1px solid rgba(18, 51, 84, 0.12);
+    color: #123354;
+}
+
+window.light-glass .glass-pin-btn:hover {
+    background-color: rgba(18, 51, 84, 0.12);
+    border-color: rgba(18, 51, 84, 0.22);
+}
+
+window.dark-glass .glass-pin-btn {
+    background-color: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    color: #e4ecf5;
+}
+
+window.dark-glass .glass-pin-btn:hover {
+    background-color: rgba(255, 255, 255, 0.16);
+    border-color: rgba(255, 255, 255, 0.25);
+}
+
 /* --- Chips de Sugestões Rápidas da Tela Inicial --- */
 .glass-chip {
     border-radius: 20px;

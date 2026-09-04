@@ -174,6 +174,14 @@ class IntentEngineTest(unittest.TestCase):
         self.assertEqual(plan.actions[0].action_type, ActionType.OPEN_URL)
         self.assertIn("mail.google.com", plan.actions[0].target)
 
+    def test_parse_with_history(self):
+        history = [
+            {"role": "user", "content": "O que é Linux?"},
+            {"role": "assistant", "content": "Linux é um sistema operacional..."},
+        ]
+        plan = self.engine.parse("e como uso o terminal?", history=history)
+        self.assertFalse(plan.is_empty)
+
 
 if __name__ == "__main__":
     unittest.main()

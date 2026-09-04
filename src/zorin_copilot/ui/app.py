@@ -20,6 +20,7 @@ from ..ai.engine import IntentEngine
 from ..core.a11y import DesktopInspector
 from ..core.apps import AppManager
 from ..core.config import CopilotConfig
+from ..core.session import TopicSession
 from ..shell.executor import ActionExecutor
 from .preferences import PreferencesDialog
 from .style import setup_glass_window
@@ -120,6 +121,7 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.inspector = DesktopInspector()
         self.executor = ActionExecutor(self.inspector)
         self.engine = IntentEngine(self.inspector, self.config)
+        self.session = TopicSession()
         self.current_plan: ActionPlan | None = None
         self._raw_answer_text: str = ""
         self._is_busy = False
@@ -160,12 +162,22 @@ class CopilotWindow(Adw.ApplicationWindow):
 
         self.toolbar_view.add_top_bar(header)
 
-        # Controlador de teclado para tecla Escape (limpa busca ou fecha)
+        # Controlador de teclado para tecla Escape e atalhos de tópico (Ctrl+P, Ctrl+N)
         key_ctrl = Gtk.EventControllerKey()
-        def on_key_pressed(_ctrl, keyval, _keycode, _state):
+        def on_key_pressed(_ctrl, keyval, _keycode, state):
+            is_ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
+            if is_ctrl and keyval in (Gdk.KEY_p, Gdk.KEY_P):
+                self._on_toggle_pin()
+                return True
+            if is_ctrl and keyval in (Gdk.KEY_n, Gdk.KEY_N):
+                self._on_new_topic()
+                return True
             if keyval == Gdk.KEY_Escape:
                 if self.entry.get_text():
                     self.entry.set_text("")
+                    return True
+                elif self.session.is_pinned:
+                    self._on_new_topic()
                     return True
                 else:
                     self.close()
@@ -346,6 +358,41 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.welcome_box.append(grid)
         content_box.append(self.welcome_box)
 
+        # Banner dinâmico de Tópico Ativo / Fixado
+        self.topic_revealer = Gtk.Revealer()
+        self.topic_revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_DOWN)
+        self.topic_revealer.set_transition_duration(150)
+        self.topic_revealer.set_reveal_child(False)
+
+        topic_card = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        topic_card.add_css_class("card")
+        topic_card.add_css_class("glass-card")
+        topic_card.set_margin_start(2)
+        topic_card.set_margin_end(2)
+        topic_card.set_margin_bottom(2)
+
+        self.topic_info_lbl = Gtk.Label(xalign=0)
+        self.topic_info_lbl.set_use_markup(True)
+        self.topic_info_lbl.set_markup("<b>📌 Tópico Fixado</b> • As próximas perguntas manterão este contexto")
+        self.topic_info_lbl.add_css_class("caption")
+        self.topic_info_lbl.set_hexpand(True)
+        self.topic_info_lbl.set_margin_start(12)
+        self.topic_info_lbl.set_margin_top(6)
+        self.topic_info_lbl.set_margin_bottom(6)
+        topic_card.append(self.topic_info_lbl)
+
+        self.new_topic_btn = Gtk.Button(label="✕ Novo Tópico")
+        self.new_topic_btn.set_tooltip_text("Desafixar e iniciar uma nova consulta limpa (Ctrl+N)")
+        self.new_topic_btn.add_css_class("flat")
+        self.new_topic_btn.add_css_class("pill")
+        self.new_topic_btn.set_valign(Gtk.Align.CENTER)
+        self.new_topic_btn.set_margin_end(8)
+        self.new_topic_btn.connect("clicked", self._on_new_topic)
+        topic_card.append(self.new_topic_btn)
+
+        self.topic_revealer.set_child(topic_card)
+        content_box.append(self.topic_revealer)
+
         # 2. Grupo: Resposta / Explicação em Card Nativo
         self.answer_group = Adw.PreferencesGroup(title="Resposta")
         self.answer_group.set_visible(False)
@@ -358,7 +405,7 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.answer_card.set_margin_start(2)
         self.answer_card.set_margin_end(2)
 
-        # Barra de topo interna do card: Ícone + Título + Badge + Botão de Copiar
+        # Barra de topo interna do card: Ícone + Título + Badge + Botão de Fixar + Botão de Copiar
         card_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         card_header.set_margin_start(14)
         card_header.set_margin_end(10)
@@ -378,6 +425,29 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.source_badge.add_css_class("dim-label")
         self.source_badge.set_visible(False)
         card_header.append(self.source_badge)
+
+        # Botão de fixar tópico (Pin) para manter contexto
+        self.pin_btn = Gtk.Button()
+        self.pin_btn.set_tooltip_text("Fixar este tópico para manter o contexto em perguntas seguintes (Ctrl+P)")
+        self.pin_btn.add_css_class("flat")
+        self.pin_btn.add_css_class("pill")
+        self.pin_btn.add_css_class("glass-pill")
+        self.pin_btn.add_css_class("glass-pin-btn")
+        self.pin_btn.connect("clicked", self._on_toggle_pin)
+
+        pin_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        pin_box.set_margin_start(4)
+        pin_box.set_margin_end(4)
+        self.pin_btn_icon = Gtk.Image.new_from_icon_name("view-pin-symbolic")
+        self.pin_btn_icon.set_pixel_size(13)
+        pin_box.append(self.pin_btn_icon)
+
+        self.pin_btn_label = Gtk.Label(label="Fixar Tópico")
+        self.pin_btn_label.add_css_class("caption")
+        pin_box.append(self.pin_btn_label)
+
+        self.pin_btn.set_child(pin_box)
+        card_header.append(self.pin_btn)
 
         self.copy_btn = Gtk.Button.new_from_icon_name("edit-copy-symbolic")
         self.copy_btn.set_tooltip_text("Copiar Resposta")
@@ -595,12 +665,13 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.exec_status.set_text("Pensando...")
 
         def parse_thread():
-            plan = self.engine.parse(text)
-            GLib.idle_add(self._on_plan_ready, plan)
+            history = self.session.get_history_for_llm()
+            plan = self.engine.parse(text, history=history)
+            GLib.idle_add(self._on_plan_ready, plan, text)
 
         threading.Thread(target=parse_thread, daemon=True).start()
 
-    def _on_plan_ready(self, plan: ActionPlan) -> bool:
+    def _on_plan_ready(self, plan: ActionPlan, prompt_text: str = "") -> bool:
         self._is_busy = False
         self.spinner.stop()
         self.entry.set_sensitive(True)
@@ -615,6 +686,11 @@ class CopilotWindow(Adw.ApplicationWindow):
             markup = format_markdown_to_markup(explanation_text)
             self.answer_label.set_markup(markup)
             self.answer_group.set_visible(True)
+
+            # Registra o turno na sessão de tópicos
+            if prompt_text:
+                self.session.record_turn(prompt=prompt_text, answer=explanation_text)
+                self._update_pin_ui()
 
             # Badge da fonte: Web ou Memória
             if "[Resultados da Pesquisa" in explanation_text or any(a.action_type == ActionType.OPEN_URL for a in plan.actions):
@@ -757,6 +833,44 @@ class CopilotWindow(Adw.ApplicationWindow):
                 return GLib.SOURCE_REMOVE
 
             GLib.timeout_add(2000, reset_copy)
+
+    def _update_pin_ui(self) -> None:
+        """Atualiza a aparência do botão de alfinete e o banner do tópico ativo."""
+        turns = self.session.turn_count
+        if self.session.is_pinned:
+            self.pin_btn.add_css_class("suggested-action")
+            self.pin_btn.set_tooltip_text("Tópico fixado. Clique ou pressione Ctrl+P para desafixar.")
+            self.pin_btn_label.set_text("Tópico Fixado ✓")
+            msg_str = f"{turns} {'mensagem' if turns == 1 else 'mensagens'}"
+            self.topic_info_lbl.set_markup(
+                f"<b>📌 Tópico Fixado</b> ({msg_str}) • As próximas perguntas manterão este contexto"
+            )
+            self.topic_revealer.set_reveal_child(True)
+        else:
+            self.pin_btn.remove_css_class("suggested-action")
+            self.pin_btn.set_tooltip_text("Fixar este tópico para manter o contexto em perguntas seguintes (Ctrl+P)")
+            self.pin_btn_label.set_text("Fixar Tópico")
+            self.topic_revealer.set_reveal_child(False)
+
+    def _on_toggle_pin(self, _btn: Gtk.Button | None = None) -> None:
+        """Alterna o estado de fixação do tópico ativo."""
+        self.session.toggle_pin()
+        self._update_pin_ui()
+        if self.session.is_pinned:
+            self.exec_status.set_text("📌 Tópico fixado! As próximas perguntas manterão este contexto.")
+        else:
+            self.exec_status.set_text("Contexto desafixado. As próximas perguntas serão independentes.")
+
+    def _on_new_topic(self, _btn: Gtk.Button | None = None) -> None:
+        """Desafixa o tópico e reinicia a tela com contexto limpo."""
+        self.session.unpin()
+        self._update_pin_ui()
+        self.entry.set_text("")
+        self.answer_group.set_visible(False)
+        self.actions_group.set_visible(False)
+        self.welcome_box.set_visible(True)
+        self.entry.grab_focus()
+        self.exec_status.set_text("Novo tópico limpo iniciado.")
 
 
 class ZorinCopilotApp(Adw.Application):

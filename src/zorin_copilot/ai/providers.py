@@ -62,6 +62,7 @@ class BaseLLMProvider(ABC):
         prompt: str,
         app_list: list[str] | None = None,
         context_summary: str | None = None,
+        history: list[dict[str, str]] | None = None,
     ) -> tuple[str, list[DesktopAction]]:
         """Processa a solicitação do usuário e retorna (explicação, lista de ações propostas)."""
         pass
@@ -152,6 +153,7 @@ class GeminiProvider(BaseLLMProvider):
         prompt: str,
         app_list: list[str] | None = None,
         context_summary: str | None = None,
+        history: list[dict[str, str]] | None = None,
     ) -> tuple[str, list[DesktopAction]]:
         if not self.is_configured():
             return (
@@ -166,10 +168,23 @@ class GeminiProvider(BaseLLMProvider):
         if app_list:
             sys_instruction += f"\n\nAplicativos atualmente instalados no desktop do usuário:\n{', '.join(app_list[:40])}"
 
-        # Decisão de design: enviar instruções junto ao conteúdo do prompt evita erros 403 em modelos novos no tier gratuito
-        combined_prompt = f"{sys_instruction}\n\nSolicitação do usuário: {prompt}"
+        contents = []
+        if history:
+            for turn in history:
+                role = "model" if turn.get("role") == "assistant" else "user"
+                text = turn.get("content", "").strip()
+                if text:
+                    contents.append({"role": role, "parts": [{"text": text}]})
+
+        if contents:
+            # Prepend instrução de sistema no primeiro turno
+            contents[0]["parts"][0]["text"] = f"{sys_instruction}\n\n[Histórico do Tópico]\n{contents[0]['parts'][0]['text']}"
+            contents.append({"role": "user", "parts": [{"text": f"Pergunta/Comando atual: {prompt}"}]})
+        else:
+            contents.append({"parts": [{"text": f"{sys_instruction}\n\nSolicitação do usuário: {prompt}"}]})
+
         payload = {
-            "contents": [{"parts": [{"text": combined_prompt}]}],
+            "contents": contents,
             "generationConfig": {
                 "temperature": 0.2,
                 "responseMimeType": "application/json",
@@ -235,6 +250,7 @@ class OllamaProvider(BaseLLMProvider):
         prompt: str,
         app_list: list[str] | None = None,
         context_summary: str | None = None,
+        history: list[dict[str, str]] | None = None,
     ) -> tuple[str, list[DesktopAction]]:
         url = f"{self.host_url}/api/chat"
         sys_instruction = SYSTEM_PROMPT
@@ -243,12 +259,14 @@ class OllamaProvider(BaseLLMProvider):
         if app_list:
             sys_instruction += f"\n\nAplicativos instalados no computador:\n{', '.join(app_list[:30])}"
 
+        messages = [{"role": "system", "content": sys_instruction}]
+        if history:
+            messages.extend(history)
+        messages.append({"role": "user", "content": prompt})
+
         payload = {
             "model": self.model,
-            "messages": [
-                {"role": "system", "content": sys_instruction},
-                {"role": "user", "content": prompt},
-            ],
+            "messages": messages,
             "format": "json",
             "stream": False,
         }
@@ -298,6 +316,7 @@ class OpenAICompatProvider(BaseLLMProvider):
         prompt: str,
         app_list: list[str] | None = None,
         context_summary: str | None = None,
+        history: list[dict[str, str]] | None = None,
     ) -> tuple[str, list[DesktopAction]]:
         if not self.is_configured():
             return "Chave de API ou URL não configurada.", []
@@ -310,12 +329,14 @@ class OpenAICompatProvider(BaseLLMProvider):
         if app_list:
             sys_instruction += f"\n\nAplicativos disponíveis:\n{', '.join(app_list[:30])}"
 
+        messages = [{"role": "system", "content": sys_instruction}]
+        if history:
+            messages.extend(history)
+        messages.append({"role": "user", "content": prompt})
+
         payload = {
             "model": self.model,
-            "messages": [
-                {"role": "system", "content": sys_instruction},
-                {"role": "user", "content": prompt},
-            ],
+            "messages": messages,
             "response_format": {"type": "json_object"},
         }
 
