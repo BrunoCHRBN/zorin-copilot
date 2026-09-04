@@ -147,13 +147,14 @@ class CopilotWindow(Adw.ApplicationWindow):
 
         self.status_badge = Gtk.Label()
         self.status_badge.add_css_class("caption")
-        self.status_badge.add_css_class("dim-label")
         self.status_badge_btn.set_child(self.status_badge)
         header.pack_end(self.status_badge_btn)
 
         settings_btn = Gtk.Button.new_from_icon_name("preferences-system-symbolic")
         settings_btn.set_tooltip_text("Configurações do Assistente e Chaves de IA")
         settings_btn.add_css_class("flat")
+        settings_btn.add_css_class("circular")
+        settings_btn.add_css_class("glass-icon-btn")
         settings_btn.connect("clicked", self._open_settings)
         header.pack_end(settings_btn)
 
@@ -308,11 +309,12 @@ class CopilotWindow(Adw.ApplicationWindow):
 
         welcome_title = Gtk.Label(label="<b>Como posso ajudar hoje?</b>", use_markup=True)
         welcome_title.add_css_class("title-3")
+        welcome_title.add_css_class("welcome-title")
         header_welcome.append(welcome_title)
 
         welcome_desc = Gtk.Label(label="Peça tarefas no desktop, consulte seus projetos ou pesquise na web")
         welcome_desc.add_css_class("caption")
-        welcome_desc.add_css_class("dim-label")
+        welcome_desc.add_css_class("welcome-subtitle")
         header_welcome.append(welcome_desc)
 
         self.welcome_box.append(header_welcome)
