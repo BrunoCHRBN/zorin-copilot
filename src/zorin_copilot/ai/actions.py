@@ -13,15 +13,17 @@ class ActionType(str, Enum):
     CLICK = "click"
     TYPE_TEXT = "type_text"
     LAUNCH_APP = "launch_app"
+    SYSTEM_CONTROL = "system_control"
     NOTIFY = "notify"
     WINDOW_LAYOUT = "window_layout"
     COMMAND = "command"
+    ANSWER = "answer"
 
 
 @dataclass
 class DesktopAction:
     action_type: ActionType
-    target: str  # Nome do botão, rótulo do campo ou nome do aplicativo
+    target: str  # Nome do botão, app, controle ou mensagem
     params: dict[str, Any] = field(default_factory=dict)
     description: str = ""
     requires_confirmation: bool = False
@@ -29,17 +31,21 @@ class DesktopAction:
     def describe(self) -> str:
         if self.description:
             return self.description
+        if self.action_type == ActionType.LAUNCH_APP:
+            return f"Abrir aplicativo '{self.target}'"
+        if self.action_type == ActionType.SYSTEM_CONTROL:
+            return f"Ajustar sistema: {self.target}"
         if self.action_type == ActionType.CLICK:
             return f"Clicar no elemento '{self.target}'"
         if self.action_type == ActionType.TYPE_TEXT:
             text = self.params.get("text", "")
             return f"Digitar '{text}' no campo '{self.target}'"
-        if self.action_type == ActionType.LAUNCH_APP:
-            return f"Abrir o aplicativo '{self.target}'"
         if self.action_type == ActionType.NOTIFY:
             return f"Notificação: {self.params.get('message', self.target)}"
         if self.action_type == ActionType.WINDOW_LAYOUT:
             return f"Ajustar layout de janelas: {self.target}"
+        if self.action_type == ActionType.ANSWER:
+            return f"Resposta: {self.target}"
         return f"Ação {self.action_type.value} em {self.target}"
 
 

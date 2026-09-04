@@ -12,6 +12,7 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from .. import __app_id__, __version__
 from ..ai.actions import ActionPlan, ActionType, DesktopAction
+from ..ai.engine import IntentEngine
 from ..core.a11y import DesktopInspector
 from ..shell.executor import ActionExecutor
 
@@ -20,11 +21,12 @@ class CopilotWindow(Adw.ApplicationWindow):
     def __init__(self, app: Adw.Application):
         super().__init__(application=app)
         self.set_title("Zorin Copilot")
-        self.set_default_size(680, 420)
+        self.set_default_size(680, 440)
         self.set_resizable(False)
 
         self.inspector = DesktopInspector()
         self.executor = ActionExecutor(self.inspector)
+        self.engine = IntentEngine(self.inspector)
         self.current_plan: ActionPlan | None = None
 
         self._build_ui()
@@ -43,19 +45,18 @@ class CopilotWindow(Adw.ApplicationWindow):
         title_label.add_css_class("title-2")
         header_box.append(title_label)
 
-        active_apps = self.inspector.list_applications()
-        active_hint = f"{len(active_apps)} apps detectados no desktop"
-        hint_badge = Gtk.Label(label=active_hint, xalign=1)
-        hint_badge.add_css_class("dim-label")
-        hint_badge.set_hexpand(True)
-        header_box.append(hint_badge)
+        self.hint_badge = Gtk.Label(xalign=1)
+        self.hint_badge.add_css_class("dim-label")
+        self.hint_badge.set_hexpand(True)
+        self._refresh_apps_count()
+        header_box.append(self.hint_badge)
 
         main_box.append(header_box)
 
         # Campo de Entrada (Prompt)
         input_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         self.entry = Gtk.Entry()
-        self.entry.set_placeholder_text("Digite o que deseja fazer no desktop (ex: abrir terminal, notificar, inspecionar)...")
+        self.entry.set_placeholder_text("Ex: 'abrir steam', 'modo escuro', 'aumentar volume', 'tirar print'...")
         self.entry.set_hexpand(True)
         self.entry.connect("activate", self._on_submit)
         input_box.append(self.entry)
@@ -70,6 +71,7 @@ class CopilotWindow(Adw.ApplicationWindow):
         # Área de Resposta e Ações
         self.status_label = Gtk.Label(label="Pronto para comandos.", xalign=0)
         self.status_label.add_css_class("dim-label")
+        self.status_label.set_wrap(True)
         main_box.append(self.status_label)
 
         self.actions_group = Adw.PreferencesGroup(title="Ações Propostas")
@@ -90,52 +92,43 @@ class CopilotWindow(Adw.ApplicationWindow):
         clamp.set_child(main_box)
         self.set_content(clamp)
 
+    def _refresh_apps_count(self) -> None:
+        active_apps = self.inspector.list_applications()
+        self.hint_badge.set_text(f"{len(active_apps)} apps detectados no desktop")
+
     def _on_submit(self, _widget: Gtk.Widget) -> None:
         text = self.entry.get_text().strip()
         if not text:
             return
 
-        self.status_label.set_text(f"Analisando intenção: '{text}'...")
-        # Parser heurístico para v0.1.0 inicial
-        plan = self._parse_intent(text)
+        self.status_label.set_text(f"Analisando: '{text}'...")
+        plan = self.engine.parse(text)
         self.current_plan = plan
         self._render_plan(plan)
 
-    def _parse_intent(self, prompt: str) -> ActionPlan:
-        low = prompt.lower()
-        actions: list[DesktopAction] = []
-        thought = f"Interpretação da intenção: {prompt}"
-
-        if "terminal" in low or "bash" in low:
-            actions.append(DesktopAction(ActionType.LAUNCH_APP, "gnome-terminal", description="Abrir o Terminal GNOME"))
-        elif "navegador" in low or "firefox" in low or "web" in low or "chrome" in low:
-            actions.append(DesktopAction(ActionType.LAUNCH_APP, "firefox", description="Abrir o navegador Web"))
-        elif "arquivos" in low or "nautilus" in low:
-            actions.append(DesktopAction(ActionType.LAUNCH_APP, "nautilus", description="Abrir o Gerenciador de Arquivos"))
-        elif "notifi" in low or "lembr" in low:
-            actions.append(DesktopAction(ActionType.NOTIFY, "Lembrete", {"message": prompt}, description="Exibir notificação"))
-        elif "clique" in low or "clicar" in low:
-            target = prompt.split("em")[-1].strip().strip("'\"")
-            actions.append(DesktopAction(ActionType.CLICK, target, description=f"Clicar no elemento '{target}'"))
-        else:
-            actions.append(DesktopAction(ActionType.NOTIFY, "Zorin Copilot", {"message": prompt}, description=f"Responder: {prompt}"))
-
-        return ActionPlan(thought=thought, actions=actions)
-
     def _render_plan(self, plan: ActionPlan) -> None:
-        # Limpa itens anteriores
         while child := self.actions_box.get_first_child():
             self.actions_box.remove(child)
 
         for action in plan.actions:
-            row = Adw.ActionRow(title=action.describe(), subtitle=f"Tipo: {action.action_type.value}")
+            badge_text = {
+                ActionType.LAUNCH_APP: "iniciar app",
+                ActionType.SYSTEM_CONTROL: "sistema",
+                ActionType.CLICK: "clique a11y",
+                ActionType.NOTIFY: "notificação",
+                ActionType.ANSWER: "informação",
+            }.get(action.action_type, action.action_type.value)
+
+            row = Adw.ActionRow(title=action.describe(), subtitle=f"Categoria: {badge_text}")
             badge = Gtk.Label(label="pronto")
             badge.add_css_class("dim-label")
             row.add_suffix(badge)
             self.actions_box.append(row)
 
         self.status_label.set_text(plan.thought)
-        self.exec_btn.set_sensitive(not plan.is_empty)
+        # Habilita executar se não for apenas uma resposta puramente textual
+        can_exec = not plan.is_empty and any(a.action_type != ActionType.ANSWER for a in plan.actions)
+        self.exec_btn.set_sensitive(can_exec)
 
     def _on_execute(self, _widget: Gtk.Widget) -> None:
         if not self.current_plan:
@@ -143,8 +136,9 @@ class CopilotWindow(Adw.ApplicationWindow):
 
         reports = self.executor.execute_plan(self.current_plan, dry_run=False)
         msgs = [r.message for r in reports]
-        self.status_label.set_text(" | ".join(msgs))
+        self.status_label.set_text(" • ".join(msgs))
         self.exec_btn.set_sensitive(False)
+        self._refresh_apps_count()
 
 
 class ZorinCopilotApp(Adw.Application):

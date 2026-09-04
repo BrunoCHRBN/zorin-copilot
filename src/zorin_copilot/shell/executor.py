@@ -1,4 +1,4 @@
-# Decisão de design: executor desacoplado com modo dry-run real — ações de sistema são logadas e auditáveis.
+# Decisão de design: executor desacoplado com modo dry-run real — integra Gio.AppInfo e SystemController para ações concretas no desktop.
 
 """Executor de ações no desktop: orquestração de janelas, apps e entradas."""
 
@@ -12,6 +12,8 @@ from typing import Sequence
 
 from ..ai.actions import ActionPlan, ActionType, DesktopAction
 from ..core.a11y import DesktopInspector, UIElement
+from ..core.apps import AppManager
+from .system import SystemController
 
 
 @dataclass
@@ -45,13 +47,16 @@ class ActionExecutor:
             report = self._execute_single(action)
             reports.append(report)
             if not report.success and action.action_type in (ActionType.CLICK, ActionType.TYPE_TEXT):
-                # Se uma ação de interface falhar, para o restante do fluxo para evitar estado inconsistente
+                # Para o fluxo em caso de falha em cadeia
                 break
         return reports
 
     def _execute_single(self, action: DesktopAction) -> ExecutionReport:
         if action.action_type == ActionType.LAUNCH_APP:
             return self._launch_app(action.target)
+
+        if action.action_type == ActionType.SYSTEM_CONTROL:
+            return self._control_system(action.target, action.params)
 
         if action.action_type == ActionType.NOTIFY:
             msg = action.params.get("message", action.target)
@@ -63,6 +68,9 @@ class ActionExecutor:
         if action.action_type == ActionType.WINDOW_LAYOUT:
             return self._apply_window_layout(action.target, action.params)
 
+        if action.action_type == ActionType.ANSWER:
+            return ExecutionReport(action=action, success=True, message=action.target)
+
         return ExecutionReport(
             action=action,
             success=False,
@@ -70,39 +78,47 @@ class ActionExecutor:
         )
 
     def _launch_app(self, app_name: str) -> ExecutionReport:
+        act = DesktopAction(ActionType.LAUNCH_APP, app_name)
+        app, matched_name = AppManager.find_app(app_name)
+        if app:
+            ok, msg = AppManager.launch(app)
+            return ExecutionReport(action=act, success=ok, message=msg)
+
         cmd = shutil.which(app_name.lower())
-        if not cmd:
-            # Tenta mapear nomes comuns
-            mapping = {
-                "terminal": "gnome-terminal",
-                "navegador": "firefox",
-                "arquivos": "nautilus",
-                "configurações": "gnome-control-center",
-                "editor": "gnome-text-editor",
-            }
-            target = mapping.get(app_name.lower(), app_name)
-            cmd = shutil.which(target)
+        if cmd:
+            try:
+                subprocess.Popen([cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return ExecutionReport(action=act, success=True, message=f"Aplicativo '{app_name}' iniciado.")
+            except Exception as exc:
+                return ExecutionReport(action=act, success=False, message=f"Erro ao iniciar '{app_name}': {exc}")
 
-        if not cmd:
-            return ExecutionReport(
-                action=DesktopAction(ActionType.LAUNCH_APP, app_name),
-                success=False,
-                message=f"Aplicativo '{app_name}' não encontrado no PATH do sistema.",
-            )
+        return ExecutionReport(
+            action=act,
+            success=False,
+            message=f"Aplicativo '{app_name}' não foi encontrado no Zorin OS.",
+        )
 
-        try:
-            subprocess.Popen([cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return ExecutionReport(
-                action=DesktopAction(ActionType.LAUNCH_APP, app_name),
-                success=True,
-                message=f"Aplicativo '{app_name}' iniciado com sucesso.",
-            )
-        except Exception as exc:
-            return ExecutionReport(
-                action=DesktopAction(ActionType.LAUNCH_APP, app_name),
-                success=False,
-                message=f"Falha ao iniciar '{app_name}': {exc}",
-            )
+    def _control_system(self, target: str, params: dict) -> ExecutionReport:
+        act = DesktopAction(ActionType.SYSTEM_CONTROL, target, params)
+        setting = params.get("setting", target)
+
+        if setting == "dark_mode":
+            ok, msg = SystemController.set_color_scheme(params.get("value", True))
+            return ExecutionReport(action=act, success=ok, message=msg)
+        if setting == "night_light":
+            ok, msg = SystemController.toggle_night_light()
+            return ExecutionReport(action=act, success=ok, message=msg)
+        if setting == "volume":
+            ok, msg = SystemController.adjust_volume(params.get("change", "up"))
+            return ExecutionReport(action=act, success=ok, message=msg)
+        if setting == "lock":
+            ok, msg = SystemController.lock_session()
+            return ExecutionReport(action=act, success=ok, message=msg)
+        if setting == "screenshot":
+            ok, msg = SystemController.take_screenshot()
+            return ExecutionReport(action=act, success=ok, message=msg)
+
+        return ExecutionReport(action=act, success=False, message=f"Controle de sistema '{target}' não suportado.")
 
     def _notify(self, title: str, message: str) -> ExecutionReport:
         act = DesktopAction(ActionType.NOTIFY, title, {"message": message})
@@ -110,7 +126,7 @@ class ActionExecutor:
         if notify_bin:
             try:
                 subprocess.run([notify_bin, "-a", "Zorin Copilot", title, message], check=False)
-                return ExecutionReport(action=act, success=True, message="Notificação enviada.")
+                return ExecutionReport(action=act, success=True, message="Notificação enviada com sucesso.")
             except Exception as exc:
                 return ExecutionReport(action=act, success=False, message=f"Falha na notificação: {exc}")
         return ExecutionReport(action=act, success=False, message="notify-send não disponível.")
@@ -140,7 +156,6 @@ class ActionExecutor:
 
     def _apply_window_layout(self, layout_name: str, params: dict) -> ExecutionReport:
         act = DesktopAction(ActionType.WINDOW_LAYOUT, layout_name, params)
-        # Mock de layout ou integração com Mutter
         return ExecutionReport(
             action=act,
             success=True,

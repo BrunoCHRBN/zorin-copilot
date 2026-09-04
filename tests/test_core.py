@@ -84,3 +84,33 @@ class ExecutorTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class IntentEngineTest(unittest.TestCase):
+    def setUp(self):
+        from zorin_copilot.ai.engine import IntentEngine
+        self.engine = IntentEngine()
+
+    def test_parse_dark_mode(self):
+        plan = self.engine.parse("ativar modo escuro")
+        self.assertFalse(plan.is_empty)
+        self.assertEqual(plan.actions[0].action_type, ActionType.SYSTEM_CONTROL)
+        self.assertEqual(plan.actions[0].params.get("setting"), "dark_mode")
+
+    def test_parse_volume(self):
+        plan = self.engine.parse("aumentar volume")
+        self.assertFalse(plan.is_empty)
+        self.assertEqual(plan.actions[0].action_type, ActionType.SYSTEM_CONTROL)
+        self.assertEqual(plan.actions[0].params.get("change"), "up")
+
+    def test_parse_click(self):
+        plan = self.engine.parse("clicar em Salvar")
+        self.assertFalse(plan.is_empty)
+        self.assertEqual(plan.actions[0].action_type, ActionType.CLICK)
+        self.assertEqual(plan.actions[0].target, "Salvar")
+
+    def test_parse_app_steam(self):
+        plan = self.engine.parse("abrir steam")
+        self.assertFalse(plan.is_empty)
+        self.assertEqual(plan.actions[0].action_type, ActionType.LAUNCH_APP)
+        self.assertIn("steam", plan.actions[0].target.lower())
