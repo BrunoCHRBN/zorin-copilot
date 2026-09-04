@@ -16,6 +16,7 @@ from gi.repository import Adw, GLib, Gtk  # noqa: E402
 from ..ai.providers import GeminiProvider, OllamaProvider, OpenAICompatProvider
 from ..core.config import CopilotConfig
 from ..core.memory import MemoryManager
+from ..core.shortcuts import ShortcutManager
 
 
 class PreferencesDialog(Adw.PreferencesDialog):
@@ -164,6 +165,42 @@ class PreferencesDialog(Adw.PreferencesDialog):
         page.add(action_group)
 
         self._build_memory_page()
+        self._build_shortcuts_page()
+
+    def _build_shortcuts_page(self) -> None:
+        page = Adw.PreferencesPage(title="Atalho & HUD", icon_name="input-keyboard-symbolic")
+        self.add(page)
+
+        hud_group = Adw.PreferencesGroup(
+            title="Invocação Rápida (Modo HUD)",
+            description="Permite alternar a visibilidade do Zorin Copilot instantaneamente a partir de qualquer aplicativo do desktop.",
+        )
+
+        self.shortcut_switch_row = Adw.SwitchRow(
+            title="Ativar Atalho Global de Sistema",
+            subtitle="Registra uma tecla de atalho de sistema no GNOME/Zorin OS",
+        )
+        hud_group.add(self.shortcut_switch_row)
+
+        self.shortcut_options = [
+            ("<Super>c", "Super + C (Recomendado - Tecla Zorin/Windows + C)"),
+            ("<Primary><Alt>space", "Ctrl + Alt + Espaço (Estilo Raycast/Alfred)"),
+            ("<Super>grave", "Super + ` (Abaixo da tecla Esc)"),
+            ("<Super>z", "Super + Z"),
+        ]
+        self.shortcut_combo_row = Adw.ComboRow(
+            title="Combinação de Teclas",
+            subtitle="Selecione a tecla para invocar o assistente",
+            model=Gtk.StringList.new([label for _, label in self.shortcut_options]),
+        )
+        hud_group.add(self.shortcut_combo_row)
+
+        info_row = Adw.ActionRow(
+            title="Como Funciona o Modo HUD",
+            subtitle="Ao pressionar o atalho, o Copilot surge centralizado com foco imediato no campo de busca. Pressione Esc ou o atalho novamente para ocultar.",
+        )
+        hud_group.add(info_row)
+        page.add(hud_group)
 
     def _build_memory_page(self) -> None:
         page = Adw.PreferencesPage(title="Base de Conhecimento", icon_name="document-properties-symbolic")
@@ -283,6 +320,15 @@ class PreferencesDialog(Adw.PreferencesDialog):
         # Pesquisa Web
         self.web_search_row.set_active(self.config.web_search_enabled)
 
+        # Atalho Global do Sistema
+        self.shortcut_switch_row.set_active(self.config.global_shortcut_enabled)
+        matching_idx = 0
+        for idx, (b_code, _) in enumerate(self.shortcut_options):
+            if b_code == self.config.global_shortcut_key:
+                matching_idx = idx
+                break
+        self.shortcut_combo_row.set_selected(matching_idx)
+
         self._update_visibility()
 
     def _on_gemini_model_changed(self, *_args) -> None:
@@ -325,6 +371,14 @@ class PreferencesDialog(Adw.PreferencesDialog):
         # Pesquisa Web
         cfg.web_search_enabled = self.web_search_row.get_active()
 
+        # Atalho Global do Sistema
+        cfg.global_shortcut_enabled = self.shortcut_switch_row.get_active()
+        sel_shortcut = self.shortcut_combo_row.get_selected()
+        if 0 <= sel_shortcut < len(self.shortcut_options):
+            cfg.global_shortcut_key = self.shortcut_options[sel_shortcut][0]
+        else:
+            cfg.global_shortcut_key = "<Super>c"
+
         return cfg
 
     def _on_test_connection(self, _btn: Gtk.Button) -> None:
@@ -355,6 +409,10 @@ class PreferencesDialog(Adw.PreferencesDialog):
     def _on_save(self, _btn: Gtk.Button) -> None:
         cfg = self._collect_current_config()
         cfg.save()
+        if cfg.global_shortcut_enabled:
+            ShortcutManager.register(cfg.global_shortcut_key)
+        else:
+            ShortcutManager.unregister()
         if self.on_saved:
             self.on_saved(cfg)
         toast = Adw.Toast.new("Configurações salvas com sucesso!")

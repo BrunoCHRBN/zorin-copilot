@@ -21,6 +21,7 @@ from ..core.a11y import DesktopInspector
 from ..core.apps import AppManager
 from ..core.config import CopilotConfig
 from ..core.session import TopicSession
+from ..core.shortcuts import ShortcutManager
 from ..shell.executor import ActionExecutor
 from .preferences import PreferencesDialog
 from .style import setup_glass_window
@@ -131,6 +132,25 @@ class CopilotWindow(Adw.ApplicationWindow):
         self._build_ui()
         setup_glass_window(self)
         self._update_provider_badge()
+        self.connect("close-request", self._on_close_request)
+
+    def _on_close_request(self, _win) -> bool:
+        """Em modo HUD, fecha a janela ocultando-a da tela sem matar o processo em segundo plano."""
+        self.set_visible(False)
+        return True
+
+    def summon_hud(self) -> None:
+        """Apresenta a janela com foco imediato no campo de busca com zero latência."""
+        self.set_visible(True)
+        self.present()
+        self.entry.grab_focus()
+
+    def toggle_hud(self) -> None:
+        """Alterna a visibilidade da janela em modo HUD."""
+        if self.get_visible() and self.is_active():
+            self.set_visible(False)
+        else:
+            self.summon_hud()
 
     def _build_ui(self) -> None:
         self.toolbar_view = Adw.ToolbarView()
@@ -162,10 +182,15 @@ class CopilotWindow(Adw.ApplicationWindow):
 
         self.toolbar_view.add_top_bar(header)
 
-        # Controlador de teclado para tecla Escape e atalhos de tópico (Ctrl+P, Ctrl+N)
+        # Controlador de teclado para tecla Escape e atalhos de tópico (Ctrl+P, Ctrl+N, Ctrl+Q)
         key_ctrl = Gtk.EventControllerKey()
         def on_key_pressed(_ctrl, keyval, _keycode, state):
             is_ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
+            if is_ctrl and keyval in (Gdk.KEY_q, Gdk.KEY_Q):
+                app = self.get_application()
+                if app:
+                    app.quit()
+                return True
             if is_ctrl and keyval in (Gdk.KEY_p, Gdk.KEY_P):
                 self._on_toggle_pin()
                 return True
@@ -180,7 +205,7 @@ class CopilotWindow(Adw.ApplicationWindow):
                     self._on_new_topic()
                     return True
                 else:
-                    self.close()
+                    self.set_visible(False)
                     return True
             return False
         key_ctrl.connect("key-pressed", on_key_pressed)
@@ -874,19 +899,62 @@ class CopilotWindow(Adw.ApplicationWindow):
 
 
 class ZorinCopilotApp(Adw.Application):
+    """Aplicação Zorin Copilot com suporte a comando de linha, modo HUD e atalhos globais."""
+
     def __init__(self):
-        super().__init__(application_id=__app_id__, flags=Gio.ApplicationFlags.FLAGS_NONE)
+        super().__init__(
+            application_id=__app_id__,
+            flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE,
+        )
+        self.add_main_option(
+            "toggle",
+            ord("t"),
+            GLib.OptionFlags.NONE,
+            GLib.OptionArg.NONE,
+            "Alterna a visibilidade do HUD do Copilot",
+            None,
+        )
+
+    def do_startup(self):
+        super().do_startup()
+        # Garante o registro do atalho de sistema configurado no GNOME
+        try:
+            cfg = CopilotConfig.load()
+            if cfg.global_shortcut_enabled:
+                ShortcutManager.register(cfg.global_shortcut_key)
+        except Exception:
+            pass
+
+    def _get_or_create_window(self) -> CopilotWindow:
+        for win in self.get_windows():
+            if isinstance(win, CopilotWindow):
+                return win
+        return CopilotWindow(self)
 
     def do_activate(self):
-        win = self.props.active_window
-        if not win:
-            win = CopilotWindow(self)
-        win.present()
+        win = self._get_or_create_window()
+        win.summon_hud()
+
+    def do_command_line(self, command_line: Gio.ApplicationCommandLine) -> int:
+        options = command_line.get_options_dict()
+        is_toggle = options.contains("toggle")
+        args = command_line.get_arguments()
+        if "--toggle" in args or "-t" in args:
+            is_toggle = True
+
+        win = self._get_or_create_window()
+        if is_toggle:
+            win.toggle_hud()
+        else:
+            win.summon_hud()
+
+        return 0
 
 
 def main() -> int:
+    import sys
     app = ZorinCopilotApp()
-    return app.run(None)
+    return app.run(sys.argv)
 
 
 if __name__ == "__main__":

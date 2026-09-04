@@ -31,6 +31,10 @@ class CopilotConfig:
 
     # Pesquisa na Web em tempo real
     web_search_enabled: bool = True
+
+    # Atalho Global do Sistema (HUD Summon)
+    global_shortcut_enabled: bool = True
+    global_shortcut_key: str = "<Super>c"
     
     # Prompt de sistema customizável
     system_prompt: str = (
