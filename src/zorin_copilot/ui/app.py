@@ -22,6 +22,7 @@ from ..core.apps import AppManager
 from ..core.config import CopilotConfig
 from ..shell.executor import ActionExecutor
 from .preferences import PreferencesDialog
+from .style import setup_glass_window
 
 
 def format_markdown_to_markup(text: str) -> str:
@@ -126,6 +127,7 @@ class CopilotWindow(Adw.ApplicationWindow):
         self._matched_preview_app: Gio.AppInfo | None = None
 
         self._build_ui()
+        setup_glass_window(self)
         self._update_provider_badge()
 
     def _build_ui(self) -> None:
@@ -139,6 +141,7 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.status_badge_btn = Gtk.Button()
         self.status_badge_btn.add_css_class("flat")
         self.status_badge_btn.add_css_class("pill")
+        self.status_badge_btn.add_css_class("glass-pill")
         self.status_badge_btn.set_tooltip_text("Clique para alterar modelo ou provedor de IA")
         self.status_badge_btn.connect("clicked", self._open_settings)
 
@@ -183,6 +186,7 @@ class CopilotWindow(Adw.ApplicationWindow):
         input_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         
         self.entry = Gtk.Entry()
+        self.entry.add_css_class("glass-entry")
         self.entry.set_placeholder_text("Ex: 'abrir zorin look', 'como acessar o gmail', 'modo escuro'...")
         self.entry.set_icon_from_icon_name(Gtk.EntryIconPosition.PRIMARY, "system-search-symbolic")
         self.entry.set_hexpand(True)
@@ -196,6 +200,7 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.submit_btn = Gtk.Button(label="Pedir", valign=Gtk.Align.CENTER)
         self.submit_btn.add_css_class("suggested-action")
         self.submit_btn.add_css_class("pill")
+        self.submit_btn.add_css_class("glass-submit-btn")
         self.submit_btn.connect("clicked", self._on_submit)
         input_box.append(self.submit_btn)
 
@@ -211,6 +216,7 @@ class CopilotWindow(Adw.ApplicationWindow):
 
         self.app_preview_card = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         self.app_preview_card.add_css_class("card")
+        self.app_preview_card.add_css_class("glass-card")
         self.app_preview_card.set_margin_top(0)
         self.app_preview_card.set_margin_bottom(2)
         self.app_preview_card.set_margin_start(2)
@@ -246,6 +252,7 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.app_preview_launch_btn.set_tooltip_text("Abrir este aplicativo agora")
         self.app_preview_launch_btn.add_css_class("flat")
         self.app_preview_launch_btn.add_css_class("pill")
+        self.app_preview_launch_btn.add_css_class("glass-launch-btn")
         self.app_preview_launch_btn.set_valign(Gtk.Align.CENTER)
 
         btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
@@ -328,6 +335,7 @@ class CopilotWindow(Adw.ApplicationWindow):
             btn = Gtk.Button(label=label_text)
             btn.add_css_class("card")
             btn.add_css_class("pill")
+            btn.add_css_class("glass-chip")
             def make_chip_click(p=prompt_val):
                 return lambda _: self._trigger_prompt(p)
             btn.connect("clicked", make_chip_click())
@@ -342,6 +350,7 @@ class CopilotWindow(Adw.ApplicationWindow):
 
         self.answer_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         self.answer_card.add_css_class("card")
+        self.answer_card.add_css_class("glass-card")
         self.answer_card.set_margin_top(2)
         self.answer_card.set_margin_bottom(2)
         self.answer_card.set_margin_start(2)
@@ -372,6 +381,7 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.copy_btn.set_tooltip_text("Copiar Resposta")
         self.copy_btn.add_css_class("flat")
         self.copy_btn.add_css_class("circular")
+        self.copy_btn.add_css_class("glass-icon-btn")
         self.copy_btn.connect("clicked", self._on_copy_answer)
         card_header.append(self.copy_btn)
 
@@ -415,6 +425,7 @@ class CopilotWindow(Adw.ApplicationWindow):
 
         self.config_ai_btn = Gtk.Button(label="Configurar Chave ⚙️")
         self.config_ai_btn.add_css_class("pill")
+        self.config_ai_btn.add_css_class("glass-pill")
         self.config_ai_btn.connect("clicked", self._open_settings)
         self.config_ai_banner.append(self.config_ai_btn)
 
@@ -638,6 +649,8 @@ class CopilotWindow(Adw.ApplicationWindow):
                     title=action.describe(),
                     subtitle=f"Tipo: {badge_desc}",
                 )
+                row.add_css_class("card")
+                row.add_css_class("glass-row")
 
                 # Ícone semântico do desktop
                 icon_name = get_action_icon(action)
