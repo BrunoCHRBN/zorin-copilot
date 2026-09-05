@@ -704,7 +704,7 @@ class CopilotWindow(Adw.ApplicationWindow):
 
         welcome_icon = Gtk.Image.new_from_icon_name("system-help-symbolic")
         welcome_icon.set_pixel_size(36)
-        welcome_icon.add_css_class("accent")
+        welcome_icon.add_css_class("welcome-icon")
         header_welcome.append(welcome_icon)
 
         welcome_title = Gtk.Label(label="<b>Como posso ajudar hoje?</b>", use_markup=True)
@@ -719,7 +719,7 @@ class CopilotWindow(Adw.ApplicationWindow):
 
         self.welcome_box.append(header_welcome)
 
-        # Grid 2x2 com chips rápidos e compactos
+        # Grid 2x2 com chips rápidos e compactos (ícones simbólicos na cor unificada)
         grid = Gtk.Grid()
         grid.set_column_spacing(10)
         grid.set_row_spacing(10)
@@ -727,17 +727,28 @@ class CopilotWindow(Adw.ApplicationWindow):
         grid.set_margin_top(6)
 
         suggestions = [
-            ("🎙️ Voz ao Vivo (Gemini Live)", "voz_ao_vivo", 0, 0),
-            ("✂️ Recortar Área da Tela", "recortar_area", 1, 0),
-            ("📋 Analisar Copiado", "analisar_copiado", 0, 1),
-            ("⚡ Alternar modo escuro", "ativar modo escuro", 1, 1),
+            ("audio-input-microphone-symbolic", "Voz ao Vivo (Gemini Live)", "voz_ao_vivo", 0, 0),
+            ("edit-cut-symbolic", "Recortar Área da Tela", "recortar_area", 1, 0),
+            ("edit-paste-symbolic", "Analisar Copiado", "analisar_copiado", 0, 1),
+            ("weather-clear-night-symbolic", "Alternar modo escuro", "ativar modo escuro", 1, 1),
         ]
 
-        for label_text, prompt_val, col, row in suggestions:
-            btn = Gtk.Button(label=label_text)
+        for icon_name, label_text, prompt_val, col, row in suggestions:
+            btn = Gtk.Button()
             btn.add_css_class("card")
             btn.add_css_class("pill")
             btn.add_css_class("glass-chip")
+
+            chip_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            chip_box.set_halign(Gtk.Align.CENTER)
+            chip_icon = Gtk.Image.new_from_icon_name(icon_name)
+            chip_icon.set_pixel_size(16)
+            chip_box.append(chip_icon)
+
+            chip_lbl = Gtk.Label(label=label_text)
+            chip_box.append(chip_lbl)
+            btn.set_child(chip_box)
+
             def make_chip_click(p=prompt_val):
                 return lambda _: self._trigger_prompt(p)
             btn.connect("clicked", make_chip_click())
@@ -800,7 +811,6 @@ class CopilotWindow(Adw.ApplicationWindow):
         card_header.set_margin_top(10)
 
         header_icon = Gtk.Image.new_from_icon_name("system-help-symbolic")
-        header_icon.add_css_class("accent")
         card_header.append(header_icon)
 
         card_title = Gtk.Label(label="<b>Resposta do Assistente</b>", use_markup=True, xalign=0)
@@ -1364,7 +1374,6 @@ class CopilotWindow(Adw.ApplicationWindow):
                 icon_name = "camera-photo-symbolic" if action.action_type == ActionType.CAPTURE_SCREEN else get_action_icon(action)
                 prefix_icon = Gtk.Image.new_from_icon_name(icon_name)
                 prefix_icon.set_pixel_size(22)
-                prefix_icon.add_css_class("accent")
                 row.add_prefix(prefix_icon)
 
                 # Botão direto de execução na linha da ação

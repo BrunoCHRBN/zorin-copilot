@@ -55,7 +55,7 @@ class LiveVoiceWidget(Gtk.Box):
         header_box.set_margin_end(16)
 
         self.status_dot = Gtk.Label(label="●", use_markup=True)
-        self.status_dot.add_css_class("accent")
+        self.status_dot.add_css_class("status-dot")
         header_box.append(self.status_dot)
 
         self.status_lbl = Gtk.Label(label="<b>Zorin Copilot Live</b> • Conectando...", use_markup=True, xalign=0)

@@ -33,6 +33,18 @@ class GlassmorphismStyleTest(unittest.TestCase):
         apply_glass_theme()
         self.assertTrue(True)
 
+    def test_unified_icon_colors_defined(self):
+        """Garante que as regras de cores unificadas para ícones estão no CSS."""
+        self.assertIn("#3a4759", GLASS_CSS)
+        self.assertIn("#e4ecf5", GLASS_CSS)
+        self.assertIn("window.light-glass image", GLASS_CSS)
+        self.assertIn("window.dark-glass image", GLASS_CSS)
+
+    def test_accent_shielding_defined(self):
+        """Garante que as cores de acento do Zorin são declaradas para blindar contra temas externos."""
+        self.assertIn("@define-color accent_color #15a6f0;", GLASS_CSS)
+        self.assertIn("@define-color accent_bg_color #15a6f0;", GLASS_CSS)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -19,6 +19,11 @@ GLASS_CSS = """
    Zorin Copilot - Calibrated Frosted Glassmorphism Stylesheet (96% Opacity)
    ==================================================================== */
 
+/* --- Isolamento de Cores e Blindagem contra Temas Externos do SO --- */
+@define-color accent_color #15a6f0;
+@define-color accent_bg_color #15a6f0;
+@define-color accent_fg_color #ffffff;
+
 /* --- Janela Principal Translúcida (Equilíbrio entre vidro e legibilidade) --- */
 window.glass-window,
 window.glass-window.background,
@@ -36,6 +41,106 @@ window.dark-glass,
 window.dark-glass.background,
 window.dark-glass > contents {
     background-color: rgba(20, 24, 33, 0.96);
+}
+
+/* --- Unificação e Blindagem de Cores dos Ícones (Monocromático Neutro) --- */
+/* Modo Claro: Grafite / Ardósia (#3a4759) | Hover: Azul Profundo (#123354) */
+window.light-glass image,
+window.light-glass image.symbolic,
+window.light-glass .glass-icon-btn,
+window.light-glass .glass-icon-btn image,
+window.light-glass button.flat,
+window.light-glass button.flat image,
+window.light-glass headerbar button,
+window.light-glass headerbar button image,
+window.light-glass headerbar windowcontrols button,
+window.light-glass headerbar windowcontrols button image,
+window.light-glass entry image,
+window.light-glass .glass-chip image,
+window.light-glass .welcome-icon,
+window.light-glass popover image,
+window.light-glass popover button image,
+window.light-glass .glass-card image,
+window.light-glass .glass-menu-item image,
+window.light-glass adwactionrow image {
+    color: #3a4759;
+}
+
+window.light-glass button.flat:hover,
+window.light-glass button.flat:hover image,
+window.light-glass .glass-icon-btn:hover,
+window.light-glass .glass-icon-btn:hover image,
+window.light-glass headerbar button:hover,
+window.light-glass headerbar button:hover image,
+window.light-glass headerbar windowcontrols button:hover,
+window.light-glass headerbar windowcontrols button:hover image,
+window.light-glass .glass-chip:hover image,
+window.light-glass .glass-menu-item:hover image {
+    color: #123354;
+}
+
+/* Modo Escuro: Prata / Gelo (#e4ecf5) | Hover: Branco Puro (#ffffff) */
+window.dark-glass image,
+window.dark-glass image.symbolic,
+window.dark-glass .glass-icon-btn,
+window.dark-glass .glass-icon-btn image,
+window.dark-glass button.flat,
+window.dark-glass button.flat image,
+window.dark-glass headerbar button,
+window.dark-glass headerbar button image,
+window.dark-glass headerbar windowcontrols button,
+window.dark-glass headerbar windowcontrols button image,
+window.dark-glass entry image,
+window.dark-glass .glass-chip image,
+window.dark-glass .welcome-icon,
+window.dark-glass popover image,
+window.dark-glass popover button image,
+window.dark-glass .glass-card image,
+window.dark-glass .glass-menu-item image,
+window.dark-glass adwactionrow image {
+    color: #e4ecf5;
+}
+
+window.dark-glass button.flat:hover,
+window.dark-glass button.flat:hover image,
+window.dark-glass .glass-icon-btn:hover,
+window.dark-glass .glass-icon-btn:hover image,
+window.dark-glass headerbar button:hover,
+window.dark-glass headerbar button:hover image,
+window.dark-glass headerbar windowcontrols button:hover,
+window.dark-glass headerbar windowcontrols button:hover image,
+window.dark-glass .glass-chip:hover image,
+window.dark-glass .glass-menu-item:hover image {
+    color: #ffffff;
+}
+
+/* Exceções funcionais: Destrutivo (Lixeira / Deletar) */
+window.glass-window button.destructive-action,
+window.glass-window button.destructive-action image,
+window.glass-window .destructive-action image {
+    color: #e01b24;
+}
+
+/* Botão 'Pedir' e Ações Sugeridas (Sempre Azul Zorin com texto e ícone brancos) */
+window.glass-window button.suggested-action,
+window.glass-window .glass-submit-btn,
+button.suggested-action.glass-submit-btn {
+    background-color: #15a6f0;
+    background-image: none;
+    color: #ffffff;
+    border: 1px solid rgba(13, 143, 209, 0.4);
+}
+
+window.glass-window button.suggested-action:hover,
+window.glass-window .glass-submit-btn:hover,
+button.suggested-action.glass-submit-btn:hover {
+    background-color: #0d8fd1;
+    color: #ffffff;
+}
+
+window.glass-window button.suggested-action image,
+window.glass-window .glass-submit-btn image {
+    color: #ffffff;
 }
 
 /* --- HeaderBar Nativa com Alto Contraste Integrada ao Vidro --- */
@@ -358,7 +463,7 @@ _provider_installed = False
 
 
 def apply_glass_theme(display: Gdk.Display | None = None) -> None:
-    """Aplica o provedor de CSS global para a aplicação."""
+    """Aplica o provedor de CSS global para a aplicação com prioridade de usuário."""
     global _provider_installed
     if _provider_installed:
         return
@@ -372,7 +477,7 @@ def apply_glass_theme(display: Gdk.Display | None = None) -> None:
         Gtk.StyleContext.add_provider_for_display(
             display,
             provider,
-            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+            Gtk.STYLE_PROVIDER_PRIORITY_USER,
         )
         _provider_installed = True
 
