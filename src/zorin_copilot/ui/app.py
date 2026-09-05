@@ -20,6 +20,7 @@ from ..ai.actions import ActionPlan, ActionType, DesktopAction
 from ..ai.engine import IntentEngine
 from ..core.a11y import DesktopInspector
 from ..core.apps import AppManager
+from ..core.clipboard import ClipboardService
 from ..core.config import CopilotConfig
 import time
 from ..core.session import TopicSession
@@ -347,6 +348,135 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.vision_btn.set_popover(vision_popover)
         input_box.append(self.vision_btn)
 
+        # Botão de Clipboard Inteligente (Área de Transferência)
+        self.clipboard_btn = Gtk.MenuButton(valign=Gtk.Align.CENTER)
+        self.clipboard_btn.set_icon_name("edit-paste-symbolic")
+        self.clipboard_btn.set_tooltip_text("Clipboard Inteligente: Analisar, traduzir ou explicar conteúdo copiado")
+        self.clipboard_btn.add_css_class("flat")
+        self.clipboard_btn.add_css_class("circular")
+        self.clipboard_btn.add_css_class("glass-icon-btn")
+
+        clipboard_popover = Gtk.Popover()
+        clipboard_pop_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        clipboard_pop_box.set_margin_top(6)
+        clipboard_pop_box.set_margin_bottom(6)
+        clipboard_pop_box.set_margin_start(6)
+        clipboard_pop_box.set_margin_end(6)
+
+        # Prévia dinâmica do clipboard
+        clip_preview_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        clip_preview_box.set_margin_start(8)
+        clip_preview_box.set_margin_end(8)
+        clip_preview_box.set_margin_top(4)
+        clip_preview_box.set_margin_bottom(6)
+
+        clip_preview_icon = Gtk.Image.new_from_icon_name("edit-paste-symbolic")
+        clip_preview_icon.set_pixel_size(14)
+        clip_preview_icon.add_css_class("dim-label")
+        clip_preview_box.append(clip_preview_icon)
+
+        self.clip_preview_lbl = Gtk.Label(xalign=0)
+        self.clip_preview_lbl.add_css_class("caption")
+        self.clip_preview_lbl.add_css_class("dim-label")
+        self.clip_preview_lbl.set_ellipsize(Pango.EllipsizeMode.END)
+        self.clip_preview_lbl.set_max_width_chars(34)
+        self.clip_preview_lbl.set_text(ClipboardService.get_preview(34))
+        clip_preview_box.append(self.clip_preview_lbl)
+
+        clipboard_pop_box.append(clip_preview_box)
+        clipboard_pop_box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+
+        def _update_clipboard_popover_preview(*_):
+            self.clip_preview_lbl.set_text(ClipboardService.get_preview(34))
+
+        clipboard_popover.connect("show", _update_clipboard_popover_preview)
+
+        def make_clip_item(title: str, sub: str, icon_name: str, prompt_text: str) -> Gtk.Button:
+            btn = Gtk.Button()
+            btn.add_css_class("flat")
+            btn.add_css_class("glass-menu-item")
+            item_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+            item_box.set_margin_start(8)
+            item_box.set_margin_end(8)
+            item_box.set_margin_top(4)
+            item_box.set_margin_bottom(4)
+
+            icon = Gtk.Image.new_from_icon_name(icon_name)
+            icon.set_pixel_size(18)
+            item_box.append(icon)
+
+            lbl_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            lbl_title = Gtk.Label(label=f"<b>{html.escape(title)}</b>", use_markup=True, xalign=0)
+            lbl_sub = Gtk.Label(label=sub, xalign=0)
+            lbl_sub.add_css_class("dim-label")
+            lbl_sub.add_css_class("caption")
+            lbl_box.append(lbl_title)
+            lbl_box.append(lbl_sub)
+            item_box.append(lbl_box)
+
+            btn.set_child(item_box)
+            def on_item_clicked(_):
+                clipboard_popover.popdown()
+                self._trigger_prompt(prompt_text)
+            btn.connect("clicked", on_item_clicked)
+            return btn
+
+        # 1. Explicar Código Copiado
+        clipboard_pop_box.append(
+            make_clip_item(
+                "Explicar Código Copiado",
+                "Analisa lógica, bibliotecas e melhorias",
+                "utilities-terminal-symbolic",
+                "explique o código que acabei de copiar",
+            )
+        )
+
+        # 2. Traduzir para Inglês
+        clipboard_pop_box.append(
+            make_clip_item(
+                "Traduzir para Inglês",
+                "Tradução contextual fluente do texto",
+                "preferences-desktop-locale-symbolic",
+                "traduza o texto selecionado para o inglês",
+            )
+        )
+
+        # 3. Corrigir Gramática & Formalizar E-mail
+        clipboard_pop_box.append(
+            make_clip_item(
+                "Corrigir & Formalizar E-mail",
+                "Revisão gramatical e tom profissional",
+                "mail-send-symbolic",
+                "corrija a gramática e formalize este e-mail",
+            )
+        )
+
+        # 4. Resumir Conteúdo Copiado
+        clipboard_pop_box.append(
+            make_clip_item(
+                "Resumir Conteúdo Copiado",
+                "Pontos essenciais e conclusões em tópicos",
+                "view-list-bullet-symbolic",
+                "resuma o que acabei de copiar",
+            )
+        )
+
+        clipboard_pop_box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+
+        # 5. Analisar Conteúdo Copiado (Geral)
+        clipboard_pop_box.append(
+            make_clip_item(
+                "Analisar Conteúdo Copiado",
+                "Diagnóstico inteligente de texto ou imagem",
+                "system-search-symbolic",
+                "analisar copiado",
+            )
+        )
+
+        clipboard_popover.set_child(clipboard_pop_box)
+        self.clipboard_btn.set_popover(clipboard_popover)
+        input_box.append(self.clipboard_btn)
+
         self.spinner = Gtk.Spinner(valign=Gtk.Align.CENTER)
         input_box.append(self.spinner)
 
@@ -480,9 +610,9 @@ class CopilotWindow(Adw.ApplicationWindow):
 
         suggestions = [
             ("✂️ Recortar Área da Tela", "recortar_area", 0, 0),
-            ("📁 Meu projeto de trabalho", "onde fica meu projeto de trabalho ?", 1, 0),
-            ("⚡ Alternar modo escuro", "ativar modo escuro", 0, 1),
-            ("🌐 Notícias sobre Linux", "pesquise notícias recentes sobre Linux", 1, 1),
+            ("📋 Analisar Copiado", "analisar_copiado", 1, 0),
+            ("📁 Meu projeto de trabalho", "onde fica meu projeto de trabalho ?", 0, 1),
+            ("⚡ Alternar modo escuro", "ativar modo escuro", 1, 1),
         ]
 
         for label_text, prompt_val, col, row in suggestions:
@@ -735,6 +865,10 @@ class CopilotWindow(Adw.ApplicationWindow):
         if text == "capturar_tela":
             self._start_screen_capture(interactive=False)
             return
+        if text == "analisar_copiado":
+            self.entry.set_text("📋 Analisar conteúdo da área de transferência")
+            self._on_submit(self.entry)
+            return
         self.entry.set_text(text)
         self._on_submit(self.entry)
 
@@ -861,6 +995,7 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.entry.set_sensitive(False)
         self.submit_btn.set_sensitive(False)
         self.vision_btn.set_sensitive(False)
+        self.clipboard_btn.set_sensitive(False)
         self.welcome_box.set_visible(False)
 
         mode_name = "recorte selecionado" if is_area else "tela inteira"
@@ -897,11 +1032,20 @@ class CopilotWindow(Adw.ApplicationWindow):
         if not text or self._is_busy:
             return
 
+        low = text.lower()
+        if any(w in low for w in ["copiad", "copiei", "clipboard", "área de transferência", "area de transferencia"]):
+            kind, img_data = ClipboardService.get_content()
+            if kind == "image" and isinstance(img_data, bytes):
+                self._last_captured_image_bytes = img_data
+                self._last_captured_is_area = False
+                self._last_captured_is_clipboard = True
+
         self._is_busy = True
         self.spinner.start()
         self.entry.set_sensitive(False)
         self.submit_btn.set_sensitive(False)
         self.vision_btn.set_sensitive(False)
+        self.clipboard_btn.set_sensitive(False)
         self.welcome_box.set_visible(False)
         self.exec_status.set_text("Pensando...")
 
@@ -918,24 +1062,31 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.entry.set_sensitive(True)
         self.submit_btn.set_sensitive(True)
         self.vision_btn.set_sensitive(True)
+        self.clipboard_btn.set_sensitive(True)
         self.current_plan = plan
         self.welcome_box.set_visible(False)
 
-        # Se houve imagem capturada nesta consulta, renderiza miniatura
+        # Se houve imagem capturada ou copiada nesta consulta, renderiza miniatura
         if getattr(self, "_last_captured_image_bytes", None):
             try:
                 gbytes = GLib.Bytes.new(self._last_captured_image_bytes)
                 texture = Gdk.Texture.new_from_bytes(gbytes)
                 self.vision_thumbnail.set_paintable(texture)
                 is_area = getattr(self, "_last_captured_is_area", False)
-                self.vision_hdr_lbl.set_markup(
-                    "<b>✂️ Recorte de Tela Analisado:</b>" if is_area else "<b>🖥️ Captura de Tela Inteira:</b>"
-                )
+                is_clip = getattr(self, "_last_captured_is_clipboard", False)
+                if is_clip:
+                    header_label = "<b>📋 Imagem da Área de Transferência:</b>"
+                elif is_area:
+                    header_label = "<b>✂️ Recorte de Tela Analisado:</b>"
+                else:
+                    header_label = "<b>🖥️ Captura de Tela Inteira:</b>"
+                self.vision_hdr_lbl.set_markup(header_label)
                 self.vision_preview_box.set_visible(True)
             except Exception:
                 self.vision_preview_box.set_visible(False)
             finally:
                 self._last_captured_image_bytes = None
+                self._last_captured_is_clipboard = False
         else:
             self.vision_preview_box.set_visible(False)
 

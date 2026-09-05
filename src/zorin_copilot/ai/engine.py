@@ -14,6 +14,7 @@ from .actions import ActionPlan, ActionType, DesktopAction
 from .providers import BaseLLMProvider, get_llm_provider
 from ..core.a11y import DesktopInspector
 from ..core.apps import AppManager
+from ..core.clipboard import ClipboardService
 from ..core.config import CopilotConfig
 from ..core.memory import MemoryManager
 from ..core.web_search import WebSearchClient
@@ -153,6 +154,205 @@ class IntentEngine:
                     )
                 ],
             )
+
+        # =========================================================================
+        # 0.5 ÁREA DE TRANSFERÊNCIA: Clipboard Inteligente (Texto, Código e Imagem)
+        # =========================================================================
+        is_clipboard_intent = (
+            any(w in low for w in ["copiad", "copiei", "acabei de copiar", "clipboard", "área de transferência", "area de transferencia"])
+            or low in [
+                "traduza o texto selecionado para o inglês",
+                "traduza o texto selecionado para o ingles",
+                "traduza o texto selecionado",
+                "traduzir o texto selecionado",
+                "traduza a seleção",
+                "traduza a selecao",
+                "corrija a gramática e formalize este e-mail",
+                "corrija a gramatica e formalize este e-mail",
+                "formalize este e-mail",
+                "formalize este email",
+                "formalize este texto",
+                "corrija este e-mail",
+                "corrija este email",
+                "analisar_copiado",
+                "analisar copiado",
+            ]
+            or (
+                any(q in low for q in ["traduza", "traduzir", "corrija", "corrigir", "formalize", "resuma", "resumir", "explique"])
+                and any(t in low for t in ["selecionado", "seleção", "selecao", "este texto", "este e-mail", "este email", "este código", "este codigo"])
+                and len(prompt_clean.split()) <= 12
+            )
+        )
+
+        if is_clipboard_intent and not image_bytes:
+            content_type, clip_content = ClipboardService.get_content()
+
+            if content_type == "empty" or not clip_content:
+                thought = (
+                    "A área de transferência está vazia no momento.\n\n"
+                    "**Como usar o Clipboard Inteligente:**\n"
+                    "1. Selecione o código, texto, e-mail ou imagem em qualquer aplicativo;\n"
+                    "2. Pressione **Ctrl+C** para copiar;\n"
+                    "3. Volte aqui e clique em **📋 Analisar Copiado** ou peça para explicar, traduzir ou formalizar!"
+                )
+                return ActionPlan(
+                    thought=thought,
+                    actions=[
+                        DesktopAction(
+                            ActionType.ANSWER,
+                            "Área de transferência vazia. Copie algum conteúdo (Ctrl+C) e tente novamente.",
+                            description="Aguardando conteúdo copiado na área de transferência",
+                        )
+                    ],
+                    raw_response=thought,
+                )
+
+            if content_type == "image" and isinstance(clip_content, bytes):
+                # Processa imagem da área de transferência via visão computacional multimodal
+                if self.llm_provider.is_configured():
+                    try:
+                        app_names = [a.get_name() for a in AppManager.get_all_apps() if a.get_name()]
+                        context_summary = self.memory.get_context_summary()
+                        vision_prompt = (
+                            "Analise detalhadamente esta imagem copiada da área de transferência no Zorin OS. "
+                            "Identifique qualquer texto, código, diálogo, diagrama ou mensagem visível e explique seu conteúdo com precisão."
+                        )
+                        explanation, actions = self.llm_provider.chat(
+                            vision_prompt,
+                            app_list=app_names,
+                            context_summary=context_summary,
+                            history=history,
+                            image_bytes=clip_content,
+                        )
+                        if not actions:
+                            actions = [
+                                DesktopAction(
+                                    ActionType.ANSWER,
+                                    explanation,
+                                    description="Análise da imagem copiada na área de transferência",
+                                )
+                            ]
+                        return ActionPlan(thought=explanation, actions=actions, raw_response=explanation)
+                    except Exception as exc:
+                        logger.error(f"Erro na análise visual do clipboard: {exc}")
+                        return ActionPlan(
+                            thought=f"Ocorreu um erro ao processar a imagem do clipboard com a IA ({self.config.provider}):\n\n{exc}",
+                            actions=[DesktopAction(ActionType.ANSWER, str(exc), description="Erro de comunicação com a IA")],
+                        )
+                else:
+                    thought = (
+                        "Imagem detectada na área de transferência!\n\n"
+                        "Para que a IA possa ler e analisar o conteúdo da imagem, "
+                        "configure sua chave do Google Gemini nas Preferências (⚙️)."
+                    )
+                    return ActionPlan(
+                        thought=thought,
+                        actions=[
+                            DesktopAction(
+                                ActionType.ANSWER,
+                                "Configure o Gemini para leitura visual do clipboard.",
+                                description="IA não configurada para visão computacional",
+                            )
+                        ],
+                        raw_response=thought,
+                    )
+
+            if content_type == "text" and isinstance(clip_content, str):
+                # Formulação do prompt contextual enriquecido
+                if any(w in low for w in ["expliq", "o que faz", "codigo", "código", "program", "funcao", "função", "script", "bug"]):
+                    enriched_prompt = (
+                        "O usuário copiou o seguinte trecho de código para a área de transferência:\n\n"
+                        f"```\n{clip_content}\n```\n\n"
+                        "Por favor, analise e explique detalhadamente:\n"
+                        "1. **Finalidade:** O que este código faz;\n"
+                        "2. **Lógica & Componentes:** Como funciona e que módulos ou sintaxes utiliza;\n"
+                        "3. **Melhorias & Boas Práticas:** Sugestões de otimização, legibilidade ou potenciais bugs."
+                    )
+                elif any(w in low for w in ["traduz", "ingles", "inglês", "portugues", "português", "espanhol", "idioma"]):
+                    enriched_prompt = (
+                        "O usuário copiou o seguinte texto para a área de transferência:\n\n"
+                        f"\"{clip_content}\"\n\n"
+                        "Por favor, traduza este conteúdo para o inglês (ou para o idioma indicado), priorizando uma linguagem fluente, natural e precisa. Se houver expressões idiomáticas ou termos específicos, aponte breves notas de tradução."
+                    )
+                elif any(w in low for w in ["corrija", "corrigir", "formaliz", "gramatica", "gramática", "e-mail", "email", "melhor"]):
+                    enriched_prompt = (
+                        "O usuário copiou o seguinte texto/e-mail para a área de transferência:\n\n"
+                        f"\"{clip_content}\"\n\n"
+                        "Por favor, faça a revisão deste texto:\n"
+                        "1. **Correção Gramatical:** Corrija concordância, pontuação, acentuação e clareza;\n"
+                        "2. **Versão Formal:** Reescreva em formato profissional, cortês e polido;\n"
+                        "3. **Texto Pronto:** Apresente o texto final pronto para cópia/envio."
+                    )
+                elif any(w in low for w in ["resum", "sintetiz", "topicos", "tópicos", "principais pontos"]):
+                    enriched_prompt = (
+                        "O usuário copiou o seguinte texto para a área de transferência:\n\n"
+                        f"\"{clip_content}\"\n\n"
+                        "Por favor, elabore um resumo conciso e estruturado em tópicos (bullet points), destacando as ideias centrais, conclusões e decisões mais importantes."
+                    )
+                else:
+                    lines = clip_content.strip().splitlines()
+                    looks_like_code = (
+                        any(k in clip_content for k in ["def ", "import ", "class ", "function", "const ", "var ", "let ", "return ", "SELECT ", "FROM ", "<div>", "public static"])
+                        or (len(lines) > 2 and any(l.startswith("    ") or l.startswith("\t") for l in lines))
+                    )
+                    if looks_like_code:
+                        enriched_prompt = (
+                            "O usuário copiou o seguinte trecho de código para a área de transferência:\n\n"
+                            f"```\n{clip_content}\n```\n\n"
+                            "Por favor, analise este código: explique o que ele faz, sua estrutura, lógica e aponte sugestões de otimização ou correções se aplicável."
+                        )
+                    else:
+                        instruction = prompt_clean if low not in ("analisar copiado", "analisar_copiado", "analise o copiado", "analise o que copiei", "clipboard") else "Analise detalhadamente o conteúdo acima, explique seu propósito e forneça pontos de atenção ou ações recomendadas."
+                        enriched_prompt = (
+                            "O usuário copiou o seguinte conteúdo para a área de transferência:\n\n"
+                            f"\"{clip_content}\"\n\n"
+                            f"Instrução do usuário: {instruction}"
+                        )
+
+                if self.llm_provider.is_configured():
+                    try:
+                        app_names = [a.get_name() for a in AppManager.get_all_apps() if a.get_name()]
+                        context_summary = self.memory.get_context_summary()
+                        explanation, actions = self.llm_provider.chat(
+                            enriched_prompt,
+                            app_list=app_names,
+                            context_summary=context_summary,
+                            history=history,
+                        )
+                        if not actions:
+                            actions = [
+                                DesktopAction(
+                                    ActionType.ANSWER,
+                                    explanation,
+                                    description="Análise do conteúdo da área de transferência",
+                                )
+                            ]
+                        return ActionPlan(thought=explanation, actions=actions, raw_response=explanation)
+                    except Exception as exc:
+                        logger.error(f"Erro na análise de texto do clipboard: {exc}")
+                        return ActionPlan(
+                            thought=f"Ocorreu um erro ao comunicar com a IA ({self.config.provider}):\n\n{exc}",
+                            actions=[DesktopAction(ActionType.ANSWER, str(exc), description="Erro de comunicação com a IA")],
+                        )
+                else:
+                    preview = ClipboardService.get_preview(60)
+                    thought = (
+                        f"Conteúdo detectado na área de transferência ({len(clip_content)} caracteres):\n\n"
+                        f"> {preview}\n\n"
+                        "Para que a IA explique este código, traduza o texto, corrija o e-mail ou gere resumos, "
+                        "configure sua chave do Google Gemini ou Ollama nas Preferências (⚙️)."
+                    )
+                    return ActionPlan(
+                        thought=thought,
+                        actions=[
+                            DesktopAction(
+                                ActionType.ANSWER,
+                                "Configure um provedor de IA nas Preferências (⚙️) para habilitar a análise do clipboard.",
+                                description="IA não configurada para análise de clipboard",
+                            )
+                        ],
+                        raw_response=thought,
+                    )
 
         # =========================================================================
         # 1. CAMADA RÁPIDA LOCAL: Relógio do Sistema e Configurações (0ms)
