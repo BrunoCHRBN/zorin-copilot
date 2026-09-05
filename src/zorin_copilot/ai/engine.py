@@ -42,9 +42,90 @@ class IntentEngine:
         self.config = config or CopilotConfig.load()
         self.llm_provider = get_llm_provider(self.config)
 
-    def parse(self, prompt: str, history: list[dict[str, str]] | None = None) -> ActionPlan:
+    def parse(
+        self,
+        prompt: str,
+        history: list[dict[str, str]] | None = None,
+        image_bytes: bytes | None = None,
+        is_area_capture: bool = False,
+    ) -> ActionPlan:
         prompt_clean = prompt.strip()
         low = prompt_clean.lower()
+
+        # =========================================================================
+        # -1. MODO VISUAL MULTIMODAL (Análise de tela ou recorte de área)
+        # =========================================================================
+        if image_bytes:
+            if not prompt_clean or any(
+                low == w
+                for w in [
+                    "analise", "leia", "veja", "o que tem na tela", "analisar tela",
+                    "analise minha tela", "analise a tela", "print", "screenshot",
+                    "analise este recorte", "analise o recorte", "recorte",
+                ]
+            ):
+                if is_area_capture:
+                    prompt_clean = (
+                        "Analise detalhadamente o conteúdo deste recorte de tela selecionado no Zorin OS. "
+                        "Identifique e leia qualquer texto, código, diálogo, mensagem de erro ou dados visíveis. "
+                        "Explique claramente o que significa e indique a solução ou próximos passos recomendados."
+                    )
+                else:
+                    prompt_clean = (
+                        "Analise esta captura de tela completa do desktop no Zorin OS. "
+                        "Identifique as janelas ativas, mensagens de erro ou informações visíveis e explique o que está acontecendo e como proceder."
+                    )
+
+            if self.llm_provider.is_configured():
+                try:
+                    app_names = [a.get_name() for a in AppManager.get_all_apps() if a.get_name()]
+                    context_summary = self.memory.get_context_summary()
+                    explanation, actions = self.llm_provider.chat(
+                        prompt_clean,
+                        app_list=app_names,
+                        context_summary=context_summary,
+                        history=history,
+                        image_bytes=image_bytes,
+                    )
+                    if not actions:
+                        actions = [
+                            DesktopAction(
+                                ActionType.ANSWER,
+                                explanation,
+                                description="Análise visual do Zorin Copilot",
+                            )
+                        ]
+                    return ActionPlan(
+                        thought=explanation,
+                        actions=actions,
+                        raw_response=explanation,
+                    )
+                except Exception as exc:
+                    logger.error(f"Erro na análise visual da imagem: {exc}")
+                    return ActionPlan(
+                        thought=f"Ocorreu um erro ao processar a imagem com a IA ({self.config.provider}):\n\n{exc}",
+                        actions=[
+                            DesktopAction(
+                                ActionType.ANSWER,
+                                f"Falha na visão: {exc}",
+                                description="Erro de comunicação com o modelo",
+                            )
+                        ],
+                    )
+            else:
+                return ActionPlan(
+                    thought=(
+                        "A captura da tela foi realizada com sucesso! Porém, para fazer a leitura inteligente "
+                        "do conteúdo da imagem, é necessário conectar sua chave do Google Gemini nas Preferências (⚙️)."
+                    ),
+                    actions=[
+                        DesktopAction(
+                            ActionType.ANSWER,
+                            "IA não configurada para visão computacional.",
+                            description="Configurar chave de API para análise visual",
+                        )
+                    ],
+                )
 
         # =========================================================================
         # 0. BASE DE CONHECIMENTO: Memorização e Aprendizado Explícito
@@ -202,6 +283,29 @@ class IntentEngine:
                     )
                 ],
             )
+        # Análise Visual da Tela
+        if any(w in low for w in ["analise minha tela", "analise a tela", "o que tem na minha tela", "o que está na minha tela", "leia minha tela", "ler minha tela", "analise esse erro", "analise o erro", "analisar tela", "ler tela"]):
+            return ActionPlan(
+                thought=(
+                    "Para analisar a tela com precisão, você pode usar os botões de visão computacional:\n\n"
+                    "• **✂️ Recortar Área da Tela:** Selecione com o mouse exatamente a área ou erro que deseja ler.\n"
+                    "• **🖥️ Capturar Tela Inteira:** Lê toda a área de trabalho de uma vez só.\n\n"
+                    "Ao selecionar, o Copilot faz a leitura e o diagnóstico automaticamente!"
+                ),
+                actions=[
+                    DesktopAction(
+                        ActionType.CAPTURE_SCREEN,
+                        "area",
+                        description="Recortar área da tela para leitura imediata",
+                    ),
+                    DesktopAction(
+                        ActionType.CAPTURE_SCREEN,
+                        "fullscreen",
+                        description="Capturar tela inteira para análise",
+                    ),
+                ],
+            )
+
         if any(w in low for w in ["tirar print", "print da tela", "screenshot", "capturar tela"]):
             return ActionPlan(
                 thought="Abrir ferramenta de captura de tela",

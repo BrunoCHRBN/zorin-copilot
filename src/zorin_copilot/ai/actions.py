@@ -19,6 +19,7 @@ class ActionType(str, Enum):
     WINDOW_LAYOUT = "window_layout"
     COMMAND = "command"
     ANSWER = "answer"
+    CAPTURE_SCREEN = "capture_screen"
 
 
 @dataclass
@@ -47,6 +48,8 @@ class DesktopAction:
             return f"Notificação: {self.params.get('message', self.target)}"
         if self.action_type == ActionType.WINDOW_LAYOUT:
             return f"Ajustar layout de janelas: {self.target}"
+        if self.action_type == ActionType.CAPTURE_SCREEN:
+            return f"Capturar e analisar {'área da tela' if self.target == 'area' else 'tela inteira'}"
         if self.action_type == ActionType.ANSWER:
             return f"Resposta: {self.target}"
         return f"Ação {self.action_type.value} em {self.target}"

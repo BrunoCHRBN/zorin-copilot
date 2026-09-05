@@ -69,6 +69,8 @@ class BaseLLMProvider(ABC):
         app_list: list[str] | None = None,
         context_summary: str | None = None,
         history: list[dict[str, str]] | None = None,
+        image_bytes: bytes | None = None,
+        image_mime: str = "image/jpeg",
     ) -> tuple[str, list[DesktopAction]]:
         """Processa a solicitação do usuário e retorna (explicação, lista de ações propostas)."""
         pass
@@ -160,6 +162,8 @@ class GeminiProvider(BaseLLMProvider):
         app_list: list[str] | None = None,
         context_summary: str | None = None,
         history: list[dict[str, str]] | None = None,
+        image_bytes: bytes | None = None,
+        image_mime: str = "image/jpeg",
     ) -> tuple[str, list[DesktopAction]]:
         if not self.is_configured():
             return (
@@ -183,7 +187,18 @@ class GeminiProvider(BaseLLMProvider):
                 if text:
                     contents.append({"role": role, "parts": [{"text": text}]})
 
-        contents.append({"role": "user", "parts": [{"text": prompt}]})
+        user_parts: list[dict[str, Any]] = []
+        if image_bytes:
+            import base64
+            b64_img = base64.b64encode(image_bytes).decode("utf-8")
+            user_parts.append({
+                "inline_data": {
+                    "mime_type": image_mime,
+                    "data": b64_img,
+                }
+            })
+        user_parts.append({"text": prompt})
+        contents.append({"role": "user", "parts": user_parts})
 
         payload = {
             "system_instruction": {
@@ -257,6 +272,8 @@ class OllamaProvider(BaseLLMProvider):
         app_list: list[str] | None = None,
         context_summary: str | None = None,
         history: list[dict[str, str]] | None = None,
+        image_bytes: bytes | None = None,
+        image_mime: str = "image/jpeg",
     ) -> tuple[str, list[DesktopAction]]:
         url = f"{self.host_url}/api/chat"
         sys_instruction = SYSTEM_PROMPT
@@ -268,7 +285,12 @@ class OllamaProvider(BaseLLMProvider):
         messages = [{"role": "system", "content": sys_instruction}]
         if history:
             messages.extend(history)
-        messages.append({"role": "user", "content": prompt})
+        
+        user_msg: dict[str, Any] = {"role": "user", "content": prompt}
+        if image_bytes:
+            import base64
+            user_msg["images"] = [base64.b64encode(image_bytes).decode("utf-8")]
+        messages.append(user_msg)
 
         payload = {
             "model": self.model,
@@ -323,6 +345,8 @@ class OpenAICompatProvider(BaseLLMProvider):
         app_list: list[str] | None = None,
         context_summary: str | None = None,
         history: list[dict[str, str]] | None = None,
+        image_bytes: bytes | None = None,
+        image_mime: str = "image/jpeg",
     ) -> tuple[str, list[DesktopAction]]:
         if not self.is_configured():
             return "Chave de API ou URL não configurada.", []

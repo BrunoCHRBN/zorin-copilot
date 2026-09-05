@@ -21,8 +21,10 @@ from ..ai.engine import IntentEngine
 from ..core.a11y import DesktopInspector
 from ..core.apps import AppManager
 from ..core.config import CopilotConfig
+import time
 from ..core.session import TopicSession
 from ..core.shortcuts import ShortcutManager
+from ..core.vision import ScreenCaptureService
 from ..shell.executor import ActionExecutor
 from .preferences import PreferencesDialog
 from .style import setup_glass_window
@@ -149,6 +151,7 @@ class CopilotWindow(Adw.ApplicationWindow):
         self._is_busy = False
         self._search_debounce_timer: int | None = None
         self._matched_preview_app: Gio.AppInfo | None = None
+        self._last_captured_image_bytes: bytes | None = None
 
         self._build_ui()
         setup_glass_window(self)
@@ -274,6 +277,75 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.entry.connect("activate", self._on_submit)
         self.entry.connect("changed", self._on_entry_changed)
         input_box.append(self.entry)
+
+        # Botão de Visão Computacional (Captura de tela e recorte de área)
+        self.vision_btn = Gtk.MenuButton(valign=Gtk.Align.CENTER)
+        self.vision_btn.set_icon_name("camera-photo-symbolic")
+        self.vision_btn.set_tooltip_text("Visão Computacional: Ler ou recortar a tela com IA")
+        self.vision_btn.add_css_class("flat")
+        self.vision_btn.add_css_class("circular")
+        self.vision_btn.add_css_class("glass-icon-btn")
+
+        vision_popover = Gtk.Popover()
+        vision_pop_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        vision_pop_box.set_margin_top(6)
+        vision_pop_box.set_margin_bottom(6)
+        vision_pop_box.set_margin_start(6)
+        vision_pop_box.set_margin_end(6)
+
+        # 1. Recortar Área da Tela
+        area_btn = Gtk.Button()
+        area_btn.add_css_class("flat")
+        area_btn.add_css_class("glass-menu-item")
+        area_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        area_box.set_margin_start(8)
+        area_box.set_margin_end(8)
+        area_box.set_margin_top(4)
+        area_box.set_margin_bottom(4)
+        area_icon = Gtk.Image.new_from_icon_name("edit-cut-symbolic")
+        area_icon.set_pixel_size(18)
+        area_box.append(area_icon)
+        area_lbl_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        area_lbl_title = Gtk.Label(label="<b>Recortar Área da Tela</b>", use_markup=True, xalign=0)
+        area_lbl_sub = Gtk.Label(label="Selecione com o mouse para leitura imediata", xalign=0)
+        area_lbl_sub.add_css_class("dim-label")
+        area_lbl_sub.add_css_class("caption")
+        area_lbl_box.append(area_lbl_title)
+        area_lbl_box.append(area_lbl_sub)
+        area_box.append(area_lbl_box)
+        area_btn.set_child(area_box)
+        area_btn.connect("clicked", lambda _: (vision_popover.popdown(), self._start_screen_capture(interactive=True)))
+        vision_pop_box.append(area_btn)
+
+        vision_pop_box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+
+        # 2. Capturar Tela Inteira
+        full_btn = Gtk.Button()
+        full_btn.add_css_class("flat")
+        full_btn.add_css_class("glass-menu-item")
+        full_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        full_box.set_margin_start(8)
+        full_box.set_margin_end(8)
+        full_box.set_margin_top(4)
+        full_box.set_margin_bottom(4)
+        full_icon = Gtk.Image.new_from_icon_name("zoom-fit-best-symbolic")
+        full_icon.set_pixel_size(18)
+        full_box.append(full_icon)
+        full_lbl_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        full_lbl_title = Gtk.Label(label="<b>Capturar Tela Inteira</b>", use_markup=True, xalign=0)
+        full_lbl_sub = Gtk.Label(label="Analisa toda a tela do desktop", xalign=0)
+        full_lbl_sub.add_css_class("dim-label")
+        full_lbl_sub.add_css_class("caption")
+        full_lbl_box.append(full_lbl_title)
+        full_lbl_box.append(full_lbl_sub)
+        full_box.append(full_lbl_box)
+        full_btn.set_child(full_box)
+        full_btn.connect("clicked", lambda _: (vision_popover.popdown(), self._start_screen_capture(interactive=False)))
+        vision_pop_box.append(full_btn)
+
+        vision_popover.set_child(vision_pop_box)
+        self.vision_btn.set_popover(vision_popover)
+        input_box.append(self.vision_btn)
 
         self.spinner = Gtk.Spinner(valign=Gtk.Align.CENTER)
         input_box.append(self.spinner)
@@ -407,10 +479,10 @@ class CopilotWindow(Adw.ApplicationWindow):
         grid.set_margin_top(6)
 
         suggestions = [
-            ("📁 Onde fica meu projeto de trabalho?", "onde fica meu projeto de trabalho ?", 0, 0),
-            ("⚡ Ativar modo escuro", "ativar modo escuro", 1, 0),
-            ("🌐 Notícias recentes sobre Linux", "pesquise notícias recentes sobre Linux", 0, 1),
-            ("🖥️ Abrir o Terminal", "abrir terminal", 1, 1),
+            ("✂️ Recortar Área da Tela", "recortar_area", 0, 0),
+            ("📁 Meu projeto de trabalho", "onde fica meu projeto de trabalho ?", 1, 0),
+            ("⚡ Alternar modo escuro", "ativar modo escuro", 0, 1),
+            ("🌐 Notícias sobre Linux", "pesquise notícias recentes sobre Linux", 1, 1),
         ]
 
         for label_text, prompt_val, col, row in suggestions:
@@ -535,6 +607,28 @@ class CopilotWindow(Adw.ApplicationWindow):
         sep.set_margin_bottom(4)
         self.answer_card.append(sep)
 
+        # Miniatura da captura visual analisada (se houver imagem)
+        self.vision_preview_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        self.vision_preview_box.set_margin_start(14)
+        self.vision_preview_box.set_margin_end(14)
+        self.vision_preview_box.set_margin_top(4)
+        self.vision_preview_box.set_margin_bottom(6)
+        self.vision_preview_box.set_visible(False)
+
+        self.vision_hdr_lbl = Gtk.Label(label="<b>Recorte da Tela Analisado:</b>", use_markup=True, xalign=0)
+        self.vision_hdr_lbl.add_css_class("caption")
+        self.vision_hdr_lbl.add_css_class("dim-label")
+        self.vision_preview_box.append(self.vision_hdr_lbl)
+
+        self.vision_thumbnail = Gtk.Picture()
+        self.vision_thumbnail.set_can_shrink(True)
+        self.vision_thumbnail.set_content_fit(Gtk.ContentFit.CONTAIN)
+        self.vision_thumbnail.set_size_request(-1, 140)
+        self.vision_thumbnail.add_css_class("card")
+        self.vision_preview_box.append(self.vision_thumbnail)
+
+        self.answer_card.append(self.vision_preview_box)
+
         # Texto formatado da resposta (Markdown / Pango Markup)
         self.answer_label = Gtk.Label(xalign=0, yalign=0)
         self.answer_label.set_wrap(True)
@@ -634,7 +728,13 @@ class CopilotWindow(Adw.ApplicationWindow):
         self._update_provider_badge()
 
     def _trigger_prompt(self, text: str) -> None:
-        """Dispara um prompt a partir de um chip de sugestão rápida."""
+        """Dispara um prompt ou ação a partir de um chip de sugestão rápida."""
+        if text == "recortar_area":
+            self._start_screen_capture(interactive=True)
+            return
+        if text == "capturar_tela":
+            self._start_screen_capture(interactive=False)
+            return
         self.entry.set_text(text)
         self._on_submit(self.entry)
 
@@ -722,6 +822,71 @@ class CopilotWindow(Adw.ApplicationWindow):
         )
         self.app_preview_revealer.set_reveal_child(False)
 
+    def _start_screen_capture(self, interactive: bool = True) -> None:
+        """Inicia a captura de tela (recorte ou tela cheia) ocultando temporariamente o Copilot."""
+        if self._is_busy:
+            return
+
+        # Oculta a janela para não obstruir o que o usuário quer recortar/analisar
+        self.set_visible(False)
+
+        prompt_typed = self.entry.get_text().strip()
+
+        def capture_worker():
+            # Aguarda 200ms para que o compositor Wayland conclua a remoção visual da janela
+            time.sleep(0.2)
+            success, img_bytes, mode = ScreenCaptureService.capture(interactive=interactive)
+            GLib.idle_add(self._on_capture_finished, success, img_bytes, mode, prompt_typed, interactive)
+
+        threading.Thread(target=capture_worker, daemon=True).start()
+
+    def _on_capture_finished(
+        self,
+        success: bool,
+        image_bytes: bytes | None,
+        mode: str,
+        prompt_typed: str,
+        is_area: bool,
+    ) -> bool:
+        """Restaura a janela e dispara a análise multimodal na thread de IA."""
+        self.set_visible(True)
+        self.present()
+
+        if not success or not image_bytes:
+            self.show_toast("Captura de tela cancelada.")
+            return False
+
+        self._is_busy = True
+        self.spinner.start()
+        self.entry.set_sensitive(False)
+        self.submit_btn.set_sensitive(False)
+        self.vision_btn.set_sensitive(False)
+        self.welcome_box.set_visible(False)
+
+        mode_name = "recorte selecionado" if is_area else "tela inteira"
+        self.exec_status.set_text(f"📸 Lendo {mode_name} com IA...")
+
+        if not prompt_typed:
+            self.entry.set_text("✂️ Analisando recorte de tela..." if is_area else "🖥️ Analisando tela cheia...")
+
+        # Guarda os bytes da imagem para renderizar thumbnail no resultado
+        self._last_captured_image_bytes = image_bytes
+        self._last_captured_is_area = is_area
+
+        def parse_thread():
+            history = self.session.get_history_for_llm()
+            plan = self.engine.parse(
+                prompt_typed,
+                history=history,
+                image_bytes=image_bytes,
+                is_area_capture=is_area,
+            )
+            prompt_label = prompt_typed or ("Recorte de tela" if is_area else "Captura de tela")
+            GLib.idle_add(self._on_plan_ready, plan, prompt_label)
+
+        threading.Thread(target=parse_thread, daemon=True).start()
+        return False
+
     def _on_submit(self, _widget: Gtk.Widget) -> None:
         if self._search_debounce_timer:
             GLib.source_remove(self._search_debounce_timer)
@@ -736,6 +901,7 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.spinner.start()
         self.entry.set_sensitive(False)
         self.submit_btn.set_sensitive(False)
+        self.vision_btn.set_sensitive(False)
         self.welcome_box.set_visible(False)
         self.exec_status.set_text("Pensando...")
 
@@ -751,8 +917,27 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.spinner.stop()
         self.entry.set_sensitive(True)
         self.submit_btn.set_sensitive(True)
+        self.vision_btn.set_sensitive(True)
         self.current_plan = plan
         self.welcome_box.set_visible(False)
+
+        # Se houve imagem capturada nesta consulta, renderiza miniatura
+        if getattr(self, "_last_captured_image_bytes", None):
+            try:
+                gbytes = GLib.Bytes.new(self._last_captured_image_bytes)
+                texture = Gdk.Texture.new_from_bytes(gbytes)
+                self.vision_thumbnail.set_paintable(texture)
+                is_area = getattr(self, "_last_captured_is_area", False)
+                self.vision_hdr_lbl.set_markup(
+                    "<b>✂️ Recorte de Tela Analisado:</b>" if is_area else "<b>🖥️ Captura de Tela Inteira:</b>"
+                )
+                self.vision_preview_box.set_visible(True)
+            except Exception:
+                self.vision_preview_box.set_visible(False)
+            finally:
+                self._last_captured_image_bytes = None
+        else:
+            self.vision_preview_box.set_visible(False)
 
         # 1. Renderiza a Resposta / Pensamento com Pango Markup
         explanation_text = plan.thought.strip()
@@ -769,8 +954,11 @@ class CopilotWindow(Adw.ApplicationWindow):
                     self._save_current_session()
                 self._update_pin_ui()
 
-            # Badge da fonte: Web ou Memória
-            if "[Resultados da Pesquisa" in explanation_text or any(a.action_type == ActionType.OPEN_URL for a in plan.actions):
+            # Badge da fonte: Visão, Web ou Memória
+            if self.vision_preview_box.get_visible():
+                self.source_badge.set_text("📸 Visão IA")
+                self.source_badge.set_visible(True)
+            elif "[Resultados da Pesquisa" in explanation_text or any(a.action_type == ActionType.OPEN_URL for a in plan.actions):
                 self.source_badge.set_text("🌐 Web")
                 self.source_badge.set_visible(True)
             elif "base de conhecimento" in explanation_text.lower() or "memorizado" in explanation_text.lower():
@@ -798,6 +986,7 @@ class CopilotWindow(Adw.ApplicationWindow):
                     ActionType.SYSTEM_CONTROL: "configuração do sistema",
                     ActionType.CLICK: "interação acessível",
                     ActionType.NOTIFY: "notificação",
+                    ActionType.CAPTURE_SCREEN: "visão da tela",
                 }.get(action.action_type, action.action_type.value)
 
                 row = Adw.ActionRow(
@@ -808,51 +997,56 @@ class CopilotWindow(Adw.ApplicationWindow):
                 row.add_css_class("glass-row")
 
                 # Ícone semântico do desktop
-                icon_name = get_action_icon(action)
+                icon_name = "camera-photo-symbolic" if action.action_type == ActionType.CAPTURE_SCREEN else get_action_icon(action)
                 prefix_icon = Gtk.Image.new_from_icon_name(icon_name)
                 prefix_icon.set_pixel_size(22)
                 prefix_icon.add_css_class("accent")
                 row.add_prefix(prefix_icon)
 
                 # Botão direto de execução na linha da ação
-                exec_btn = Gtk.Button(label="Executar")
+                exec_btn = Gtk.Button(label="Recortar Agora" if (action.action_type == ActionType.CAPTURE_SCREEN and action.target == "area") else "Executar")
                 exec_btn.add_css_class("suggested-action")
                 exec_btn.add_css_class("pill")
                 exec_btn.set_valign(Gtk.Align.CENTER)
 
-                def make_exec_handler(act: DesktopAction, btn: Gtk.Button):
-                    def handler(_):
-                        btn.set_sensitive(False)
-                        btn.set_label("Executando...")
-                        single_plan = ActionPlan(
-                            thought=self.current_plan.thought if self.current_plan else "",
-                            actions=[act],
-                        )
-                        reports = self.executor.execute_plan(single_plan, dry_run=False)
-                        rep = reports[0] if reports else None
-                        prompt_text = self.entry.get_text().strip()
-                        if rep and rep.success:
-                            btn.set_label("Executado ✓")
-                            btn.remove_css_class("suggested-action")
-                            btn.add_css_class("flat")
-                            self.exec_status.set_text(f"✓ {rep.message}")
-                        else:
-                            err = rep.message if rep else "Erro"
-                            btn.set_label("Falha ✗")
-                            self.exec_status.set_text(f"✗ {err}")
-
-                        if rep:
-                            self.engine.memory.log_action(
-                                prompt=prompt_text,
-                                action_type=act.action_type.value,
-                                target=act.target,
-                                params=act.params,
-                                success=rep.success,
-                                message=rep.message,
+                if action.action_type == ActionType.CAPTURE_SCREEN:
+                    is_area_target = (action.target == "area")
+                    exec_btn.connect("clicked", lambda _, a=is_area_target: self._start_screen_capture(interactive=a))
+                else:
+                    def make_exec_handler(act: DesktopAction, btn: Gtk.Button):
+                        def handler(_):
+                            btn.set_sensitive(False)
+                            btn.set_label("Executando...")
+                            single_plan = ActionPlan(
+                                thought=self.current_plan.thought if self.current_plan else "",
+                                actions=[act],
                             )
-                    return handler
+                            reports = self.executor.execute_plan(single_plan, dry_run=False)
+                            rep = reports[0] if reports else None
+                            prompt_text = self.entry.get_text().strip()
+                            if rep and rep.success:
+                                btn.set_label("Executado ✓")
+                                btn.remove_css_class("suggested-action")
+                                btn.add_css_class("flat")
+                                self.exec_status.set_text(f"✓ {rep.message}")
+                            else:
+                                err = rep.message if rep else "Erro"
+                                btn.set_label("Falha ✗")
+                                self.exec_status.set_text(f"✗ {err}")
 
-                exec_btn.connect("clicked", make_exec_handler(action, exec_btn))
+                            if rep:
+                                self.engine.memory.log_action(
+                                    prompt=prompt_text,
+                                    action_type=act.action_type.value,
+                                    target=act.target,
+                                    params=act.params,
+                                    success=rep.success,
+                                    message=rep.message,
+                                )
+                        return handler
+
+                    exec_btn.connect("clicked", make_exec_handler(action, exec_btn))
+
                 row.add_suffix(exec_btn)
                 self.actions_box.append(row)
 

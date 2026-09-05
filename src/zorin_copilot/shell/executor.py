@@ -68,8 +68,8 @@ class ActionExecutor:
         if action.action_type == ActionType.CLICK:
             return self._click_element(action.target)
 
-        if action.action_type == ActionType.WINDOW_LAYOUT:
-            return self._apply_window_layout(action.target, action.params)
+        if action.action_type == ActionType.CAPTURE_SCREEN:
+            return ExecutionReport(action=action, success=True, message=action.describe())
 
         if action.action_type == ActionType.ANSWER:
             return ExecutionReport(action=action, success=True, message=action.target)
