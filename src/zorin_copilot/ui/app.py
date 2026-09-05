@@ -1148,7 +1148,7 @@ class ZorinCopilotApp(Adw.Application):
         )
 
     def do_startup(self):
-        super().do_startup()
+        Adw.Application.do_startup(self)
         # Garante o registro do atalho de sistema configurado no GNOME
         try:
             cfg = CopilotConfig.load()
