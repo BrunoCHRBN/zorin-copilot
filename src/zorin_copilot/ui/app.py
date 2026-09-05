@@ -27,6 +27,8 @@ from ..core.session import TopicSession
 from ..core.shortcuts import ShortcutManager
 from ..core.vision import ScreenCaptureService
 from ..shell.executor import ActionExecutor
+from ..ai.live import GeminiLiveClient
+from .live_view import LiveVoiceWidget
 from .preferences import PreferencesDialog
 from .style import setup_glass_window
 
@@ -163,6 +165,10 @@ class CopilotWindow(Adw.ApplicationWindow):
         self._active_image_is_area: bool = False
         self._active_image_is_clipboard: bool = False
 
+        # Voz ao Vivo (Gemini Multimodal Live)
+        self.live_client: GeminiLiveClient | None = None
+        self.live_voice_widget: LiveVoiceWidget | None = None
+
         self._build_ui()
         setup_glass_window(self)
         self._update_provider_badge()
@@ -170,6 +176,8 @@ class CopilotWindow(Adw.ApplicationWindow):
 
     def _on_close_request(self, _win) -> bool:
         """Em modo HUD, fecha a janela ocultando-a da tela sem matar o processo em segundo plano."""
+        if self.live_client and self.live_client.is_active():
+            self.stop_live_voice()
         self.set_visible(False)
         return True
 
@@ -181,6 +189,49 @@ class CopilotWindow(Adw.ApplicationWindow):
 
     def toggle_hud(self) -> None:
         """Alterna a visibilidade da janela em modo HUD."""
+        if self.get_visible() and self.is_active():
+            self.set_visible(False)
+        else:
+            self.summon_hud()
+
+    def toggle_live_voice(self) -> None:
+        """Alterna a ativação do modo de conversa de voz ao vivo (Gemini Live)."""
+        if self.live_client and self.live_client.is_active():
+            self.stop_live_voice()
+        else:
+            self.start_live_voice()
+
+    def start_live_voice(self) -> None:
+        """Inicia o chat de voz ao vivo com o Gemini Live."""
+        if not self.config.gemini_api_key.strip():
+            self.show_toast("Chave de API do Google Gemini necessária para voz ao vivo. Configure em ⚙️.")
+            self._open_settings(self.voice_call_btn)
+            return
+
+        if not self.live_client:
+            self.live_client = GeminiLiveClient(config=self.config, executor=self.executor)
+
+        self.live_voice_widget = LiveVoiceWidget(
+            live_client=self.live_client,
+            on_close=self.stop_live_voice,
+        )
+        self.live_voice_revealer.set_child(self.live_voice_widget)
+        self.live_voice_revealer.set_reveal_child(True)
+        self.voice_call_btn.add_css_class("suggested-action")
+        self.welcome_box.set_visible(False)
+        self.live_client.start()
+        self.show_toast("🎙️ Conversa ao vivo iniciada! Pode falar...")
+
+    def stop_live_voice(self) -> None:
+        """Encerra a chamada de voz ao vivo e restaura a interface normal."""
+        if self.live_client:
+            self.live_client.stop()
+        self.live_voice_revealer.set_reveal_child(False)
+        self.voice_call_btn.remove_css_class("suggested-action")
+        if not self.answer_group.get_visible():
+            self.welcome_box.set_visible(True)
+        self.entry.grab_focus()
+        self.show_toast("Conversa de voz encerrada.")
         if self.get_visible() and self.is_active():
             self.set_visible(False)
         else:
@@ -244,6 +295,14 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.history_btn.add_css_class("glass-icon-btn")
         self._build_history_popover()
 
+        # Botão de Conversa por Voz ao Vivo (Gemini Live)
+        self.voice_call_btn = Gtk.Button.new_from_icon_name("audio-input-microphone-symbolic")
+        self.voice_call_btn.set_tooltip_text("Conversa por Voz ao Vivo (Gemini Live / Ctrl+M)")
+        self.voice_call_btn.add_css_class("flat")
+        self.voice_call_btn.add_css_class("circular")
+        self.voice_call_btn.add_css_class("glass-icon-btn")
+        self.voice_call_btn.connect("clicked", lambda _: self.toggle_live_voice())
+
         # Botão indicador de IA no HeaderBar (clicável para abrir preferências)
         self.status_badge_btn = Gtk.Button()
         self.status_badge_btn.add_css_class("flat")
@@ -256,14 +315,15 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.status_badge.add_css_class("caption")
         self.status_badge_btn.set_child(self.status_badge)
 
-        # Ordem pack_end: settings (direita), history (meio), status badge (esquerda)
+        # Ordem pack_end: settings (direita), history, voice_call, status badge (esquerda)
         header.pack_end(settings_btn)
         header.pack_end(self.history_btn)
+        header.pack_end(self.voice_call_btn)
         header.pack_end(self.status_badge_btn)
 
         self.toolbar_view.add_top_bar(header)
 
-        # Controlador de teclado para tecla Escape e atalhos de tópico (Ctrl+P, Ctrl+N, Ctrl+H, Ctrl+Q)
+        # Controlador de teclado para tecla Escape e atalhos (Ctrl+P, Ctrl+N, Ctrl+H, Ctrl+M, Ctrl+Q)
         key_ctrl = Gtk.EventControllerKey()
         def on_key_pressed(_ctrl, keyval, _keycode, state):
             is_ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
@@ -271,6 +331,9 @@ class CopilotWindow(Adw.ApplicationWindow):
                 app = self.get_application()
                 if app:
                     app.quit()
+                return True
+            if is_ctrl and keyval in (Gdk.KEY_m, Gdk.KEY_M):
+                self.toggle_live_voice()
                 return True
             if is_ctrl and keyval in (Gdk.KEY_h, Gdk.KEY_H):
                 if self.history_popover.get_visible():
@@ -285,6 +348,9 @@ class CopilotWindow(Adw.ApplicationWindow):
                 self._on_new_topic()
                 return True
             if keyval == Gdk.KEY_Escape:
+                if self.live_client and self.live_client.is_active():
+                    self.stop_live_voice()
+                    return True
                 if self.history_popover.get_visible():
                     self.history_popover.popdown()
                     return True
@@ -609,6 +675,15 @@ class CopilotWindow(Adw.ApplicationWindow):
         main_box.append(self.app_preview_revealer)
 
         # ---------------------------------------------------------------------
+        # Painel de Voz ao Vivo (Gemini Live)
+        # ---------------------------------------------------------------------
+        self.live_voice_revealer = Gtk.Revealer()
+        self.live_voice_revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_DOWN)
+        self.live_voice_revealer.set_transition_duration(250)
+        self.live_voice_revealer.set_reveal_child(False)
+        main_box.append(self.live_voice_revealer)
+
+        # ---------------------------------------------------------------------
         # Área Rolável de Conteúdo (Respostas e Ações)
         # ---------------------------------------------------------------------
         scrolled = Gtk.ScrolledWindow()
@@ -637,7 +712,7 @@ class CopilotWindow(Adw.ApplicationWindow):
         welcome_title.add_css_class("welcome-title")
         header_welcome.append(welcome_title)
 
-        welcome_desc = Gtk.Label(label="Peça tarefas no desktop, consulte seus projetos ou pesquise na web")
+        welcome_desc = Gtk.Label(label="Peça tarefas no desktop, consulte seus projetos ou converse por voz")
         welcome_desc.add_css_class("caption")
         welcome_desc.add_css_class("welcome-subtitle")
         header_welcome.append(welcome_desc)
@@ -652,9 +727,9 @@ class CopilotWindow(Adw.ApplicationWindow):
         grid.set_margin_top(6)
 
         suggestions = [
-            ("✂️ Recortar Área da Tela", "recortar_area", 0, 0),
-            ("📋 Analisar Copiado", "analisar_copiado", 1, 0),
-            ("📁 Meu projeto de trabalho", "onde fica meu projeto de trabalho ?", 0, 1),
+            ("🎙️ Voz ao Vivo (Gemini Live)", "voz_ao_vivo", 0, 0),
+            ("✂️ Recortar Área da Tela", "recortar_area", 1, 0),
+            ("📋 Analisar Copiado", "analisar_copiado", 0, 1),
             ("⚡ Alternar modo escuro", "ativar modo escuro", 1, 1),
         ]
 
@@ -949,6 +1024,9 @@ class CopilotWindow(Adw.ApplicationWindow):
 
     def _trigger_prompt(self, text: str) -> None:
         """Dispara um prompt ou ação a partir de um chip de sugestão rápida."""
+        if text == "voz_ao_vivo":
+            self.toggle_live_voice()
+            return
         if text == "recortar_area":
             self._start_screen_capture(interactive=True)
             return
@@ -1651,6 +1729,14 @@ class ZorinCopilotApp(Adw.Application):
             "Dispara a seleção interativa de área da tela e analisa com IA",
             None,
         )
+        self.add_main_option(
+            "voice",
+            ord("v"),
+            GLib.OptionFlags.NONE,
+            GLib.OptionArg.NONE,
+            "Inicia imediatamente a conversa de voz ao vivo (Gemini Live)",
+            None,
+        )
 
     def do_startup(self):
         Adw.Application.do_startup(self)
@@ -1678,14 +1764,20 @@ class ZorinCopilotApp(Adw.Application):
         options = command_line.get_options_dict()
         is_toggle = options.contains("toggle")
         is_crop = options.contains("crop")
+        is_voice = options.contains("voice")
         args = command_line.get_arguments()
         if "--toggle" in args or "-t" in args:
             is_toggle = True
         if "--crop" in args or "-c" in args or "--snippet" in args:
             is_crop = True
+        if "--voice" in args or "-v" in args:
+            is_voice = True
 
         win = self._get_or_create_window()
-        if is_crop:
+        if is_voice:
+            win.summon_hud()
+            win.start_live_voice()
+        elif is_crop:
             win.trigger_direct_crop()
         elif is_toggle:
             win.toggle_hud()
