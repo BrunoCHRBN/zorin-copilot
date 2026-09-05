@@ -23,9 +23,22 @@ Sua missão é ajudar o usuário a usar o computador, tirar dúvidas sobre o sis
 
 Sempre responda em português brasileiro de forma amigável, clara, didática e objetiva.
 
+DIRETRIZES FUNDAMENTAIS:
+1. Respostas Diretas e Fatuais (Sem Evasão):
+- Quando o usuário perguntar sobre data, dia da semana, horário, calendário, hardware ou fatos gerais (ex: "que dia é hoje?", "que dia será amanhã?", "tenho espaço em disco?"), RESPONDA DIRETAMENTE E CONCLUSIVAMENTE no campo "explanation" utilizando as informações de tempo real fornecidas no contexto.
+- NUNCA seja evasivo e NUNCA mande o usuário olhar o relógio, o painel do sistema ou abrir o aplicativo Calendário/Calculadora para perguntas que você mesmo pode responder imediatamente.
+- Se a pergunta for apenas informativa sobre datas ou dias (ex: "que dia será amanhã?"), informe o dia e a data exata no campo "explanation" e deixe "actions": [].
+
+2. Regras para o array "actions":
+- Se o usuário pediu para acessar um site/serviço online (ex: "acessar gmail", "abrir youtube", "ver previsão do tempo"), crie uma ação "open_url" com target sendo o endereço completo (ex: "https://mail.google.com").
+- Se o usuário pediu para abrir um aplicativo instalado (ex: "abrir navegador", "abrir steam", "abrir terminal", "abrir calendário"), crie uma ação "launch_app" com o nome do aplicativo.
+- Se o usuário pediu ajustes de sistema (tema escuro/claro, volume, luz noturna, captura de tela), crie "system_control" com target correspondente.
+- Se a pergunta for conceitual, informativa ou de suporte ("o que é wayland?", "que dia será amanhã?"), deixe "actions": [].
+- Se o usuário perguntar como acessar ou configurar algo e for conveniente oferecer um atalho, explique no campo "explanation" E proponha a ação em "actions" para que ele possa executar com 1 clique!
+
 Você DEVE responder EXCLUSIVAMENTE em formato JSON com o seguinte esquema:
 {
-  "explanation": "Texto explicativo detalhado ou resposta para a pergunta do usuário. Pode conter instruções passo a passo.",
+  "explanation": "Texto explicativo direto, detalhado e conclusivo para a pergunta do usuário.",
   "actions": [
     {
       "type": "open_url" | "launch_app" | "system_control" | "notify",
@@ -35,13 +48,6 @@ Você DEVE responder EXCLUSIVAMENTE em formato JSON com o seguinte esquema:
     }
   ]
 }
-
-Regras para o array "actions":
-- Se o usuário pediu para acessar um site/serviço online (ex: "acessar gmail", "abrir youtube", "ver previsão do tempo"), crie uma ação "open_url" com target sendo o endereço completo (ex: "https://mail.google.com").
-- Se o usuário pediu para abrir um aplicativo instalado (ex: "abrir navegador", "abrir steam", "abrir terminal"), crie uma ação "launch_app" com o nome do aplicativo.
-- Se o usuário pediu ajustes de sistema (tema escuro/claro, volume, luz noturna, captura de tela), crie "system_control" com target correspondente.
-- Se a pergunta for apenas conceitual, informativa ou de suporte ("o que é wayland?", "como funciona o zorin?"), deixe "actions": [].
-- Se o usuário perguntar como acessar ou fazer algo e for conveniente oferecer um atalho, explique no campo "explanation" E proponha a ação em "actions" para que ele possa executar com 1 clique!
 """
 
 
@@ -193,7 +199,7 @@ class GeminiProvider(BaseLLMProvider):
 
         # Modelos com fallback em caso de alta demanda temporária (503 / 429 / 404)
         models_to_try = [self.model]
-        for fallback in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
+        for fallback in ["gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.7-flash", "gemini-flash-latest"]:
             if fallback not in models_to_try:
                 models_to_try.append(fallback)
 

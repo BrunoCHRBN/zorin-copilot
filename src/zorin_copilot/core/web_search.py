@@ -149,7 +149,30 @@ class WebSearchClient:
         """Identifica se uma consulta requer pesquisa ao vivo na web."""
         low = prompt.lower()
 
-        # Gatilhos explícitos de busca
+        # 0. Perguntas sobre relógio, data e calendário local não precisam de busca na web
+        local_clock_queries = [
+            "que dia é hoje",
+            "que dia e hoje",
+            "que dia sera amanha",
+            "que dia será amanhã",
+            "que dia foi ontem",
+            "que horas sao",
+            "que horas são",
+            "qual a data de hoje",
+            "qual a data de amanha",
+            "qual a data de amanhã",
+            "data de hoje",
+            "data de amanha",
+            "data de amanhã",
+            "em que ano estamos",
+            "em que dia estamos",
+            "qual o ano atual",
+            "dia da semana",
+        ]
+        if any(q in low for q in local_clock_queries):
+            return False
+
+        # 1. Gatilhos explícitos de busca
         explicit_triggers = [
             "pesquise",
             "pesquisar",
@@ -167,16 +190,26 @@ class WebSearchClient:
         if any(t in low for t in explicit_triggers):
             return True
 
-        # Consultas temporais e dinâmicas de tempo real
+        # 2. Consultas temporais e dinâmicas de tempo real
         temporal_triggers = [
             "hoje",
+            "amanhã",
+            "amanha",
             "ontem",
             "agora",
             "nesta semana",
+            "fim de semana",
+            "semana que vem",
+            "próximo",
+            "proximo",
+            "próxima",
+            "proxima",
             "último",
             "última",
             "recente",
             "atual",
+            "previsão",
+            "previsao",
             "previsão do tempo",
             "previsao do tempo",
             "temperatura em",

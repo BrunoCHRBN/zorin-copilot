@@ -70,8 +70,9 @@ class PreferencesDialog(Adw.PreferencesDialog):
             "gemini-3.8-flash",
             "gemini-3.6-flash",
             "gemini-3.5-flash",
+            "gemini-3.5-flash-lite",
+            "gemini-flash-latest",
             "gemini-2.5-pro",
-            "gemini-2.5-flash",
             "Outro (Personalizado)",
         ]
         self.gemini_model_row = Adw.ComboRow(

@@ -182,6 +182,20 @@ class IntentEngineTest(unittest.TestCase):
         plan = self.engine.parse("e como uso o terminal?", history=history)
         self.assertFalse(plan.is_empty)
 
+    def test_parse_tomorrow_date(self):
+        plan = self.engine.parse("que dia será amanhã ?")
+        self.assertFalse(plan.is_empty)
+        self.assertIn("Amanhã será", plan.thought)
+        self.assertEqual(len(plan.actions), 1)
+        self.assertEqual(plan.actions[0].action_type, ActionType.ANSWER)
+
+    def test_parse_today_date(self):
+        plan = self.engine.parse("que dia é hoje?")
+        self.assertFalse(plan.is_empty)
+        self.assertIn("Hoje é", plan.thought)
+        self.assertEqual(len(plan.actions), 1)
+        self.assertEqual(plan.actions[0].action_type, ActionType.ANSWER)
+
 
 if __name__ == "__main__":
     unittest.main()

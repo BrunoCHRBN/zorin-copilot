@@ -10,7 +10,7 @@ import platform
 import shutil
 import sqlite3
 import subprocess
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -273,29 +273,70 @@ class MemoryManager:
     # =========================================================================
 
     def get_context_summary(self, max_actions: int = 4) -> str:
-        """Gera um resumo contextual enxuto para enriquecer o prompt da IA."""
+        """Gera um resumo contextual dinâmico com data/hora em tempo real, telemetria e perfil."""
         profile = self.get_system_profile()
         facts = self.get_all_facts()
         recent_actions = self.get_recent_actions(limit=max_actions, success_only=True)
 
-        lines: list[str] = ["[Base de Conhecimento do Usuário e Sistema]:"]
+        lines: list[str] = ["[Base de Conhecimento e Estado do Sistema]:"]
 
-        # Perfil
+        # 1. Contexto Temporal em Tempo Real
+        now = datetime.now()
+        dias_semana = [
+            "Segunda-feira", "Terça-feira", "Quarta-feira",
+            "Quinta-feira", "Sexta-feira", "Sábado", "Domingo",
+        ]
+        meses = [
+            "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
+            "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro",
+        ]
+        dia_sem = dias_semana[now.weekday()]
+        mes_nome = meses[now.month - 1]
+        data_atual_str = f"{dia_sem}, {now.day:02d} de {mes_nome} de {now.year}, às {now.strftime('%H:%M')}"
+
+        amanha = now + timedelta(days=1)
+        dia_amanha = dias_semana[amanha.weekday()]
+        mes_amanha = meses[amanha.month - 1]
+        amanha_str = f"{dia_amanha}, {amanha.day:02d} de {mes_amanha} de {amanha.year}"
+
+        lines.append(f"- Data e Hora Atual: {data_atual_str}")
+        lines.append(f"- Amanhã será: {amanha_str}")
+
+        # 2. Perfil do Sistema e Hardware
         os_info = profile.get("os_name", "Zorin OS 18")
         session = profile.get("session_type", "wayland")
         browser = profile.get("default_browser", "")
         profile_parts = [f"SO: {os_info} ({session})"]
         if browser:
             profile_parts.append(f"Navegador: {browser}")
-        lines.append(f"- Ambiente: {', '.join(profile_parts)}")
 
-        # Fatos e preferências gravados
+        # Telemetria rápida de disco
+        try:
+            disk = shutil.disk_usage(os.path.expanduser("~"))
+            free_gb = disk.free / (1024 ** 3)
+            profile_parts.append(f"Disco livre: {free_gb:.1f} GB")
+        except Exception:
+            pass
+
+        # Telemetria rápida de memória RAM
+        try:
+            with open("/proc/meminfo") as f:
+                mem_data = dict(line.strip().split(":", 1) for line in f if ":" in line)
+            avail_kb = int(mem_data.get("MemAvailable", "0 kB").split()[0])
+            avail_gb = avail_kb / (1024 * 1024)
+            profile_parts.append(f"RAM disponível: {avail_gb:.1f} GB")
+        except Exception:
+            pass
+
+        lines.append(f"- Ambiente e Recursos: {', '.join(profile_parts)}")
+
+        # 3. Fatos e preferências gravados
         if facts:
             lines.append("- Fatos e preferências conhecidos do usuário:")
             for f in facts[:6]:
                 lines.append(f"  • {f['content']}")
 
-        # Ações executadas com sucesso recentemente
+        # 4. Ações executadas com sucesso recentemente
         if recent_actions:
             lines.append("- Ações executadas com sucesso recentemente no desktop:")
             for a in recent_actions:

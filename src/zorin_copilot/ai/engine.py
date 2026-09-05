@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+from datetime import datetime, timedelta
 from typing import Any
 
 from .actions import ActionPlan, ActionType, DesktopAction
@@ -73,8 +74,42 @@ class IntentEngine:
             )
 
         # =========================================================================
-        # 1. CAMADA RÁPIDA LOCAL: Configurações do Sistema Operacional (0ms)
+        # 1. CAMADA RÁPIDA LOCAL: Relógio do Sistema e Configurações (0ms)
         # =========================================================================
+
+        # Relógio, Data e Calendário Local Instantâneo (0ms)
+        dias_sem = ["Segunda-feira", "Terça-feira", "Quarta-feira", "Quinta-feira", "Sexta-feira", "Sábado", "Domingo"]
+        meses_pt = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
+        now = datetime.now()
+
+        # Amanhã
+        if any(q in low for q in ["que dia sera amanha", "que dia será amanhã", "data de amanha", "data de amanhã", "dia de amanha", "dia de amanhã"]):
+            tom = now + timedelta(days=1)
+            dia_str = dias_sem[tom.weekday()]
+            mes_str = meses_pt[tom.month - 1]
+            resp = f"Amanhã será **{dia_str}**, {tom.day:02d} de {mes_str} de {tom.year}."
+            return ActionPlan(
+                thought=resp,
+                actions=[DesktopAction(ActionType.ANSWER, resp, description="Data e dia da semana de amanhã")],
+            )
+
+        # Hoje
+        if any(q in low for q in ["que dia é hoje", "que dia e hoje", "data de hoje", "qual a data de hoje", "em que dia estamos", "que dia da semana é hoje", "que dia da semana e hoje"]):
+            dia_str = dias_sem[now.weekday()]
+            mes_str = meses_pt[now.month - 1]
+            resp = f"Hoje é **{dia_str}**, {now.day:02d} de {mes_str} de {now.year}."
+            return ActionPlan(
+                thought=resp,
+                actions=[DesktopAction(ActionType.ANSWER, resp, description="Data e dia da semana atual")],
+            )
+
+        # Horário
+        if any(q in low for q in ["que horas são", "que horas sao", "qual a hora atual", "horario atual", "horário atual"]):
+            resp = f"Agora são exatamente **{now.strftime('%H:%M')}**."
+            return ActionPlan(
+                thought=resp,
+                actions=[DesktopAction(ActionType.ANSWER, resp, description="Hora atual do sistema")],
+            )
 
         # Esquema de Cores (Modo Escuro / Claro)
         if any(w in low for w in ["modo escuro", "tema escuro", "dark mode", "tema dark"]):
