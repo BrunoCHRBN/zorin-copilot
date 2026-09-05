@@ -71,6 +71,29 @@ class TopicSessionTest(unittest.TestCase):
         self.assertEqual(history[0]["content"], "P6")
         self.assertEqual(history[-2]["content"], "P9")
 
+    def test_auto_persist_mode(self):
+        """No modo auto_persist (estilo Gemini), cada pergunta já é mantida e preserva contexto."""
+        auto_session = TopicSession(max_history_turns=5, auto_persist=True)
+        self.assertTrue(auto_session.is_pinned)
+        self.assertTrue(auto_session.auto_persist)
+
+        auto_session.record_turn("Pesquise preços de monitores", "Encontrei 3 modelos recomendados.")
+        self.assertEqual(auto_session.turn_count, 1)
+        self.assertEqual(auto_session.title, "Preços de monitores")
+
+        # Segunda pergunta mantém contexto sem precisar fixar manualmente
+        auto_session.record_turn("Qual deles tem menor latência?", "O monitor LG tem 1ms de resposta.")
+        self.assertEqual(auto_session.turn_count, 2)
+        llm_history = auto_session.get_history_for_llm()
+        self.assertEqual(len(llm_history), 4)
+
+    def test_semantic_title_derivation(self):
+        """Verifica a limpeza de prefixos conversacionais para títulos limpos."""
+        s = TopicSession(auto_persist=True)
+        self.assertEqual(s._derive_title("como posso organizar minha pasta de downloads"), "Minha pasta de downloads")
+        self.assertEqual(s._derive_title("por favor abra o terminal do zorin"), "Terminal do zorin")
+        self.assertEqual(s._derive_title("pesquise sobre inteligência artificial"), "Inteligência artificial")
+
 
 if __name__ == "__main__":
     unittest.main()

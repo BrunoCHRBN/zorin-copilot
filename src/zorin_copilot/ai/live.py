@@ -162,6 +162,11 @@ class GeminiLiveClient:
         self._record_proc: subprocess.Popen | None = None
         self._play_proc: subprocess.Popen | None = None
 
+        # Rastreamento de ações e transcrições para persistência no chat da demanda
+        self._session_start_time: float = 0.0
+        self._executed_actions_log: list[dict[str, Any]] = []
+        self._transcripts_log: list[tuple[str, str]] = []
+
     def _set_state(self, state: LiveVoiceState, message: str = "") -> None:
         self.state = state
         if self.on_state_change:
@@ -195,6 +200,9 @@ class GeminiLiveClient:
 
         self._is_running = True
         self._is_muted = False
+        self._session_start_time = time.time()
+        self._executed_actions_log.clear()
+        self._transcripts_log.clear()
         self._thread = threading.Thread(target=self._run_loop, daemon=True, name="GeminiLiveWorker")
         self._thread.start()
 
@@ -207,6 +215,16 @@ class GeminiLiveClient:
             self._loop.call_soon_threadsafe(self._loop.stop)
 
         self._set_state(LiveVoiceState.DISCONNECTED, "Chamada encerrada.")
+
+    def get_session_summary(self) -> dict[str, Any]:
+        """Retorna o resumo estruturado da chamada de voz ao vivo para persistir no chat da demanda ativa."""
+        duration = max(1, int(time.time() - self._session_start_time)) if self._session_start_time > 0 else 0
+        return {
+            "duration_sec": duration,
+            "actions_executed": list(self._executed_actions_log),
+            "transcripts": list(self._transcripts_log),
+            "has_activity": bool(self._executed_actions_log or self._transcripts_log or duration >= 3),
+        }
 
     def _terminate_audio_processes(self) -> None:
         """Fecha subprocessos de gravação e reprodução de áudio."""
@@ -454,8 +472,10 @@ class GeminiLiveClient:
                             self._set_state(LiveVoiceState.SPEAKING, "Falando...")
 
                     # Transcrição textual (se enviada pelo modelo)
-                    if "text" in p and self.on_transcript:
-                        self.on_transcript("assistant", p["text"])
+                    if "text" in p:
+                        self._transcripts_log.append(("assistant", p["text"]))
+                        if self.on_transcript:
+                            self.on_transcript("assistant", p["text"])
 
                 if sc.get("turnComplete"):
                     self._set_state(LiveVoiceState.LISTENING, "Ouvindo você...")
@@ -490,6 +510,15 @@ class GeminiLiveClient:
 
             success = output.get("success", True)
             message = output.get("message", f"{name} executado com sucesso.")
+
+            self._executed_actions_log.append({
+                "tool": name,
+                "args": args,
+                "output": output,
+                "success": success,
+                "message": message,
+                "timestamp": time.time(),
+            })
 
             if self.on_tool_executed:
                 try:

@@ -152,7 +152,7 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.inspector = DesktopInspector()
         self.executor = ActionExecutor(self.inspector)
         self.engine = IntentEngine(self.inspector, self.config)
-        self.session = TopicSession()
+        self.session = TopicSession(auto_persist=True)
         self.current_plan: ActionPlan | None = None
         self._raw_answer_text: str = ""
         self._is_busy = False
@@ -223,13 +223,56 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.show_toast("🎙️ Conversa ao vivo iniciada! Pode falar...")
 
     def stop_live_voice(self) -> None:
-        """Encerra a chamada de voz ao vivo e restaura a interface normal."""
+        """Encerra a chamada de voz ao vivo e consolida a interação no chat ativo."""
+        summary = self.live_client.get_session_summary() if self.live_client else {}
         if self.live_client:
             self.live_client.stop()
         self.live_voice_revealer.set_reveal_child(False)
         self.voice_call_btn.remove_css_class("suggested-action")
-        if not self.answer_group.get_visible():
-            self.welcome_box.set_visible(True)
+
+        # Se houve atividade durante a chamada, registra na thread do chat ativo
+        if summary.get("has_activity"):
+            duration = summary.get("duration_sec", 0)
+            actions = summary.get("actions_executed", [])
+            lines = [f"**🎙️ Sessão de Voz ao Vivo (Gemini Live)** • {duration}s de chamada\n"]
+            if actions:
+                lines.append("**Ações executadas no sistema:**")
+                for act in actions:
+                    t_name = act.get("tool", "")
+                    t_args = act.get("args", {})
+                    if t_name == "launch_app":
+                        lines.append(f"- 🚀 Abriu o aplicativo **{t_args.get('app_name', '')}**")
+                    elif t_name == "system_control":
+                        lines.append(f"- ⚙️ Controle do sistema: **{t_args.get('action', '')}** ({t_args.get('value', '')})")
+                    elif t_name == "open_url":
+                        lines.append(f"- 🌐 Abriu link: `{t_args.get('url', '')}`")
+                    elif t_name == "capture_screen":
+                        lines.append("- 📸 Capturou a tela para inspeção visual")
+                    elif t_name == "web_search":
+                        lines.append(f"- 🔍 Pesquisa na web: *{t_args.get('query', '')}*")
+                    else:
+                        lines.append(f"- ⚡ Executou ferramenta: `{t_name}`")
+                lines.append("")
+            else:
+                lines.append("Conversa por voz e áudio bidirecional concluída.")
+
+            summary_text = "\n".join(lines).strip()
+            prompt_label = "🎙️ Conversa de Voz ao Vivo"
+
+            self.session.record_turn(prompt=prompt_label, answer=summary_text)
+            self._save_current_session()
+            self._update_pin_ui()
+
+            self.answer_label.set_markup(format_markdown_to_markup(summary_text))
+            self._raw_answer_text = summary_text
+            self.source_badge.set_text("🎙️ Gemini Live")
+            self.source_badge.set_visible(True)
+            self.welcome_box.set_visible(False)
+            self.answer_group.set_visible(True)
+        else:
+            if not self.answer_group.get_visible():
+                self.welcome_box.set_visible(True)
+
         self.entry.grab_focus()
         self.show_toast("Conversa de voz encerrada.")
         if self.get_visible() and self.is_active():
@@ -277,6 +320,15 @@ class CopilotWindow(Adw.ApplicationWindow):
         # HeaderBar nativa do GNOME / Zorin OS com controles de janela integrados
         header = Adw.HeaderBar()
         header.set_title_widget(Adw.WindowTitle(title="Zorin Copilot", subtitle="Assistente Inteligente"))
+
+        # Botão de Novo Chat / Nova Demanda (Estilo Gemini / Ctrl+N)
+        self.new_chat_btn = Gtk.Button.new_from_icon_name("list-add-symbolic")
+        self.new_chat_btn.set_tooltip_text("Novo Chat / Nova Demanda (Ctrl+N)")
+        self.new_chat_btn.add_css_class("flat")
+        self.new_chat_btn.add_css_class("circular")
+        self.new_chat_btn.add_css_class("glass-icon-btn")
+        self.new_chat_btn.connect("clicked", lambda _: self._on_new_topic())
+        header.pack_start(self.new_chat_btn)
 
         # Botão de Configurações
         settings_btn = Gtk.Button.new_from_icon_name("preferences-system-symbolic")
@@ -780,8 +832,8 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.topic_info_lbl.set_margin_bottom(6)
         topic_card.append(self.topic_info_lbl)
 
-        self.new_topic_btn = Gtk.Button(label="✕ Novo Tópico")
-        self.new_topic_btn.set_tooltip_text("Desafixar e iniciar uma nova consulta limpa (Ctrl+N)")
+        self.new_topic_btn = Gtk.Button(label="+ Novo Chat")
+        self.new_topic_btn.set_tooltip_text("Iniciar novo chat para outra demanda independente (Ctrl+N)")
         self.new_topic_btn.add_css_class("flat")
         self.new_topic_btn.add_css_class("pill")
         self.new_topic_btn.set_valign(Gtk.Align.CENTER)
@@ -1299,11 +1351,10 @@ class CopilotWindow(Adw.ApplicationWindow):
             self.answer_label.set_markup(markup)
             self.answer_group.set_visible(True)
 
-            # Registra o turno na sessão de tópicos
+            # Registra o turno na sessão de tópicos e auto-persiste no SQLite (estilo Gemini)
             if prompt_text:
                 self.session.record_turn(prompt=prompt_text, answer=explanation_text)
-                if self.session.is_pinned:
-                    self._save_current_session()
+                self._save_current_session()
                 self._update_pin_ui()
 
             # Badge da fonte: Visão, Web ou Memória
@@ -1643,12 +1694,12 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.show_toast(f'Tópico "{self.session.title}" retomado!')
 
     def _save_current_session(self) -> None:
-        """Persiste a sessão atual no banco de dados de tópicos."""
-        if not self.session.is_pinned or not self.session.turns:
+        """Persiste a sessão atual no banco de dados de tópicos (auto-save estilo Gemini)."""
+        if not self.session.turns:
             return
         self.engine.memory.save_chat_topic(
             topic_id=self.session.id,
-            title=self.session.title or (self.session.turns[0].prompt[:50] if self.session.turns else "Tópico"),
+            title=self.session.title or (self.session.turns[0].prompt[:50] if self.session.turns else "Nova Demanda"),
             turns=[t.to_dict() for t in self.session.turns],
             is_pinned=True,
             created_at=self.session.created_at,
@@ -1659,32 +1710,32 @@ class CopilotWindow(Adw.ApplicationWindow):
         if self.session.id == topic_id:
             self._on_new_topic()
         self._populate_history_list()
-        self.show_toast("Tópico excluído do histórico.")
+        self.show_toast("Chat excluído do histórico.")
 
     def _on_clear_all_history(self, _btn: Gtk.Button) -> None:
         self.engine.memory.clear_all_chat_topics()
         self.session.reset_new()
         self._update_pin_ui()
         self._populate_history_list()
-        self.show_toast("Histórico de tópicos completamente limpo.")
+        self.show_toast("Histórico de chats completamente limpo.")
 
     def _update_pin_ui(self) -> None:
-        """Atualiza a aparência do botão de alfinete e o banner do tópico ativo."""
+        """Atualiza a aparência do indicador de chat e o banner da demanda ativa."""
         turns = self.session.turn_count
-        if self.session.is_pinned:
+        if turns > 0 or self.session.title:
             self.pin_btn.add_css_class("suggested-action")
-            self.pin_btn.set_tooltip_text("Tópico fixado no histórico. Clique ou pressione Ctrl+P para desafixar.")
-            self.pin_btn_label.set_text("Tópico Fixado ✓")
+            self.pin_btn.set_tooltip_text("Demanda salva automaticamente no histórico. Clique para alternar fixação.")
+            self.pin_btn_label.set_text("Chat Salvo ✓")
             msg_str = f"{turns} {'mensagem' if turns == 1 else 'mensagens'}"
             title_display = f' "{html.escape(self.session.title)}"' if self.session.title else ""
             self.topic_info_lbl.set_markup(
-                f"<b>📌 Tópico{title_display}</b> ({msg_str}) • As próximas perguntas manterão este contexto"
+                f"<b>💬 Chat:{title_display}</b> ({msg_str}) • Histórico salvo automaticamente"
             )
             self.topic_revealer.set_reveal_child(True)
         else:
             self.pin_btn.remove_css_class("suggested-action")
-            self.pin_btn.set_tooltip_text("Fixar este tópico para manter o contexto e salvar no histórico (Ctrl+P)")
-            self.pin_btn_label.set_text("Fixar Tópico")
+            self.pin_btn.set_tooltip_text("Chat ativo sob demanda.")
+            self.pin_btn_label.set_text("Chat Ativo")
             self.topic_revealer.set_reveal_child(False)
 
     def _on_toggle_pin(self, _btn: Gtk.Button | None = None) -> None:
@@ -1695,13 +1746,13 @@ class CopilotWindow(Adw.ApplicationWindow):
         if not was_pinned and self.session.is_pinned:
             if self.session.turns:
                 self._save_current_session()
-            self.exec_status.set_text("📌 Tópico fixado e salvo no histórico! Próximas perguntas manterão este contexto.")
+            self.exec_status.set_text("📌 Chat fixado e mantido no topo do histórico.")
         else:
-            self.exec_status.set_text("Contexto desafixado. O 'Chat de Agora' voltou a ser pontual e independente.")
+            self.exec_status.set_text("📌 Chat mantido no histórico normal.")
 
     def _on_new_topic(self, _btn: Gtk.Button | None = None) -> None:
-        """Salva o tópico atual (se fixado) e reinicia a tela com contexto limpo (Chat de Agora)."""
-        if self.session.is_pinned and self.session.turns:
+        """Salva o chat atual e inicia uma nova thread limpa para outra demanda (Estilo Gemini)."""
+        if self.session.turns:
             self._save_current_session()
         self.session.reset_new()
         self._clear_active_vision()
@@ -1711,7 +1762,8 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.actions_group.set_visible(False)
         self.welcome_box.set_visible(True)
         self.entry.grab_focus()
-        self.exec_status.set_text("Novo chat de agora iniciado (perguntas pontuais).")
+        self.exec_status.set_text("Novo chat iniciado! Faça sua pergunta ou comando.")
+        self.show_toast("✨ Novo chat iniciado!")
 
 
 class ZorinCopilotApp(Adw.Application):

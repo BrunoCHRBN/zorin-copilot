@@ -35,17 +35,19 @@ class ChatTurn:
 
 
 class TopicSession:
-    """Controla o ciclo de vida do tópico ativo e histórico conversacional."""
+    """Controla o ciclo de vida do tópico ativo e histórico conversacional (Estilo Gemini)."""
 
     def __init__(
         self,
         session_id: str | None = None,
         title: str = "",
-        max_history_turns: int = 8,
+        max_history_turns: int = 10,
+        auto_persist: bool = False,
     ):
         self.id: str = session_id or uuid.uuid4().hex[:12]
         self.title: str = title
-        self.is_pinned: bool = False
+        self.auto_persist: bool = auto_persist
+        self.is_pinned: bool = auto_persist
         self.turns: list[ChatTurn] = []
         self.max_history_turns = max_history_turns
         self._last_unpinned_turn: ChatTurn | None = None
@@ -70,10 +72,10 @@ class TopicSession:
         self.reset_new()
 
     def reset_new(self) -> None:
-        """Gera um novo identificador limpo e reseta o estado conversacional."""
+        """Gera um novo identificador limpo e reseta o estado conversacional para uma nova demanda."""
         self.id = uuid.uuid4().hex[:12]
         self.title = ""
-        self.is_pinned = False
+        self.is_pinned = self.auto_persist
         self.turns.clear()
         self._last_unpinned_turn = None
         self.created_at = datetime.now().isoformat()
@@ -89,14 +91,42 @@ class TopicSession:
             return True
 
     def _derive_title(self, prompt: str) -> str:
-        """Deriva um título curto e amigável a partir do primeiro prompt."""
+        """Deriva um título curto, semântico e amigável para a demanda (estilo Gemini)."""
         cleaned = " ".join(prompt.strip().split())
+        lower = cleaned.lower()
+        prefixes_to_strip = [
+            "como posso ", "como eu posso ", "como fazer para ", "como faço para ",
+            "por favor ", "por gentileza ", "me ajude a ", "me ajude com ",
+            "gostaria de ", "eu gostaria de ", "você pode ", "voce pode ",
+            "pesquise sobre ", "pesquise por ", "pesquise ", "pesquisar ",
+            "abra o ", "abrir o ", "abre o ", "inicie o ", "iniciar o ",
+            "execute o ", "executar o ", "rode o ", "rodar o ",
+            "organize a ", "organizar a ", "organize o ", "organizar o ", "organizar ", "organize ",
+            "analisar ", "analise ", "resumir ", "resuma ",
+        ]
+        while True:
+            stripped_any = False
+            for prefix in prefixes_to_strip:
+                if lower.startswith(prefix):
+                    candidate = cleaned[len(prefix):].strip()
+                    if candidate:
+                        cleaned = candidate
+                        lower = cleaned.lower()
+                        stripped_any = True
+                        break
+            if not stripped_any:
+                break
+
+        if not cleaned:
+            return "Nova Demanda"
+
+        cleaned = cleaned[0].upper() + cleaned[1:] if len(cleaned) > 1 else cleaned.upper()
         if len(cleaned) <= 50:
             return cleaned
-        return cleaned[:47] + "..."
+        return cleaned[:47].rstrip() + "..."
 
     def record_turn(self, prompt: str, answer: str) -> None:
-        """Registra uma interação usuário/assistente."""
+        """Registra uma interação usuário/assistente na demanda ativa."""
         clean_p = prompt.strip()
         clean_a = answer.strip()
         turn = ChatTurn(prompt=clean_p, answer=clean_a)
@@ -106,7 +136,8 @@ class TopicSession:
 
         self.updated_at = datetime.now().isoformat()
 
-        if self.is_pinned:
+        if self.is_pinned or self.auto_persist:
+            self.is_pinned = True
             self.turns.append(turn)
             if len(self.turns) > self.max_history_turns:
                 self.turns = self.turns[-self.max_history_turns:]
@@ -116,7 +147,7 @@ class TopicSession:
 
     def get_history_for_llm(self) -> list[dict[str, str]]:
         """Retorna o histórico formatado para envio aos provedores de IA (Gemini, Ollama, OpenAI)."""
-        if not self.is_pinned or not self.turns:
+        if (not self.is_pinned and not self.auto_persist) or not self.turns:
             return []
 
         history: list[dict[str, str]] = []
