@@ -18,7 +18,7 @@ class CopilotConfig:
     
     # Configurações do Google Gemini
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-3.8-flash"
+    gemini_model: str = "gemini-flash-latest"
     gemini_live_model: str = "models/gemini-2.5-flash-native-audio-latest"
     gemini_live_voice: str = "Puck"  # "Puck", "Aoede", "Charon", "Fenrir", "Kore"
     

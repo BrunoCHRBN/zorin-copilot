@@ -95,7 +95,7 @@ class ConfigTest(unittest.TestCase):
     def test_defaults(self):
         cfg = CopilotConfig()
         self.assertEqual(cfg.provider, "gemini")
-        self.assertEqual(cfg.gemini_model, "gemini-3.8-flash")
+        self.assertEqual(cfg.gemini_model, "gemini-flash-latest")
         self.assertFalse(cfg.is_configured())
 
     def test_is_configured(self):
