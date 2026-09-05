@@ -176,23 +176,23 @@ class GeminiProvider(BaseLLMProvider):
 
         contents = []
         if history:
-            for turn in history:
+            # Janela deslizante de contexto: retém os últimos 10 turnos para manter coerência sem inflar tokens
+            for turn in history[-10:]:
                 role = "model" if turn.get("role") == "assistant" else "user"
                 text = turn.get("content", "").strip()
                 if text:
                     contents.append({"role": role, "parts": [{"text": text}]})
 
-        if contents:
-            # Prepend instrução de sistema no primeiro turno
-            contents[0]["parts"][0]["text"] = f"{sys_instruction}\n\n[Histórico do Tópico]\n{contents[0]['parts'][0]['text']}"
-            contents.append({"role": "user", "parts": [{"text": f"Pergunta/Comando atual: {prompt}"}]})
-        else:
-            contents.append({"parts": [{"text": f"{sys_instruction}\n\nSolicitação do usuário: {prompt}"}]})
+        contents.append({"role": "user", "parts": [{"text": prompt}]})
 
         payload = {
+            "system_instruction": {
+                "parts": [{"text": sys_instruction}]
+            },
             "contents": contents,
             "generationConfig": {
                 "temperature": 0.2,
+                "maxOutputTokens": 2048,
                 "responseMimeType": "application/json",
             },
         }
