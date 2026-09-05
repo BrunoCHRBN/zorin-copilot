@@ -23,79 +23,140 @@ CUSTOM_KEY_SCHEMA: Final = "org.gnome.settings-daemon.plugins.media-keys.custom-
 COPILOT_BINDING_PATH: Final = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/zorin-copilot/"
 COPILOT_BINDING_NAME: Final = "Zorin Copilot"
 
+CROP_BINDING_PATH: Final = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/zorin-copilot-crop/"
+CROP_BINDING_NAME: Final = "Zorin Copilot - Recorte Inteligente"
+
 
 class ShortcutManager:
-    """Gerencia o registro e remoção do atalho de teclado global do Copilot no GNOME/Zorin OS."""
+    """Gerencia o registro e remoção dos atalhos de teclado globais do Copilot no GNOME/Zorin OS."""
 
     @classmethod
-    def get_binary_command(cls) -> str:
-        """Obtém o caminho executável do zorin-copilot com o argumento --toggle."""
+    def get_binary_command(cls, flag: str = "--toggle") -> str:
+        """Obtém o caminho executável do zorin-copilot com a flag informada."""
+        venv_bin = os.path.expanduser("~/.local/share/zorin-copilot/venv/bin/zorin-copilot")
+        if os.path.exists(venv_bin):
+            return f"{venv_bin} {flag}"
         local_bin = os.path.expanduser("~/.local/bin/zorin-copilot")
         if os.path.exists(local_bin):
-            return f"{local_bin} --toggle"
+            return f"{local_bin} {flag}"
         which_bin = shutil.which("zorin-copilot")
         if which_bin:
-            return f"{which_bin} --toggle"
-        return "zorin-copilot --toggle"
+            return f"{which_bin} {flag}"
+        return f"zorin-copilot {flag}"
 
+    # -------------------------------------------------------------------------
+    # Métodos internos genéricos de D-Bus para custom-keybinding
+    # -------------------------------------------------------------------------
     @classmethod
-    def is_registered(cls) -> bool:
-        """Verifica se o atalho do Zorin Copilot está atualmente cadastrado no GNOME."""
+    def _is_path_registered(cls, path: str) -> bool:
         try:
             settings = Gio.Settings.new(MEDIA_KEYS_SCHEMA)
             existing = list(settings.get_strv("custom-keybindings"))
-            return COPILOT_BINDING_PATH in existing
+            return path in existing
         except Exception as exc:
             logger.warning(f"Não foi possível ler configurações de atalhos do GNOME: {exc}")
             return False
 
     @classmethod
-    def get_current_binding(cls) -> str:
-        """Retorna a combinação de teclas atualmente cadastrada (ex: '<Super>c')."""
-        if not cls.is_registered():
+    def _get_binding_at_path(cls, path: str) -> str:
+        if not cls._is_path_registered(path):
             return ""
         try:
-            custom_setting = Gio.Settings.new_with_path(CUSTOM_KEY_SCHEMA, COPILOT_BINDING_PATH)
+            custom_setting = Gio.Settings.new_with_path(CUSTOM_KEY_SCHEMA, path)
             return custom_setting.get_string("binding")
         except Exception:
             return ""
 
     @classmethod
-    def register(cls, binding: str = "<Super>c") -> bool:
-        """Cadastra o atalho global no sistema operacional."""
+    def _register_binding(cls, path: str, name: str, command: str, binding: str) -> bool:
         try:
             settings = Gio.Settings.new(MEDIA_KEYS_SCHEMA)
             existing = list(settings.get_strv("custom-keybindings"))
-            if COPILOT_BINDING_PATH not in existing:
-                existing.append(COPILOT_BINDING_PATH)
+            if path not in existing:
+                existing.append(path)
                 settings.set_strv("custom-keybindings", existing)
 
-            custom_setting = Gio.Settings.new_with_path(CUSTOM_KEY_SCHEMA, COPILOT_BINDING_PATH)
-            custom_setting.set_string("name", COPILOT_BINDING_NAME)
-            custom_setting.set_string("command", cls.get_binary_command())
+            custom_setting = Gio.Settings.new_with_path(CUSTOM_KEY_SCHEMA, path)
+            custom_setting.set_string("name", name)
+            custom_setting.set_string("command", command)
             custom_setting.set_string("binding", binding)
-            logger.info(f"Atalho global registrado com sucesso: {binding}")
+            logger.info(f"Atalho global '{name}' registrado com sucesso: {binding}")
             return True
         except Exception as exc:
-            logger.error(f"Erro ao registrar atalho global do GNOME: {exc}")
+            logger.error(f"Erro ao registrar atalho global '{name}' do GNOME: {exc}")
             return False
 
     @classmethod
-    def unregister(cls) -> bool:
-        """Remove o atalho global do sistema operacional."""
+    def _unregister_binding(cls, path: str) -> bool:
         try:
             settings = Gio.Settings.new(MEDIA_KEYS_SCHEMA)
             existing = list(settings.get_strv("custom-keybindings"))
-            if COPILOT_BINDING_PATH in existing:
-                existing.remove(COPILOT_BINDING_PATH)
+            if path in existing:
+                existing.remove(path)
                 settings.set_strv("custom-keybindings", existing)
 
-            custom_setting = Gio.Settings.new_with_path(CUSTOM_KEY_SCHEMA, COPILOT_BINDING_PATH)
+            custom_setting = Gio.Settings.new_with_path(CUSTOM_KEY_SCHEMA, path)
             custom_setting.set_string("name", "")
             custom_setting.set_string("command", "")
             custom_setting.set_string("binding", "")
-            logger.info("Atalho global desregistrado com sucesso.")
+            logger.info(f"Atalho global '{path}' desregistrado com sucesso.")
             return True
         except Exception as exc:
-            logger.error(f"Erro ao desregistrar atalho global do GNOME: {exc}")
+            logger.error(f"Erro ao desregistrar atalho global '{path}' do GNOME: {exc}")
             return False
+
+    # -------------------------------------------------------------------------
+    # Atalho do HUD Principal (Ctrl+Space / Super+Z / Super+C)
+    # -------------------------------------------------------------------------
+    @classmethod
+    def is_registered(cls) -> bool:
+        """Verifica se o atalho do HUD do Copilot está atualmente cadastrado no GNOME."""
+        return cls._is_path_registered(COPILOT_BINDING_PATH)
+
+    @classmethod
+    def get_current_binding(cls) -> str:
+        """Retorna a combinação de teclas atualmente cadastrada para o HUD."""
+        return cls._get_binding_at_path(COPILOT_BINDING_PATH)
+
+    @classmethod
+    def register(cls, binding: str = "<Super>c") -> bool:
+        """Cadastra o atalho global do HUD no sistema operacional."""
+        return cls._register_binding(
+            path=COPILOT_BINDING_PATH,
+            name=COPILOT_BINDING_NAME,
+            command=cls.get_binary_command("--toggle"),
+            binding=binding,
+        )
+
+    @classmethod
+    def unregister(cls) -> bool:
+        """Remove o atalho global do HUD do sistema operacional."""
+        return cls._unregister_binding(COPILOT_BINDING_PATH)
+
+    # -------------------------------------------------------------------------
+    # Atalho Global Direto de Recorte Inteligente (Super+Shift+S)
+    # -------------------------------------------------------------------------
+    @classmethod
+    def is_crop_registered(cls) -> bool:
+        """Verifica se o atalho de recorte inteligente está atualmente cadastrado."""
+        return cls._is_path_registered(CROP_BINDING_PATH)
+
+    @classmethod
+    def get_crop_binding(cls) -> str:
+        """Retorna a combinação de teclas atualmente cadastrada para recorte."""
+        return cls._get_binding_at_path(CROP_BINDING_PATH)
+
+    @classmethod
+    def register_crop(cls, binding: str = "<Super><Shift>s") -> bool:
+        """Cadastra o atalho global de recorte inteligente no sistema operacional."""
+        return cls._register_binding(
+            path=CROP_BINDING_PATH,
+            name=CROP_BINDING_NAME,
+            command=cls.get_binary_command("--crop"),
+            binding=binding,
+        )
+
+    @classmethod
+    def unregister_crop(cls) -> bool:
+        """Remove o atalho global de recorte inteligente do sistema operacional."""
+        return cls._unregister_binding(CROP_BINDING_PATH)

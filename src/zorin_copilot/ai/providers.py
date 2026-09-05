@@ -444,7 +444,22 @@ class OpenAICompatProvider(BaseLLMProvider):
         messages = [{"role": "system", "content": sys_instruction}]
         if history:
             messages.extend(history)
-        messages.append({"role": "user", "content": prompt})
+
+        if image_bytes:
+            import base64
+            b64_img = base64.b64encode(image_bytes).decode("utf-8")
+            messages.append({
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{image_mime};base64,{b64_img}"},
+                    },
+                ],
+            })
+        else:
+            messages.append({"role": "user", "content": prompt})
 
         payload = {
             "model": self.model,

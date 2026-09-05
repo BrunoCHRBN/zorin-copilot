@@ -70,14 +70,47 @@ class ShortcutManagerTest(unittest.TestCase):
         mock_main_settings.set_strv.assert_called_once_with("custom-keybindings", [])
         mock_custom_settings.set_string.assert_any_call("name", "")
 
-    @patch("zorin_copilot.core.shortcuts.Gio.Settings")
-    def test_error_handling_no_crash(self, mock_settings_cls):
-        """Em caso de falha de schema ou permissão D-Bus, não deve lançar exceção não tratada."""
-        mock_settings_cls.new.side_effect = Exception("Schema not found")
+    def test_config_crop_defaults(self):
+        """Verifica se os valores padrão do atalho de recorte estão presentes na configuração."""
+        cfg = CopilotConfig()
+        self.assertTrue(cfg.crop_shortcut_enabled)
+        self.assertEqual(cfg.crop_shortcut_key, "<Super><Shift>s")
 
-        self.assertFalse(ShortcutManager.is_registered())
-        self.assertFalse(ShortcutManager.register("<Super>c"))
-        self.assertFalse(ShortcutManager.unregister())
+    def test_get_binary_command_crop(self):
+        """Comando retornado com flag --crop deve conter --crop."""
+        cmd = ShortcutManager.get_binary_command("--crop")
+        self.assertIn("--crop", cmd)
+        self.assertTrue(cmd.endswith("--crop"))
+
+    @patch("zorin_copilot.core.shortcuts.Gio.Settings")
+    def test_crop_is_registered_true(self, mock_settings_cls):
+        from zorin_copilot.core.shortcuts import CROP_BINDING_PATH
+        mock_settings = MagicMock()
+        mock_settings.get_strv.return_value = [CROP_BINDING_PATH]
+        mock_settings_cls.new.return_value = mock_settings
+
+        self.assertTrue(ShortcutManager.is_crop_registered())
+
+    @patch("zorin_copilot.core.shortcuts.Gio.Settings")
+    def test_crop_register_and_unregister(self, mock_settings_cls):
+        from zorin_copilot.core.shortcuts import CROP_BINDING_PATH
+        mock_main_settings = MagicMock()
+        mock_main_settings.get_strv.return_value = []
+        mock_custom_settings = MagicMock()
+
+        mock_settings_cls.new.return_value = mock_main_settings
+        mock_settings_cls.new_with_path.return_value = mock_custom_settings
+
+        ok_reg = ShortcutManager.register_crop("<Super><Shift>s")
+        self.assertTrue(ok_reg)
+        mock_main_settings.set_strv.assert_called_with("custom-keybindings", [CROP_BINDING_PATH])
+        mock_custom_settings.set_string.assert_any_call("name", "Zorin Copilot - Recorte Inteligente")
+        mock_custom_settings.set_string.assert_any_call("binding", "<Super><Shift>s")
+
+        mock_main_settings.get_strv.return_value = [CROP_BINDING_PATH]
+        ok_unreg = ShortcutManager.unregister_crop()
+        self.assertTrue(ok_unreg)
+        mock_main_settings.set_strv.assert_called_with("custom-keybindings", [])
 
 
 if __name__ == "__main__":

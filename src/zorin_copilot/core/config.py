@@ -36,6 +36,10 @@ class CopilotConfig:
     global_shortcut_enabled: bool = True
     global_shortcut_key: str = "<Super>c"
     
+    # Atalho Global Direto de Recorte Inteligente (Pilar 3: Visão Instantânea)
+    crop_shortcut_enabled: bool = True
+    crop_shortcut_key: str = "<Super><Shift>s"
+    
     # Prompt de sistema customizável
     system_prompt: str = (
         "Você é o Zorin Copilot, assistente inteligente do sistema operacional Zorin OS 18 Core "

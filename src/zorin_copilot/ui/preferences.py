@@ -203,6 +203,40 @@ class PreferencesDialog(Adw.PreferencesDialog):
         hud_group.add(info_row)
         page.add(hud_group)
 
+        # ---------------------------------------------------------------------
+        # Grupo: Recorte Inteligente Instantâneo (Visão IA)
+        # ---------------------------------------------------------------------
+        crop_group = Adw.PreferencesGroup(
+            title="Recorte Inteligente Instantâneo (Visão IA)",
+            description="Permite disparar a mira de seleção de área diretamente da tela de qualquer aplicativo e analisar imediatamente com a IA.",
+        )
+
+        self.crop_shortcut_switch_row = Adw.SwitchRow(
+            title="Ativar Atalho de Recorte Direto",
+            subtitle="Registra a combinação global no GNOME/Zorin OS para seleção direta",
+        )
+        crop_group.add(self.crop_shortcut_switch_row)
+
+        self.crop_shortcut_options = [
+            ("<Super><Shift>s", "Super + Shift + S (Padrão - Estilo Ferramenta de Captura)"),
+            ("<Primary><Alt>v", "Ctrl + Alt + V (Visão Direta)"),
+            ("<Primary><Alt>s", "Ctrl + Alt + S (Snippet)"),
+            ("<Super>s", "Super + S"),
+        ]
+        self.crop_shortcut_combo_row = Adw.ComboRow(
+            title="Combinação de Teclas de Recorte",
+            subtitle="Selecione a tecla para acionar o recorte",
+            model=Gtk.StringList.new([label for _, label in self.crop_shortcut_options]),
+        )
+        crop_group.add(self.crop_shortcut_combo_row)
+
+        crop_info_row = Adw.ActionRow(
+            title="Como Funciona o Recorte Direto",
+            subtitle="Ao pressionar as teclas, a mira de seleção surge imediatamente na tela. Ao soltar o mouse, o Copilot abre já processando a leitura visual.",
+        )
+        crop_group.add(crop_info_row)
+        page.add(crop_group)
+
     def _build_memory_page(self) -> None:
         page = Adw.PreferencesPage(title="Base de Conhecimento", icon_name="document-properties-symbolic")
         self.add(page)
@@ -321,7 +355,7 @@ class PreferencesDialog(Adw.PreferencesDialog):
         # Pesquisa Web
         self.web_search_row.set_active(self.config.web_search_enabled)
 
-        # Atalho Global do Sistema
+        # Atalho Global do Sistema (HUD)
         self.shortcut_switch_row.set_active(self.config.global_shortcut_enabled)
         matching_idx = 0
         for idx, (b_code, _) in enumerate(self.shortcut_options):
@@ -329,6 +363,15 @@ class PreferencesDialog(Adw.PreferencesDialog):
                 matching_idx = idx
                 break
         self.shortcut_combo_row.set_selected(matching_idx)
+
+        # Atalho Global Direto de Recorte (Pilar 3)
+        self.crop_shortcut_switch_row.set_active(self.config.crop_shortcut_enabled)
+        matching_crop_idx = 0
+        for idx, (b_code, _) in enumerate(self.crop_shortcut_options):
+            if b_code == self.config.crop_shortcut_key:
+                matching_crop_idx = idx
+                break
+        self.crop_shortcut_combo_row.set_selected(matching_crop_idx)
 
         self._update_visibility()
 
@@ -372,13 +415,21 @@ class PreferencesDialog(Adw.PreferencesDialog):
         # Pesquisa Web
         cfg.web_search_enabled = self.web_search_row.get_active()
 
-        # Atalho Global do Sistema
+        # Atalho Global do Sistema (HUD)
         cfg.global_shortcut_enabled = self.shortcut_switch_row.get_active()
         sel_shortcut = self.shortcut_combo_row.get_selected()
         if 0 <= sel_shortcut < len(self.shortcut_options):
             cfg.global_shortcut_key = self.shortcut_options[sel_shortcut][0]
         else:
             cfg.global_shortcut_key = "<Super>c"
+
+        # Atalho Global Direto de Recorte (Pilar 3)
+        cfg.crop_shortcut_enabled = self.crop_shortcut_switch_row.get_active()
+        sel_crop = self.crop_shortcut_combo_row.get_selected()
+        if 0 <= sel_crop < len(self.crop_shortcut_options):
+            cfg.crop_shortcut_key = self.crop_shortcut_options[sel_crop][0]
+        else:
+            cfg.crop_shortcut_key = "<Super><Shift>s"
 
         return cfg
 
@@ -410,10 +461,19 @@ class PreferencesDialog(Adw.PreferencesDialog):
     def _on_save(self, _btn: Gtk.Button) -> None:
         cfg = self._collect_current_config()
         cfg.save()
+
+        # Sincroniza Atalho do HUD
         if cfg.global_shortcut_enabled:
             ShortcutManager.register(cfg.global_shortcut_key)
         else:
             ShortcutManager.unregister()
+
+        # Sincroniza Atalho de Recorte Direto
+        if cfg.crop_shortcut_enabled:
+            ShortcutManager.register_crop(cfg.crop_shortcut_key)
+        else:
+            ShortcutManager.unregister_crop()
+
         if self.on_saved:
             self.on_saved(cfg)
         toast = Adw.Toast.new("Configurações salvas com sucesso!")

@@ -158,6 +158,11 @@ class CopilotWindow(Adw.ApplicationWindow):
         self._matched_preview_app: Gio.AppInfo | None = None
         self._last_captured_image_bytes: bytes | None = None
 
+        # Pilar 3: Contexto de Visão Contínua (Retém recorte para conversas multiturn)
+        self._active_image_bytes: bytes | None = None
+        self._active_image_is_area: bool = False
+        self._active_image_is_clipboard: bool = False
+
         self._build_ui()
         setup_glass_window(self)
         self._update_provider_badge()
@@ -180,6 +185,40 @@ class CopilotWindow(Adw.ApplicationWindow):
             self.set_visible(False)
         else:
             self.summon_hud()
+
+    def trigger_direct_crop(self) -> None:
+        """Dispara imediatamente o recorte de área da tela a partir de atalho global (Super+Shift+S)."""
+        if self.get_visible():
+            self.set_visible(False)
+        self._start_screen_capture(interactive=True, direct_mode=True)
+
+    def _clear_active_vision(self, _btn: Gtk.Button | None = None) -> None:
+        """Descarta o contexto visual ativo, retornando o chat para modo puramente textual."""
+        self._active_image_bytes = None
+        self._active_image_is_area = False
+        self._active_image_is_clipboard = False
+        self._current_ocr_text = None
+        self.vision_preview_box.set_visible(False)
+        self.ocr_btn.set_visible(False)
+        self.show_toast("Contexto visual descartado. As próximas perguntas serão apenas em texto.")
+
+    def _render_active_vision_thumbnail(self, image_bytes: bytes, is_area: bool = True, is_clipboard: bool = False) -> None:
+        """Renderiza a miniatura visual no card com título contextual e badge de visão contínua."""
+        try:
+            gbytes = GLib.Bytes.new(image_bytes)
+            texture = Gdk.Texture.new_from_bytes(gbytes)
+            self.vision_thumbnail.set_paintable(texture)
+            if is_clipboard:
+                header_label = "<b>📋 Imagem da Área de Transferência</b>"
+            elif is_area:
+                header_label = "<b>✂️ Recorte de Tela Ativo</b>"
+            else:
+                header_label = "<b>🖥️ Captura de Tela Inteira Ativa</b>"
+            self.vision_hdr_lbl.set_markup(header_label)
+            self.vision_active_badge.set_visible(True)
+            self.vision_preview_box.set_visible(True)
+        except Exception:
+            self.vision_preview_box.set_visible(False)
 
     def _build_ui(self) -> None:
         self.toolbar_view = Adw.ToolbarView()
@@ -749,10 +788,24 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.vision_preview_box.set_margin_bottom(6)
         self.vision_preview_box.set_visible(False)
 
-        self.vision_hdr_lbl = Gtk.Label(label="<b>Recorte da Tela Analisado:</b>", use_markup=True, xalign=0)
+        # Header com título e botão para descartar a imagem ativa
+        vision_hdr_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.vision_hdr_lbl = Gtk.Label(label="<b>Recorte de Tela Ativo:</b>", use_markup=True, xalign=0)
         self.vision_hdr_lbl.add_css_class("caption")
         self.vision_hdr_lbl.add_css_class("dim-label")
-        self.vision_preview_box.append(self.vision_hdr_lbl)
+        self.vision_hdr_lbl.set_hexpand(True)
+        vision_hdr_box.append(self.vision_hdr_lbl)
+
+        self.vision_dismiss_btn = Gtk.Button()
+        self.vision_dismiss_btn.set_icon_name("window-close-symbolic")
+        self.vision_dismiss_btn.set_tooltip_text("Descartar esta imagem e continuar perguntas apenas em texto")
+        self.vision_dismiss_btn.add_css_class("flat")
+        self.vision_dismiss_btn.add_css_class("circular")
+        self.vision_dismiss_btn.add_css_class("glass-icon-btn")
+        self.vision_dismiss_btn.connect("clicked", self._clear_active_vision)
+        vision_hdr_box.append(self.vision_dismiss_btn)
+
+        self.vision_preview_box.append(vision_hdr_box)
 
         self.vision_thumbnail = Gtk.Picture()
         self.vision_thumbnail.set_can_shrink(True)
@@ -760,6 +813,17 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.vision_thumbnail.set_size_request(-1, 140)
         self.vision_thumbnail.add_css_class("card")
         self.vision_preview_box.append(self.vision_thumbnail)
+
+        # Badge indicadora de Visão Contínua ativa
+        self.vision_active_badge = Gtk.Label(
+            label="👁️ <i>Visão contínua ativa • Próximas perguntas usarão esta imagem como contexto</i>",
+            use_markup=True,
+            xalign=0,
+        )
+        self.vision_active_badge.add_css_class("dim-label")
+        self.vision_active_badge.add_css_class("caption")
+        self.vision_active_badge.set_margin_top(2)
+        self.vision_preview_box.append(self.vision_active_badge)
 
         # Botão Smart OCR para cópia direta do conteúdo identificado na imagem
         self.ocr_btn = Gtk.Button()
@@ -982,7 +1046,7 @@ class CopilotWindow(Adw.ApplicationWindow):
         )
         self.app_preview_revealer.set_reveal_child(False)
 
-    def _start_screen_capture(self, interactive: bool = True) -> None:
+    def _start_screen_capture(self, interactive: bool = True, direct_mode: bool = False) -> None:
         """Inicia a captura de tela (recorte ou tela cheia) ocultando temporariamente o Copilot."""
         if self._is_busy:
             return
@@ -990,13 +1054,13 @@ class CopilotWindow(Adw.ApplicationWindow):
         # Oculta a janela para não obstruir o que o usuário quer recortar/analisar
         self.set_visible(False)
 
-        prompt_typed = self.entry.get_text().strip()
+        prompt_typed = self.entry.get_text().strip() if not direct_mode else ""
 
         def capture_worker():
             # Aguarda 200ms para que o compositor Wayland conclua a remoção visual da janela
             time.sleep(0.2)
             success, img_bytes, mode = ScreenCaptureService.capture(interactive=interactive)
-            GLib.idle_add(self._on_capture_finished, success, img_bytes, mode, prompt_typed, interactive)
+            GLib.idle_add(self._on_capture_finished, success, img_bytes, mode, prompt_typed, interactive, direct_mode)
 
         threading.Thread(target=capture_worker, daemon=True).start()
 
@@ -1007,14 +1071,21 @@ class CopilotWindow(Adw.ApplicationWindow):
         mode: str,
         prompt_typed: str,
         is_area: bool,
+        direct_mode: bool = False,
     ) -> bool:
         """Restaura a janela e dispara a análise multimodal na thread de IA."""
-        self.set_visible(True)
-        self.present()
-
         if not success or not image_bytes:
+            if direct_mode:
+                # Cancelado via ESC pelo usuário de fora do app: mantém a janela fechada sem perturbar
+                return False
+            self.set_visible(True)
+            self.present()
             self.show_toast("Captura de tela cancelada.")
             return False
+
+        self.set_visible(True)
+        self.present()
+        self.entry.grab_focus()
 
         self._is_busy = True
         self.spinner.start()
@@ -1030,9 +1101,13 @@ class CopilotWindow(Adw.ApplicationWindow):
         if not prompt_typed:
             self.entry.set_text("✂️ Analisando recorte de tela..." if is_area else "🖥️ Analisando tela cheia...")
 
-        # Guarda os bytes da imagem para renderizar thumbnail no resultado
-        self._last_captured_image_bytes = image_bytes
-        self._last_captured_is_area = is_area
+        # Guarda a imagem no contexto ativo para Visão Contínua (turnos subsequentes)
+        self._active_image_bytes = image_bytes
+        self._active_image_is_area = is_area
+        self._active_image_is_clipboard = False
+
+        # Renderiza a miniatura visual imediatamente
+        self._render_active_vision_thumbnail(image_bytes, is_area=is_area, is_clipboard=False)
 
         def parse_thread():
             history = self.session.get_history_for_llm()
@@ -1062,9 +1137,10 @@ class CopilotWindow(Adw.ApplicationWindow):
         if any(w in low for w in ["copiad", "copiei", "clipboard", "área de transferência", "area de transferencia"]):
             kind, img_data = ClipboardService.get_content()
             if kind == "image" and isinstance(img_data, bytes):
-                self._last_captured_image_bytes = img_data
-                self._last_captured_is_area = False
-                self._last_captured_is_clipboard = True
+                self._active_image_bytes = img_data
+                self._active_image_is_area = False
+                self._active_image_is_clipboard = True
+                self._render_active_vision_thumbnail(img_data, is_area=False, is_clipboard=True)
 
         self._is_busy = True
         self.spinner.start()
@@ -1075,9 +1151,23 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.welcome_box.set_visible(False)
         self.exec_status.set_text("Pensando...")
 
+        # Visão contínua: reutiliza a imagem ativa para perguntas complementares
+        active_img = getattr(self, "_active_image_bytes", None)
+        active_is_area = getattr(self, "_active_image_is_area", False)
+
+        # Se há imagem ativa e a sessão ainda não está fixada mas já possui turnos em memória, fixa para manter contexto
+        if active_img and not self.session.is_pinned and self.session.turn_count == 0 and self.session._last_unpinned_turn:
+            self.session.pin(title="Análise Visual")
+            self._update_pin_ui()
+
         def parse_thread():
             history = self.session.get_history_for_llm()
-            plan = self.engine.parse(text, history=history)
+            plan = self.engine.parse(
+                text,
+                history=history,
+                image_bytes=active_img,
+                is_area_capture=active_is_area,
+            )
             GLib.idle_add(self._on_plan_ready, plan, text)
 
         threading.Thread(target=parse_thread, daemon=True).start()
@@ -1092,27 +1182,13 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.current_plan = plan
         self.welcome_box.set_visible(False)
 
-        # Se houve imagem capturada ou copiada nesta consulta, renderiza miniatura
-        if getattr(self, "_last_captured_image_bytes", None):
-            try:
-                gbytes = GLib.Bytes.new(self._last_captured_image_bytes)
-                texture = Gdk.Texture.new_from_bytes(gbytes)
-                self.vision_thumbnail.set_paintable(texture)
-                is_area = getattr(self, "_last_captured_is_area", False)
-                is_clip = getattr(self, "_last_captured_is_clipboard", False)
-                if is_clip:
-                    header_label = "<b>📋 Imagem da Área de Transferência:</b>"
-                elif is_area:
-                    header_label = "<b>✂️ Recorte de Tela Analisado:</b>"
-                else:
-                    header_label = "<b>🖥️ Captura de Tela Inteira:</b>"
-                self.vision_hdr_lbl.set_markup(header_label)
-                self.vision_preview_box.set_visible(True)
-            except Exception:
-                self.vision_preview_box.set_visible(False)
-            finally:
-                self._last_captured_image_bytes = None
-                self._last_captured_is_clipboard = False
+        # Se há imagem ativa no contexto, mantém a miniatura e badge de visão contínua visíveis
+        if getattr(self, "_active_image_bytes", None):
+            self._render_active_vision_thumbnail(
+                self._active_image_bytes,
+                is_area=getattr(self, "_active_image_is_area", False),
+                is_clipboard=getattr(self, "_active_image_is_clipboard", False),
+            )
         else:
             self.vision_preview_box.set_visible(False)
 
@@ -1541,6 +1617,7 @@ class CopilotWindow(Adw.ApplicationWindow):
         if self.session.is_pinned and self.session.turns:
             self._save_current_session()
         self.session.reset_new()
+        self._clear_active_vision()
         self._update_pin_ui()
         self.entry.set_text("")
         self.answer_group.set_visible(False)
@@ -1566,14 +1643,24 @@ class ZorinCopilotApp(Adw.Application):
             "Alterna a visibilidade do HUD do Copilot",
             None,
         )
+        self.add_main_option(
+            "crop",
+            ord("c"),
+            GLib.OptionFlags.NONE,
+            GLib.OptionArg.NONE,
+            "Dispara a seleção interativa de área da tela e analisa com IA",
+            None,
+        )
 
     def do_startup(self):
         Adw.Application.do_startup(self)
-        # Garante o registro do atalho de sistema configurado no GNOME
+        # Garante o registro dos atalhos de sistema configurados no GNOME (HUD e Recorte)
         try:
             cfg = CopilotConfig.load()
             if cfg.global_shortcut_enabled:
                 ShortcutManager.register(cfg.global_shortcut_key)
+            if getattr(cfg, "crop_shortcut_enabled", True):
+                ShortcutManager.register_crop(getattr(cfg, "crop_shortcut_key", "<Super><Shift>s"))
         except Exception:
             pass
 
@@ -1590,12 +1677,17 @@ class ZorinCopilotApp(Adw.Application):
     def do_command_line(self, command_line: Gio.ApplicationCommandLine) -> int:
         options = command_line.get_options_dict()
         is_toggle = options.contains("toggle")
+        is_crop = options.contains("crop")
         args = command_line.get_arguments()
         if "--toggle" in args or "-t" in args:
             is_toggle = True
+        if "--crop" in args or "-c" in args or "--snippet" in args:
+            is_crop = True
 
         win = self._get_or_create_window()
-        if is_toggle:
+        if is_crop:
+            win.trigger_direct_crop()
+        elif is_toggle:
             win.toggle_hud()
         else:
             win.summon_hud()
