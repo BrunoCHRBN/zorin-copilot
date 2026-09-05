@@ -121,6 +121,48 @@ class LiveVoiceClientTest(unittest.TestCase):
         self.assertIn("Imagens", res["stats"])
         mock_org.assert_called_once_with(directory="~/Downloads", dry_run=False)
 
+    def test_video_streaming_toggle_and_state(self):
+        """Testa início, interrupção e alternância de streaming de vídeo de tela."""
+        # Se cliente não estiver rodando, start_video_stream retorna False
+        self.assertFalse(self.client.start_video_stream())
+
+        self.client._is_running = True
+        self.assertFalse(self.client.is_video_streaming())
+
+        # Inicia
+        self.assertTrue(self.client.start_video_stream(fps=1.0))
+        self.assertTrue(self.client.is_video_streaming())
+
+        # Alterna (desliga)
+        self.assertFalse(self.client.toggle_video_stream())
+        self.assertFalse(self.client.is_video_streaming())
+
+        # Alterna (liga)
+        self.assertTrue(self.client.toggle_video_stream())
+        self.assertTrue(self.client.is_video_streaming())
+
+        # Interrompe
+        self.client.stop_video_stream()
+        self.assertFalse(self.client.is_video_streaming())
+
+    def test_video_streaming_stops_on_client_stop(self):
+        """Garante que ao encerrar a chamada, o streaming de vídeo é finalizado."""
+        self.client._is_running = True
+        self.client.start_video_stream(fps=1.0)
+        self.assertTrue(self.client.is_video_streaming())
+
+        self.client.stop()
+        self.assertFalse(self.client.is_video_streaming())
+
+    def test_session_summary_records_video_metrics(self):
+        """Garante que o resumo da sessão inclui métricas de vídeo transmitido."""
+        self.client._is_running = True
+        self.client._video_frames_count = 12
+        summary = self.client.get_session_summary()
+        self.assertTrue(summary.get("video_streamed"))
+        self.assertEqual(summary.get("video_frames"), 12)
+        self.assertTrue(summary.get("has_activity"))
+
 
 if __name__ == "__main__":
     unittest.main()

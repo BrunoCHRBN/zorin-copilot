@@ -62,6 +62,11 @@ class LiveVoiceWidget(Gtk.Box):
         self.status_lbl.set_hexpand(True)
         header_box.append(self.status_lbl)
 
+        self.video_badge = Gtk.Label(label="<span foreground='#e01b24'><b>● TELA AO VIVO (1 FPS)</b></span>", use_markup=True)
+        self.video_badge.add_css_class("caption")
+        self.video_badge.set_visible(False)
+        header_box.append(self.video_badge)
+
         close_btn = Gtk.Button.new_from_icon_name("window-close-symbolic")
         close_btn.set_tooltip_text("Encerrar conversa de voz")
         close_btn.add_css_class("flat")
@@ -134,15 +139,31 @@ class LiveVoiceWidget(Gtk.Box):
         self.mute_btn.connect("clicked", self._on_toggle_mute)
         controls_box.append(self.mute_btn)
 
-        # Botão Enviar Print da Tela
+        # Botão Live Video (Streaming contínuo de tela com consentimento)
+        self.video_btn = Gtk.Button()
+        self.video_btn.add_css_class("pill")
+        self.video_btn.add_css_class("glass-pill")
+        self.video_btn.set_tooltip_text("Transmitir tela ao vivo continuamente (1 FPS) para o Copilot visualizar suas janelas enquanto conversam")
+        video_btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.video_icon = Gtk.Image.new_from_icon_name("video-display-symbolic")
+        self.video_icon.set_pixel_size(14)
+        self.video_lbl = Gtk.Label(label="Transmitir Tela")
+        self.video_lbl.add_css_class("caption")
+        video_btn_box.append(self.video_icon)
+        video_btn_box.append(self.video_lbl)
+        self.video_btn.set_child(video_btn_box)
+        self.video_btn.connect("clicked", self._on_toggle_video)
+        controls_box.append(self.video_btn)
+
+        # Botão Enviar Snapshot da Tela (Foto única)
         self.screen_btn = Gtk.Button()
         self.screen_btn.add_css_class("pill")
         self.screen_btn.add_css_class("glass-pill")
-        self.screen_btn.set_tooltip_text("Captura a tela atual e envia para a IA analisar visualmente")
+        self.screen_btn.set_tooltip_text("Captura uma imagem instantânea da tela atual e envia para a IA")
         screen_btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         screen_icon = Gtk.Image.new_from_icon_name("camera-photo-symbolic")
         screen_icon.set_pixel_size(14)
-        screen_lbl = Gtk.Label(label="Olhar Minha Tela")
+        screen_lbl = Gtk.Label(label="Snapshot")
         screen_lbl.add_css_class("caption")
         screen_btn_box.append(screen_icon)
         screen_btn_box.append(screen_lbl)
@@ -167,6 +188,7 @@ class LiveVoiceWidget(Gtk.Box):
         self.live_client.on_tool_executed = lambda name, msg, ok: GLib.idle_add(self._ui_on_tool_executed, name, msg, ok)
         self.live_client.on_transcript = lambda role, text: GLib.idle_add(self._ui_on_transcript, role, text)
         self.live_client.on_error = lambda err: GLib.idle_add(self._ui_on_error, err)
+        self.live_client.on_video_state_change = lambda active: GLib.idle_add(self._update_video_ui, active)
 
     def _ui_on_state_change(self, state: LiveVoiceState, msg: str) -> bool:
         if state == LiveVoiceState.CONNECTING:
@@ -272,6 +294,23 @@ class LiveVoiceWidget(Gtk.Box):
             self.mute_icon.set_from_icon_name("audio-input-microphone-symbolic")
             self.mute_lbl.set_text("Mutar")
             self.mute_btn.remove_css_class("destructive-action")
+
+    def _on_toggle_video(self, _btn: Gtk.Button) -> None:
+        is_active = self.live_client.toggle_video_stream(fps=1.0)
+        self._update_video_ui(is_active)
+
+    def _update_video_ui(self, is_active: bool) -> bool:
+        if is_active:
+            self.video_lbl.set_text("Pausar Tela")
+            self.video_btn.add_css_class("suggested-action")
+            self.video_badge.set_visible(True)
+            self.subtitle_lbl.set_text("🎥 Compartilhamento de tela ativo (1 FPS). O assistente pode ver suas janelas.")
+        else:
+            self.video_lbl.set_text("Transmitir Tela")
+            self.video_btn.remove_css_class("suggested-action")
+            self.video_badge.set_visible(False)
+            self.subtitle_lbl.set_text("Fale naturalmente com o assistente...")
+        return False
 
     def _on_send_screen(self, _btn: Gtk.Button) -> None:
         ok = self.live_client.send_screen_frame()

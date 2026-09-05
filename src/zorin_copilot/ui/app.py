@@ -256,14 +256,24 @@ class CopilotWindow(Adw.ApplicationWindow):
                         lines.append("- 📸 Capturou a tela para inspeção visual")
                     elif t_name == "web_search":
                         lines.append(f"- 🔍 Pesquisa na web: *{t_args.get('query', '')}*")
+                    elif t_name == "media_control":
+                        lines.append(f"- 🎵 Controle de mídia: **{t_args.get('action', '')}**")
+                    elif t_name == "write_document":
+                        lines.append(f"- 📝 Salvou documento: `{t_args.get('filename', '')}`")
+                    elif t_name == "organize_directory":
+                        lines.append(f"- 📁 Organizou pasta: `{t_args.get('directory', 'Downloads')}`")
                     else:
                         lines.append(f"- ⚡ Executou ferramenta: `{t_name}`")
                 lines.append("")
             else:
-                lines.append("Conversa por voz e áudio bidirecional concluída.")
+                lines.append("Conversa bidirecional em tempo real concluída.")
+
+            if summary.get("video_streamed"):
+                frames = summary.get("video_frames", 0)
+                lines.append(f"**🎥 Live Video:** Compartilhamento contínuo de tela ativo ({frames} frames analisados em tempo real).\n")
 
             summary_text = "\n".join(lines).strip()
-            prompt_label = "🎙️ Conversa de Voz ao Vivo"
+            prompt_label = "🎙️🎥 Chamada de Voz e Tela ao Vivo" if summary.get("video_streamed") else "🎙️ Conversa de Voz ao Vivo"
 
             self.session.record_turn(prompt=prompt_label, answer=summary_text)
             self._save_current_session()

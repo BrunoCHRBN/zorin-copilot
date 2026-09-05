@@ -209,9 +209,13 @@ class GeminiLiveClient:
         self.on_tool_executed: Callable[[str, str, bool], None] | None = None
         self.on_transcript: Callable[[str, str], None] | None = None
         self.on_error: Callable[[str], None] | None = None
+        self.on_video_state_change: Callable[[bool], None] | None = None
 
         self._is_running = False
         self._is_muted = False
+        self._is_video_streaming = False
+        self._video_thread: threading.Thread | None = None
+        self._video_frames_count: int = 0
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._ws: Any = None
@@ -258,6 +262,7 @@ class GeminiLiveClient:
 
         self._is_running = True
         self._is_muted = False
+        self._video_frames_count = 0
         self._session_start_time = time.time()
         self._executed_actions_log.clear()
         self._transcripts_log.clear()
@@ -265,7 +270,8 @@ class GeminiLiveClient:
         self._thread.start()
 
     def stop(self) -> None:
-        """Finaliza a conexão de voz e interrompe os fluxos de áudio."""
+        """Finaliza a conexão de voz e interrompe os fluxos de áudio e vídeo."""
+        self.stop_video_stream()
         self._is_running = False
         self._terminate_audio_processes()
 
@@ -275,13 +281,20 @@ class GeminiLiveClient:
         self._set_state(LiveVoiceState.DISCONNECTED, "Chamada encerrada.")
 
     def get_session_summary(self) -> dict[str, Any]:
-        """Retorna o resumo estruturado da chamada de voz ao vivo para persistir no chat da demanda ativa."""
+        """Retorna o resumo estruturado da chamada de voz e vídeo ao vivo para persistir no chat da demanda ativa."""
         duration = max(1, int(time.time() - self._session_start_time)) if self._session_start_time > 0 else 0
         return {
             "duration_sec": duration,
             "actions_executed": list(self._executed_actions_log),
             "transcripts": list(self._transcripts_log),
-            "has_activity": bool(self._executed_actions_log or self._transcripts_log or duration >= 3),
+            "video_streamed": bool(self._video_frames_count > 0),
+            "video_frames": self._video_frames_count,
+            "has_activity": bool(
+                self._executed_actions_log
+                or self._transcripts_log
+                or self._video_frames_count > 0
+                or duration >= 3
+            ),
         }
 
     def _terminate_audio_processes(self) -> None:
@@ -388,10 +401,11 @@ class GeminiLiveClient:
                             "parts": [
                                 {
                                     "text": (
-                                        "Você é o Zorin Copilot, assistente de voz nativo do sistema operacional Zorin OS 18 (Linux / GNOME / Wayland). "
+                                        "Você é o Zorin Copilot, assistente nativo de voz e visão multimodal do sistema operacional Zorin OS 18 (Linux / GNOME / Wayland). "
                                         "Você conversa por áudio em tempo real com o usuário em português brasileiro. "
                                         "Seja conciso, natural, simpático e direto ao ponto. "
-                                        "Você possui ferramentas para controlar o sistema operacional, abrir programas, ajustar volume, ver a tela e pesquisar. "
+                                        "Você possui ferramentas para controlar mídia e música (Spotify), criar arquivos e relatórios, organizar pastas, abrir programas, ajustar volume, ver a tela e pesquisar na web. "
+                                        "Quando o usuário compartilhar a tela ao vivo (Live Video) ou enviar snapshots, você tem visão multimodal direta do que está acontecendo na área de trabalho dele. Você pode ler janelas, erros, códigos, páginas e interagir em tempo real sobre o que está visível. "
                                         "Sempre que o usuário pedir para fazer algo no computador, use imediatamente as ferramentas disponíveis e comente o resultado brevemente."
                                     )
                                 }
@@ -722,3 +736,87 @@ class GeminiLiveClient:
 
         threading.Thread(target=capture_and_send, daemon=True).start()
         return True
+
+    def is_video_streaming(self) -> bool:
+        """Verifica se o streaming contínuo da tela está ativo."""
+        return self._is_video_streaming
+
+    def start_video_stream(self, fps: float = 1.0) -> bool:
+        """Inicia streaming contínuo da tela para o Gemini Live com consentimento explícito."""
+        if not self._is_running:
+            return False
+        if self._is_video_streaming:
+            return True
+
+        self._is_video_streaming = True
+        if self.on_video_state_change:
+            try:
+                self.on_video_state_change(True)
+            except Exception as exc:
+                logger.error(f"Erro no callback on_video_state_change: {exc}")
+
+        self._video_thread = threading.Thread(
+            target=self._video_stream_worker,
+            args=(fps,),
+            daemon=True,
+            name="GeminiLiveVideoWorker",
+        )
+        self._video_thread.start()
+        return True
+
+    def stop_video_stream(self) -> None:
+        """Pausa/interrompe o streaming contínuo da tela."""
+        if not self._is_video_streaming:
+            return
+        self._is_video_streaming = False
+        if self.on_video_state_change:
+            try:
+                self.on_video_state_change(False)
+            except Exception as exc:
+                logger.error(f"Erro no callback on_video_state_change: {exc}")
+
+    def toggle_video_stream(self, fps: float = 1.0) -> bool:
+        """Alterna o streaming contínuo da tela e retorna o novo estado (True = ativo)."""
+        if self._is_video_streaming:
+            self.stop_video_stream()
+            return False
+        else:
+            return self.start_video_stream(fps=fps)
+
+    def _video_stream_worker(self, fps: float = 1.0) -> None:
+        """Loop em background que captura e transmite frames de tela para o WebSocket da Live API."""
+        delay = max(0.5, 1.0 / max(0.2, fps))
+        while self._is_video_streaming and self._is_running:
+            if self._ws and self._loop and self._loop.is_running():
+                try:
+                    ok, img_bytes, _ = ScreenCaptureService.capture(
+                        interactive=False, max_size=1024, quality=70
+                    )
+                    if ok and img_bytes and self._is_video_streaming and self._is_running:
+                        b64_img = base64.b64encode(img_bytes).decode("utf-8")
+                        frame_msg = {
+                            "realtimeInput": {
+                                "mediaChunks": [
+                                    {
+                                        "mimeType": "image/jpeg",
+                                        "data": b64_img,
+                                    }
+                                ]
+                            }
+                        }
+                        asyncio.run_coroutine_threadsafe(
+                            self._ws.send(json.dumps(frame_msg)), self._loop
+                        )
+                        self._video_frames_count += 1
+                except Exception as exc:
+                    logger.debug(f"Erro no envio de frame de vídeo contínuo: {exc}")
+
+            time.sleep(delay)
+
+        self._is_video_streaming = False
+        if self.on_video_state_change:
+            try:
+                self.on_video_state_change(False)
+            except Exception:
+                pass
+
