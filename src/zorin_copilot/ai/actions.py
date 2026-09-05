@@ -25,6 +25,7 @@ class ActionType(str, Enum):
     MEDIA_CONTROL = "media_control"
     WRITE_FILE = "write_file"
     ORGANIZE_FILES = "organize_files"
+    OPEN_DOCUMENT = "open_document"
 
 
 @dataclass
@@ -73,6 +74,10 @@ class DesktopAction:
         if self.action_type == ActionType.ORGANIZE_FILES:
             folder = self.params.get("directory", self.target)
             return f"Organizar pasta '{folder}'"
+        if self.action_type == ActionType.OPEN_DOCUMENT:
+            page = self.params.get("page_number", 1)
+            page_str = f" na pág. {page}" if page > 1 else ""
+            return f"Abrir documento '{self.target}'{page_str}"
         return f"Ação {self.action_type.value} em {self.target}"
 
 

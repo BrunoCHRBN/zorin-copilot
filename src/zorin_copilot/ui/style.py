@@ -457,6 +457,131 @@ scrollbar slider {
 scrollbar slider:hover {
     background-color: alpha(@window_fg_color, 0.45);
 }
+
+/* --- Painel Lateral de Conversas (Estilo Gemini) --- */
+.sidebar-panel {
+    padding: 10px;
+    transition: all 200ms ease;
+}
+
+window.light-glass .sidebar-panel {
+    background-color: rgba(243, 246, 251, 0.94);
+    border-right: 1px solid rgba(18, 51, 84, 0.10);
+}
+
+window.dark-glass .sidebar-panel {
+    background-color: rgba(18, 22, 30, 0.94);
+    border-right: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* Linhas de chat na barra lateral */
+.sidebar-chat-row {
+    border-radius: 10px;
+    padding: 6px 10px;
+    margin-bottom: 3px;
+    transition: all 150ms ease;
+}
+
+window.light-glass .sidebar-chat-row:hover {
+    background-color: rgba(18, 51, 84, 0.06);
+}
+
+window.dark-glass .sidebar-chat-row:hover {
+    background-color: rgba(255, 255, 255, 0.08);
+}
+
+window.light-glass .sidebar-chat-row.active {
+    background-color: rgba(21, 166, 240, 0.12);
+    border-left: 3px solid #15a6f0;
+}
+
+window.dark-glass .sidebar-chat-row.active {
+    background-color: rgba(98, 160, 234, 0.18);
+    border-left: 3px solid #62a0ea;
+}
+
+/* --- Bolha de Mensagem do Usuário (Estilo Gemini) --- */
+.user-chat-bubble {
+    border-radius: 18px 18px 4px 18px;
+    padding: 10px 16px;
+    margin-bottom: 4px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.03);
+}
+
+window.light-glass .user-chat-bubble {
+    background-color: rgba(21, 166, 240, 0.09);
+    border: 1px solid rgba(21, 166, 240, 0.22);
+    color: #123354;
+}
+
+window.dark-glass .user-chat-bubble {
+    background-color: rgba(21, 166, 240, 0.16);
+    border: 1px solid rgba(21, 166, 240, 0.30);
+    color: #ffffff;
+}
+
+/* --- Card de Resposta do Assistente (Estilo Gemini) --- */
+.assistant-message-card {
+    border-radius: 18px;
+    padding: 14px 18px;
+    margin-bottom: 6px;
+}
+
+window.light-glass .assistant-message-card {
+    background-color: rgba(255, 255, 255, 0.90);
+    border: 1px solid rgba(18, 51, 84, 0.09);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.03);
+}
+
+window.dark-glass .assistant-message-card {
+    background-color: rgba(30, 36, 48, 0.88);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+}
+
+/* --- Barra de Entrada Inferior (Estilo Gemini) --- */
+.prompt-bar-card {
+    border-radius: 28px;
+    padding: 4px 8px 4px 12px;
+    transition: all 180ms ease;
+}
+
+window.light-glass .prompt-bar-card {
+    background-color: rgba(255, 255, 255, 0.96);
+    border: 1px solid rgba(18, 51, 84, 0.14);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.06), inset 0 1px 0 rgba(255, 255, 255, 0.95);
+}
+
+window.light-glass .prompt-bar-card:focus-within {
+    border: 1px solid #15a6f0;
+    box-shadow: 0 0 0 2px rgba(21, 166, 240, 0.25), 0 4px 20px rgba(21, 166, 240, 0.12);
+}
+
+window.dark-glass .prompt-bar-card {
+    background-color: rgba(32, 38, 50, 0.94);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+window.dark-glass .prompt-bar-card:focus-within {
+    border: 1px solid #62a0ea;
+    box-shadow: 0 0 0 2px rgba(98, 160, 234, 0.30), 0 4px 20px rgba(0, 0, 0, 0.4);
+}
+
+.prompt-bar-card entry {
+    background-color: transparent;
+    border: none;
+    box-shadow: none;
+    padding: 6px 8px;
+    font-size: 14px;
+}
+
+.disclaimer-caption {
+    font-size: 11px;
+    opacity: 0.65;
+    margin-top: 4px;
+    margin-bottom: 6px;
+}
 """
 
 _provider_installed = False

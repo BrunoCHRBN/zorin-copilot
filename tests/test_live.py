@@ -163,6 +163,106 @@ class LiveVoiceClientTest(unittest.TestCase):
         self.assertEqual(summary.get("video_frames"), 12)
         self.assertTrue(summary.get("has_activity"))
 
+    def test_dispatch_tool_screen_fence_control(self):
+        """Testa controle dinâmico da cerca espacial via Live API."""
+        res = self.client._dispatch_tool("screen_fence_control", {"monitor": "principal"})
+        self.assertTrue(res["success"])
+        self.assertIn("Cerca", res["message"])
+
+    def test_dispatch_tool_mouse_click_and_keyboard(self):
+        """Testa clique e digitação via Live API."""
+        res_click = self.client._dispatch_tool("mouse_click", {"x": 0.5, "y": 0.5, "is_relative": True})
+        self.assertTrue(res_click["success"])
+
+        res_type = self.client._dispatch_tool("keyboard_type", {"text": "Teste", "press_enter": False})
+        self.assertTrue(res_type["success"])
+
+        res_hotkey = self.client._dispatch_tool("keyboard_hotkey", {"keys": ["ctrl", "c"]})
+        self.assertTrue(res_hotkey["success"])
+
+    def test_dispatch_tool_contacts(self):
+        """Testa salvamento e consulta de contato via Live API."""
+        res_save = self.client._dispatch_tool(
+            "contact_save",
+            {"name": "Lucas Dev", "email": "lucas@dev.com", "aliases": ["lucas", "frontend"]},
+        )
+        self.assertTrue(res_save["success"])
+
+        res_lookup = self.client._dispatch_tool("contact_lookup", {"query": "frontend"})
+        self.assertTrue(res_lookup["success"])
+        self.assertEqual(len(res_lookup["contacts"]), 1)
+        self.assertEqual(res_lookup["contacts"][0]["email"], "lucas@dev.com")
+
+    def test_dispatch_tool_email_compose(self):
+        """Testa composição de e-mail com contato resolvido."""
+        self.client.memory.save_contact("Carlos Contador", "carlos@contabilidade.com", aliases=["contador"])
+        res = self.client._dispatch_tool(
+            "email_compose",
+            {"recipient": "contador", "subject": "Balanço Mensal", "body": "Segue relatório."},
+        )
+        self.assertTrue(res["success"])
+        self.assertIn("carlos@contabilidade.com", res["message"])
+
+    def test_dispatch_tool_calendar_event(self):
+        """Testa agendamento e listagem de evento no calendário via Live API."""
+        res_create = self.client._dispatch_tool(
+            "calendar_event",
+            {"action": "create", "title": "Reunião de Equipe", "datetime_str": "amanhã às 11:00"},
+        )
+        self.assertTrue(res_create["success"])
+        self.assertIn("Reunião de Equipe", res_create["message"])
+
+        res_list = self.client._dispatch_tool("calendar_event", {"action": "list", "datetime_str": "amanhã"})
+        self.assertTrue(res_list["success"])
+        self.assertGreaterEqual(res_list["count"], 1)
+
+    def test_dispatch_tool_browser_search(self):
+        """Testa pesquisa direta no navegador via Live API."""
+        res = self.client._dispatch_tool("browser_search", {"query": "Python 3.12 novidades", "engine": "google"})
+        self.assertTrue(res["success"])
+        self.assertIn("google.com/search", res["url"])
+
+    def test_dispatch_tool_rag_documents(self):
+        """Testa busca, leitura de página e abertura de documento local via Live API."""
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sample_file = Path(tmpdir) / "relatorio_financeiro.md"
+            sample_file.write_text(
+                "# Relatório Financeiro 2026\n\n"
+                "O faturamento bruto consolidado do primeiro trimestre foi de R$ 450.000.",
+                encoding="utf-8",
+            )
+
+            # Indexa o arquivo na instância RAG do client
+            self.client.rag.index_file(sample_file)
+
+            # 1. search_documents
+            res_search = self.client._dispatch_tool(
+                "search_documents",
+                {"query": "faturamento bruto 2026", "limit": 3},
+            )
+            self.assertTrue(res_search["success"])
+            self.assertGreaterEqual(res_search["count"], 1)
+            self.assertIn("relatorio_financeiro.md", res_search["citations"])
+
+            # 2. read_document_page
+            res_read = self.client._dispatch_tool(
+                "read_document_page",
+                {"file_path": str(sample_file), "page_number": 1},
+            )
+            self.assertTrue(res_read["success"])
+            self.assertIn("450.000", res_read["content"])
+
+            # 3. open_document_file
+            res_open = self.client._dispatch_tool(
+                "open_document_file",
+                {"file_path": str(sample_file), "page_number": 1},
+            )
+            self.assertTrue(res_open["success"])
+
 
 if __name__ == "__main__":
     unittest.main()
+

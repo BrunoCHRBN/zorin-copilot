@@ -222,7 +222,19 @@ class LiveVoiceWidget(Gtk.Box):
 
     def _ui_on_tool_executed(self, name: str, message: str, success: bool) -> bool:
         icon_name = "emblem-ok-symbolic" if success else "dialog-warning-symbolic"
-        if "app" in name:
+        if "click" in name or "mouse" in name:
+            icon_name = "input-mouse-symbolic"
+        elif "keyboard" in name or "type" in name or "hotkey" in name:
+            icon_name = "input-keyboard-symbolic"
+        elif "contact" in name:
+            icon_name = "contact-new-symbolic"
+        elif "email" in name:
+            icon_name = "mail-send-symbolic"
+        elif "calendar" in name:
+            icon_name = "x-office-calendar-symbolic"
+        elif "fence" in name or "monitor" in name:
+            icon_name = "video-display-symbolic"
+        elif "app" in name:
             icon_name = "application-x-executable-symbolic"
         elif "volume" in name or "control" in name:
             icon_name = "audio-volume-high-symbolic"
@@ -230,6 +242,8 @@ class LiveVoiceWidget(Gtk.Box):
             icon_name = "camera-photo-symbolic"
         elif "url" in name or "search" in name:
             icon_name = "web-browser-symbolic"
+        elif "document" in name or "file" in name:
+            icon_name = "text-x-generic-symbolic"
 
         self.action_icon.set_from_icon_name(icon_name)
         status_color = "#2ec27e" if success else "#e5a50a"
@@ -300,11 +314,16 @@ class LiveVoiceWidget(Gtk.Box):
         self._update_video_ui(is_active)
 
     def _update_video_ui(self, is_active: bool) -> bool:
+        active_fence = getattr(self.live_client, "fence", None)
+        active_mon = active_fence.get_active_monitor() if active_fence else None
+        mon_name = active_mon.name if active_mon else "AOC 27\""
+
         if is_active:
             self.video_lbl.set_text("Pausar Tela")
             self.video_btn.add_css_class("suggested-action")
+            self.video_badge.set_markup(f"<span foreground='#2ec27e'><b>● TELA AO VIVO ({mon_name})</b></span>")
             self.video_badge.set_visible(True)
-            self.subtitle_lbl.set_text("🎥 Compartilhamento de tela ativo (1 FPS). O assistente pode ver suas janelas.")
+            self.subtitle_lbl.set_text(f"🎥 Compartilhamento de tela ativo no {mon_name} (1 FPS). O assistente pode ver suas janelas.")
         else:
             self.video_lbl.set_text("Transmitir Tela")
             self.video_btn.remove_css_class("suggested-action")

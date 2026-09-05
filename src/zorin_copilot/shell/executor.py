@@ -92,11 +92,22 @@ class ActionExecutor:
         if action.action_type == ActionType.ORGANIZE_FILES:
             return self._organize_files(action)
 
+        if action.action_type == ActionType.OPEN_DOCUMENT:
+            return self._open_document(action)
+
         return ExecutionReport(
             action=action,
             success=False,
             message=f"Tipo de ação não implementado: {action.action_type}",
         )
+
+    def _open_document(self, action: DesktopAction) -> ExecutionReport:
+        fpath = action.target
+        page = int(action.params.get("page_number", 1))
+        from ..core.rag import LocalDocumentRAG
+        rag = getattr(self, "rag", None) or LocalDocumentRAG()
+        ok, msg = rag.open_document(fpath, page_number=page)
+        return ExecutionReport(action=action, success=ok, message=msg)
 
     def _copy_ocr_text(self, action: DesktopAction) -> ExecutionReport:
         text = action.target

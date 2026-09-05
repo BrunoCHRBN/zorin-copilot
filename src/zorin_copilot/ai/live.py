@@ -20,13 +20,23 @@ import time
 from enum import Enum
 from typing import Any, Callable
 
-import websockets
+try:
+    import websockets
+except ImportError:
+    websockets = None
 
 from ..core.apps import AppManager
+from ..core.browser import BrowserManager
+from ..core.calendar import CalendarManager
 from ..core.config import CopilotConfig
+from ..core.email import EmailManager
+from ..core.fence import ScreenFenceManager
+from ..core.memory import MemoryManager
+from ..core.rag import LocalDocumentRAG
 from ..core.vision import ScreenCaptureService
 from ..core.web_search import WebSearchClient
 from ..shell.executor import ActionExecutor
+from ..shell.input_driver import VirtualInputDriver
 from .actions import ActionPlan, ActionType, DesktopAction
 
 logger = logging.getLogger(__name__)
@@ -186,6 +196,264 @@ LIVE_TOOLS_DECLARATION = [
                     },
                 },
             },
+            {
+                "name": "screen_fence_control",
+                "description": "Controla a cerca de segurança espacial e qual monitor físico está autorizado para receber cliques e automações (ex: monitor principal AOC 27, monitor secundário VIE 24, ou todas as telas).",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "monitor": {
+                            "type": "STRING",
+                            "description": "Identificador do monitor ou modo ('principal', 'secundaria', 'aoc', 'vie', 'all')",
+                        }
+                    },
+                    "required": ["monitor"],
+                },
+            },
+            {
+                "name": "mouse_click",
+                "description": "Executa um clique de mouse virtual na tela. As coordenadas são estritamente validadas pela cerca espacial do monitor ativo.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "x": {
+                            "type": "NUMBER",
+                            "description": "Coordenada horizontal (em porcentagem relativa de 0.0 a 1.0 ou pixels absolutos)",
+                        },
+                        "y": {
+                            "type": "NUMBER",
+                            "description": "Coordenada vertical (em porcentagem relativa de 0.0 a 1.0 ou pixels absolutos)",
+                        },
+                        "is_relative": {
+                            "type": "BOOLEAN",
+                            "description": "Se true, x e y são porcentagens [0.0, 1.0] do frame visual do vídeo; se false, pixels absolutos",
+                        },
+                        "button": {
+                            "type": "STRING",
+                            "enum": ["left", "right", "middle"],
+                            "description": "Botão do mouse a ser clicado",
+                        },
+                        "double": {
+                            "type": "BOOLEAN",
+                            "description": "Se true, realiza clique duplo",
+                        },
+                    },
+                    "required": ["x", "y"],
+                },
+            },
+            {
+                "name": "keyboard_type",
+                "description": "Digita texto diretamente no aplicativo ou campo ativo na tela através do teclado virtual de hardware do Zorin OS.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "text": {
+                            "type": "STRING",
+                            "description": "Texto completo a ser digitado",
+                        },
+                        "press_enter": {
+                            "type": "BOOLEAN",
+                            "description": "Se true, pressiona Enter após concluir a digitação",
+                        },
+                    },
+                    "required": ["text"],
+                },
+            },
+            {
+                "name": "keyboard_hotkey",
+                "description": "Envia uma combinação de teclas de atalho para a janela ativa (ex: ['ctrl', 'v'], ['ctrl', 'c'], ['alt', 'tab'], ['super']).",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "keys": {
+                            "type": "ARRAY",
+                            "items": {"type": "STRING"},
+                            "description": "Lista de teclas que compõem o atalho (ex: ['ctrl', 'c'])",
+                        }
+                    },
+                    "required": ["keys"],
+                },
+            },
+            {
+                "name": "contact_lookup",
+                "description": "Consulta os contatos salvos pelo nome, apelido (ex: 'contador', 'rh', 'financeiro') ou e-mail na memória permanente do usuário para obter o endereço exato sem alucinações.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "query": {
+                            "type": "STRING",
+                            "description": "Nome, apelido ou termo de busca do contato",
+                        }
+                    },
+                    "required": ["query"],
+                },
+            },
+            {
+                "name": "contact_save",
+                "description": "Salva um novo contato ou atualiza informações na memória permanente do usuário.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "name": {
+                            "type": "STRING",
+                            "description": "Nome completo da pessoa ou instituição",
+                        },
+                        "email": {
+                            "type": "STRING",
+                            "description": "Endereço de e-mail válido",
+                        },
+                        "aliases": {
+                            "type": "ARRAY",
+                            "items": {"type": "STRING"},
+                            "description": "Apelidos ou funções para fácil localização futura (ex: ['contador', 'carlos'])",
+                        },
+                        "notes": {
+                            "type": "STRING",
+                            "description": "Informações ou contexto adicional",
+                        },
+                    },
+                    "required": ["name", "email"],
+                },
+            },
+            {
+                "name": "email_compose",
+                "description": "Abre o cliente de e-mail (Thunderbird, Evolution, ou Webmail Gmail/Outlook no navegador) com destinatário, assunto e rascunho preenchidos para revisão do usuário.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "recipient": {
+                            "type": "STRING",
+                            "description": "Endereço de e-mail de destino ou nome/apelido de contato salvo",
+                        },
+                        "subject": {
+                            "type": "STRING",
+                            "description": "Assunto da mensagem",
+                        },
+                        "body": {
+                            "type": "STRING",
+                            "description": "Corpo ou rascunho textual do e-mail",
+                        },
+                        "client": {
+                            "type": "STRING",
+                            "enum": ["auto", "gmail", "outlook", "native"],
+                            "description": "Cliente de e-mail a utilizar (padrão 'auto')",
+                        },
+                    },
+                    "required": ["recipient"],
+                },
+            },
+            {
+                "name": "calendar_event",
+                "description": "Gerencia compromissos e lembretes na agenda/calendário do Zorin OS (cria arquivos .ics compatíveis com GNOME Calendar e lista compromissos).",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "action": {
+                            "type": "STRING",
+                            "enum": ["create", "list", "delete"],
+                            "description": "Ação de calendário a realizar",
+                        },
+                        "title": {
+                            "type": "STRING",
+                            "description": "Título do compromisso (necessário para 'create')",
+                        },
+                        "datetime_str": {
+                            "type": "STRING",
+                            "description": "Data e hora em linguagem natural (ex: 'hoje às 15:30', 'amanhã às 10h') ou ISO",
+                        },
+                        "duration_minutes": {
+                            "type": "INTEGER",
+                            "description": "Duração em minutos (padrão 60)",
+                        },
+                        "description": {
+                            "type": "STRING",
+                            "description": "Anotações ou link da reunião",
+                        },
+                        "location": {
+                            "type": "STRING",
+                            "description": "Local ou link da reunião",
+                        },
+                        "event_id": {
+                            "type": "STRING",
+                            "description": "Identificador do evento (necessário para 'delete')",
+                        },
+                    },
+                    "required": ["action"],
+                },
+            },
+            {
+                "name": "browser_search",
+                "description": "Abre o navegador padrão com uma pesquisa direcionada no Google, YouTube, GitHub, Maps ou Wikipedia.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "query": {
+                            "type": "STRING",
+                            "description": "Termo de pesquisa",
+                        },
+                        "engine": {
+                            "type": "STRING",
+                            "enum": ["google", "youtube", "github", "maps", "wikipedia", "duckduckgo"],
+                            "description": "Motor de busca a utilizar (padrão 'google')",
+                        },
+                    },
+                    "required": ["query"],
+                },
+            },
+            {
+                "name": "search_documents",
+                "description": "Pesquisa na base local de documentos do usuário (PDFs, anotações, contratos e planilhas em ~/Documentos e ~/Downloads) usando busca semântica em texto completo.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "query": {
+                            "type": "STRING",
+                            "description": "Termo de pesquisa, assunto ou pergunta sobre os documentos pessoais",
+                        },
+                        "limit": {
+                            "type": "INTEGER",
+                            "description": "Número máximo de trechos relevantes a retornar (padrão 4)",
+                        },
+                    },
+                    "required": ["query"],
+                },
+            },
+            {
+                "name": "read_document_page",
+                "description": "Lê o conteúdo completo de uma página específica de um documento localizado pela busca.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "file_path": {
+                            "type": "STRING",
+                            "description": "Caminho absoluto do arquivo no computador",
+                        },
+                        "page_number": {
+                            "type": "INTEGER",
+                            "description": "Número da página a ser lida (padrão 1)",
+                        },
+                    },
+                    "required": ["file_path"],
+                },
+            },
+            {
+                "name": "open_document_file",
+                "description": "Abre um documento local no visualizador do desktop (abrindo o Evince na página exata se for PDF).",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "file_path": {
+                            "type": "STRING",
+                            "description": "Caminho do arquivo a ser aberto",
+                        },
+                        "page_number": {
+                            "type": "INTEGER",
+                            "description": "Página específica para abrir (padrão 1)",
+                        },
+                    },
+                    "required": ["file_path"],
+                },
+            },
         ]
     }
 ]
@@ -198,9 +466,22 @@ class GeminiLiveClient:
         self,
         config: CopilotConfig | None = None,
         executor: ActionExecutor | None = None,
+        memory: MemoryManager | None = None,
     ):
         self.config = config or CopilotConfig.load()
         self.executor = executor or ActionExecutor()
+        if memory is not None:
+            self.memory = memory
+        elif hasattr(self.executor, "memory") and isinstance(self.executor.memory, MemoryManager):
+            self.memory = self.executor.memory
+        else:
+            self.memory = MemoryManager()
+
+        self.fence = ScreenFenceManager()
+        self.input_driver = VirtualInputDriver(fence=self.fence)
+        self.email_mgr = EmailManager(memory=self.memory)
+        self.cal_mgr = CalendarManager(memory=self.memory)
+        self.rag = LocalDocumentRAG(memory=self.memory)
         self.state: LiveVoiceState = LiveVoiceState.DISCONNECTED
 
         # Callbacks para interface gráfica (GTK4)
@@ -252,6 +533,12 @@ class GeminiLiveClient:
     def start(self) -> None:
         """Inicia a sessão de voz em uma thread de background dedicada."""
         if self._is_running:
+            return
+
+        if websockets is None:
+            self._set_state(LiveVoiceState.ERROR, "Módulo 'websockets' não instalado. Instale com: sudo apt install python3-websockets")
+            if self.on_error:
+                self.on_error("Módulo 'websockets' ausente. Instale com: sudo apt install python3-websockets")
             return
 
         if not self.config.gemini_api_key:
@@ -383,7 +670,26 @@ class GeminiLiveClient:
             async with websockets.connect(uri, max_size=10_000_000, ping_interval=15, ping_timeout=20) as ws:
                 self._ws = ws
 
-                # 1. Envia Handshake de Setup
+                # 1. Prepara contexto dinâmico de memória e cercas espaciais
+                context_summary = self.memory.get_context_summary()
+                active_mon = self.fence.get_active_monitor()
+                active_mon_name = active_mon.name if active_mon else "Principal (AOC 27\")"
+                monitors_desc = ", ".join([f"Monitor {m.index}: {m.name}" for m in self.fence.monitors])
+
+                system_prompt_text = (
+                    "Você é o Zorin Copilot, assistente nativo de voz e visão multimodal do sistema operacional Zorin OS 18 (Linux / GNOME / Wayland). "
+                    "Você conversa por áudio em tempo real com o usuário em português brasileiro de forma concisa, simpática e prestativa. "
+                    "Você tem controle e visão do desktop em tempo real quando o usuário compartilha a tela (Live Video a 1 FPS). "
+                    f"Telas conectadas no desktop do usuário: [{monitors_desc}]. A tela ativa autorizada para ações no momento é '{active_mon_name}'. "
+                    "Para alternar a tela autorizada de trabalho, use a ferramenta 'screen_fence_control'. "
+                    "Para clicar ou digitar no desktop, use 'mouse_click', 'keyboard_type' e 'keyboard_hotkey'. Suas coordenadas serão validadas pela cerca espacial. "
+                    "Ao redigir ou iniciar e-mails, use 'email_compose'. NUNCA invente ou adivinhe endereços de e-mail; se não souber, use 'contact_lookup' ou pergunte ao usuário. "
+                    "Para marcar compromissos ou consultar a agenda, use 'calendar_event'. "
+                    "Para pesquisas na web, use 'browser_search' ou 'web_search'. "
+                    f"\n\n{context_summary}\n\n"
+                    "Sempre que o usuário pedir para fazer algo no computador, use imediatamente as ferramentas apropriadas e comente o resultado brevemente por voz."
+                )
+
                 setup_payload = {
                     "setup": {
                         "model": model_name,
@@ -400,14 +706,7 @@ class GeminiLiveClient:
                         "systemInstruction": {
                             "parts": [
                                 {
-                                    "text": (
-                                        "Você é o Zorin Copilot, assistente nativo de voz e visão multimodal do sistema operacional Zorin OS 18 (Linux / GNOME / Wayland). "
-                                        "Você conversa por áudio em tempo real com o usuário em português brasileiro. "
-                                        "Seja conciso, natural, simpático e direto ao ponto. "
-                                        "Você possui ferramentas para controlar mídia e música (Spotify), criar arquivos e relatórios, organizar pastas, abrir programas, ajustar volume, ver a tela e pesquisar na web. "
-                                        "Quando o usuário compartilhar a tela ao vivo (Live Video) ou enviar snapshots, você tem visão multimodal direta do que está acontecendo na área de trabalho dele. Você pode ler janelas, erros, códigos, páginas e interagir em tempo real sobre o que está visível. "
-                                        "Sempre que o usuário pedir para fazer algo no computador, use imediatamente as ferramentas disponíveis e comente o resultado brevemente."
-                                    )
+                                    "text": system_prompt_text,
                                 }
                             ]
                         },
@@ -704,6 +1003,141 @@ class GeminiLiveClient:
                 dry_run = bool(args.get("dry_run", False))
                 ok, msg, stats = FileManager.organize_directory(directory=directory, dry_run=dry_run)
                 return {"success": ok, "message": msg, "stats": stats}
+
+            elif name == "screen_fence_control":
+                target = args.get("monitor", "primary")
+                ok = self.fence.set_active_monitor(target)
+                m = self.fence.get_active_monitor()
+                name_str = m.name if m else target
+                return {
+                    "success": ok,
+                    "message": f"Cerca de tela definida para '{name_str}'." if ok else f"Monitor '{target}' não localizado.",
+                }
+
+            elif name == "mouse_click":
+                x = float(args.get("x", 0.0))
+                y = float(args.get("y", 0.0))
+                is_rel = bool(args.get("is_relative", False))
+                btn = args.get("button", "left")
+                double = bool(args.get("double", False))
+
+                # Se for relativo ou se os valores estiverem entre 0.0 e 1.0
+                if is_rel or (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):
+                    ok, msg = self.input_driver.click_relative(x, y, button=btn, double=double)
+                else:
+                    ok, msg = self.input_driver.click(int(x), int(y), button=btn, double=double)
+                return {"success": ok, "message": msg}
+
+            elif name == "keyboard_type":
+                text = args.get("text", "")
+                enter = bool(args.get("press_enter", False))
+                ok, msg = self.input_driver.type_text(text, press_enter=enter)
+                return {"success": ok, "message": msg}
+
+            elif name == "keyboard_hotkey":
+                keys = args.get("keys", [])
+                ok, msg = self.input_driver.hotkey(*keys)
+                return {"success": ok, "message": msg}
+
+            elif name == "contact_lookup":
+                q = args.get("query", "").strip()
+                contacts = self.memory.find_contact(q)
+                formatted = [
+                    {"name": c["name"], "email": c["email"], "aliases": c.get("aliases", []), "notes": c.get("notes", "")}
+                    for c in contacts
+                ]
+                if formatted:
+                    return {"success": True, "contacts": formatted, "message": f"{len(formatted)} contato(s) localizado(s)."}
+                return {
+                    "success": False,
+                    "contacts": [],
+                    "message": f"Nenhum contato encontrado para '{q}'. Pergunte ao usuário o e-mail ou se deseja salvá-lo.",
+                }
+
+            elif name == "contact_save":
+                c_name = args.get("name", "").strip()
+                c_email = args.get("email", "").strip()
+                c_aliases = args.get("aliases", [])
+                c_notes = args.get("notes", "").strip()
+                saved = self.memory.save_contact(name=c_name, email=c_email, aliases=c_aliases, notes=c_notes)
+                return {"success": True, "contact": saved, "message": f"Contato '{c_name}' <{c_email}> salvo com sucesso."}
+
+            elif name == "email_compose":
+                recip = args.get("recipient", "").strip()
+                subj = args.get("subject", "").strip()
+                body = args.get("body", "").strip()
+                client = args.get("client", "auto")
+                ok, msg, data = self.email_mgr.compose(recip, subject=subj, body=body, client=client)
+                return {"success": ok, "message": msg, "details": data}
+
+            elif name == "calendar_event":
+                act = args.get("action", "create")
+                if act == "create":
+                    t = args.get("title", "")
+                    dt_str = args.get("datetime_str", "amanhã às 10h")
+                    dur = int(args.get("duration_minutes", 60))
+                    desc = args.get("description", "")
+                    loc = args.get("location", "")
+                    ok, msg, data = self.cal_mgr.create_event(t, dt_str, duration_minutes=dur, description=desc, location=loc)
+                    return {"success": ok, "message": msg, "event": data}
+                elif act == "list":
+                    day = args.get("datetime_str", "today")
+                    events = self.cal_mgr.list_events(day)
+                    return {"success": True, "events": events, "count": len(events)}
+                elif act == "delete":
+                    eid = args.get("event_id", "")
+                    ok = self.cal_mgr.delete_event(eid)
+                    return {"success": ok, "message": f"Compromisso {eid} removido." if ok else "Evento não encontrado."}
+
+            elif name == "browser_search":
+                q = args.get("query", "").strip()
+                eng = args.get("engine", "google")
+                ok, msg, url = BrowserManager.search(q, engine=eng)
+                return {"success": ok, "message": msg, "url": url}
+
+            elif name == "search_documents":
+                q = args.get("query", "").strip()
+                lim = int(args.get("limit", 4))
+                results = self.rag.search(q, limit=lim)
+                formatted = [r.to_dict() for r in results]
+                if formatted:
+                    citations = "\n".join([r.format_citation() for r in results])
+                    return {
+                        "success": True,
+                        "count": len(formatted),
+                        "results": formatted,
+                        "citations": citations,
+                        "message": f"{len(formatted)} trecho(s) relevante(s) encontrado(s) nos seus documentos.",
+                    }
+                return {
+                    "success": False,
+                    "count": 0,
+                    "results": [],
+                    "message": f"Nenhum documento encontrado para a busca '{q}'.",
+                }
+
+            elif name == "read_document_page":
+                fpath = args.get("file_path", "").strip()
+                pnum = int(args.get("page_number", 1))
+                page_text = self.rag.read_document_page(fpath, page_number=pnum)
+                if page_text:
+                    return {
+                        "success": True,
+                        "page_number": pnum,
+                        "file_path": fpath,
+                        "content": page_text,
+                        "message": f"Página {pnum} lida com sucesso ({len(page_text)} caracteres).",
+                    }
+                return {
+                    "success": False,
+                    "message": f"Não foi possível ler a página {pnum} do arquivo '{fpath}'.",
+                }
+
+            elif name == "open_document_file":
+                fpath = args.get("file_path", "").strip()
+                pnum = int(args.get("page_number", 1))
+                ok, msg = self.rag.open_document(fpath, page_number=pnum)
+                return {"success": ok, "message": msg}
 
             return {"success": False, "message": f"Ferramenta desconhecida: {name}"}
 

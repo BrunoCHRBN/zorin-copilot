@@ -12,7 +12,7 @@ import sqlite3
 import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 
 class MemoryManager:
@@ -89,6 +89,26 @@ class MemoryManager:
             """)
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_chat_topics_updated ON chat_topics (updated_at DESC)
+            """)
+
+            # 5. Tabela de contatos do usuário (Memória Semântica e Anti-Alucinação)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS user_contacts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    email TEXT NOT NULL UNIQUE,
+                    aliases_json TEXT NOT NULL DEFAULT '[]',
+                    phone TEXT NOT NULL DEFAULT '',
+                    notes TEXT NOT NULL DEFAULT '',
+                    last_contacted_at TEXT,
+                    created_at TEXT NOT NULL
+                )
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_user_contacts_name ON user_contacts (name COLLATE NOCASE)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_user_contacts_email ON user_contacts (email COLLATE NOCASE)
             """)
             conn.commit()
 
@@ -206,6 +226,126 @@ class MemoryManager:
             cursor.execute("DELETE FROM knowledge_facts WHERE key = ?", (key.strip().lower(),))
             conn.commit()
             return cursor.rowcount > 0
+
+    # =========================================================================
+    # Gestão de Contatos do Usuário (Memória Semântica & Anti-Alucinação)
+    # =========================================================================
+
+    def save_contact(
+        self,
+        name: str,
+        email: str,
+        aliases: Sequence[str] | None = None,
+        phone: str = "",
+        notes: str = "",
+    ) -> dict[str, Any]:
+        """Salva ou atualiza um contato na base local."""
+        email_clean = email.strip().lower()
+        if not email_clean or "@" not in email_clean:
+            raise ValueError(f"Endereço de e-mail inválido: '{email}'")
+
+        name_clean = name.strip()
+        now = datetime.now().isoformat()
+        aliases_list = [a.strip().lower() for a in aliases if a.strip()] if aliases else []
+        aliases_json = json.dumps(aliases_list, ensure_ascii=False)
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO user_contacts (name, email, aliases_json, phone, notes, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(email) DO UPDATE SET
+                    name=excluded.name,
+                    aliases_json=excluded.aliases_json,
+                    phone=excluded.phone,
+                    notes=excluded.notes
+                """,
+                (name_clean, email_clean, aliases_json, phone.strip(), notes.strip(), now),
+            )
+            conn.commit()
+
+        return {
+            "name": name_clean,
+            "email": email_clean,
+            "aliases": aliases_list,
+            "phone": phone.strip(),
+            "notes": notes.strip(),
+        }
+
+    def find_contact(self, query: str) -> list[dict[str, Any]]:
+        """Busca contatos por nome, e-mail ou apelidos (case-insensitive)."""
+        q = query.strip().lower()
+        if not q:
+            return []
+
+        all_contacts = self.list_contacts(limit=200)
+        matches: list[dict[str, Any]] = []
+
+        for c in all_contacts:
+            name_lower = c["name"].lower()
+            email_lower = c["email"].lower()
+            aliases_lower = [a.lower() for a in c.get("aliases", [])]
+
+            # Correspondência exata ou parcial
+            if q == name_lower or q == email_lower or q in aliases_lower:
+                matches.insert(0, c)
+            elif q in name_lower or q in email_lower or any(q in a for a in aliases_lower):
+                matches.append(c)
+
+        return matches
+
+    def get_contact_by_email(self, email: str) -> dict[str, Any] | None:
+        """Busca exata de contato por e-mail."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM user_contacts WHERE email = ?", (email.strip().lower(),))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            data = dict(row)
+            data["aliases"] = json.loads(data.get("aliases_json") or "[]")
+            return data
+
+    def list_contacts(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Lista todos os contatos cadastrados ordenados por nome."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM user_contacts ORDER BY name COLLATE NOCASE ASC LIMIT ?", (limit,))
+            rows = cursor.fetchall()
+            results: list[dict[str, Any]] = []
+            for r in rows:
+                item = dict(r)
+                item["aliases"] = json.loads(item.get("aliases_json") or "[]")
+                results.append(item)
+            return results
+
+    def delete_contact(self, contact_id: int) -> bool:
+        """Remove um contato pelo ID."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM user_contacts WHERE id = ?", (contact_id,))
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def delete_contact_by_email(self, email: str) -> bool:
+        """Remove um contato pelo e-mail."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM user_contacts WHERE email = ?", (email.strip().lower(),))
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def update_contact_last_used(self, email: str) -> None:
+        """Registra a data e hora do último contato para priorização."""
+        now = datetime.now().isoformat()
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE user_contacts SET last_contacted_at = ? WHERE email = ?",
+                (now, email.strip().lower()),
+            )
+            conn.commit()
 
     # =========================================================================
     # Perfil do Sistema (Hardware e Ambiente)
@@ -341,6 +481,16 @@ class MemoryManager:
             lines.append("- Ações executadas com sucesso recentemente no desktop:")
             for a in recent_actions:
                 lines.append(f"  • {a['action_type']}: '{a['target']}' (a pedido de '{a['prompt']}')")
+
+        # 5. Contatos salvos do usuário (Memória Semântica & Anti-Alucinação)
+        contacts = self.list_contacts(limit=8)
+        if contacts:
+            lines.append("- Contatos salvos do usuário (utilize EXATAMENTE estes e-mails; NUNCA invente ou adivinhe outros):")
+            for c in contacts:
+                aliases_str = f" (apelidos: {', '.join(c['aliases'])})" if c.get("aliases") else ""
+                lines.append(f"  • {c['name']} <{c['email']}>{aliases_str}")
+        else:
+            lines.append("- Contatos salvos: Nenhum contato cadastrado ainda. Se o usuário solicitar envio para alguém, consulte ou pergunte o e-mail.")
 
         return "\n".join(lines)
 

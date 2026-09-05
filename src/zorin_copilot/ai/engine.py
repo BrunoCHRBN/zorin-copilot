@@ -19,6 +19,7 @@ from ..core.config import CopilotConfig
 from ..core.files import FileManager
 from ..core.media import MediaPlayerManager
 from ..core.memory import MemoryManager
+from ..core.rag import LocalDocumentRAG
 from ..core.web_search import WebSearchClient
 
 logger = logging.getLogger(__name__)
@@ -33,11 +34,13 @@ class IntentEngine:
         config: CopilotConfig | None = None,
         memory: MemoryManager | None = None,
         search_client: WebSearchClient | None = None,
+        rag: LocalDocumentRAG | None = None,
     ):
         self.inspector = inspector or DesktopInspector()
         self.config = config or CopilotConfig.load()
         self.memory = memory or MemoryManager()
         self.search_client = search_client or WebSearchClient()
+        self.rag = rag or LocalDocumentRAG(memory=self.memory)
         self.llm_provider: BaseLLMProvider = get_llm_provider(self.config)
 
     def reload_config(self, config: CopilotConfig | None = None) -> None:
@@ -665,6 +668,50 @@ class IntentEngine:
                 ],
             )
 
+        # Busca semântica e localização em documentos pessoais (RAG Local)
+        if any(w in low for w in [
+            "buscar documento", "buscar documentos", "busque nos meus documentos", "busque no meu documento",
+            "buscar nos meus documentos", "buscar em documentos", "pesquisar documento", "pesquisar documentos",
+            "pesquise nos meus documentos", "procurar documento", "procure nos meus documentos",
+            "procurar nos meus documentos", "onde está o documento", "onde esta o documento",
+            "encontre o documento", "encontre nos documentos", "procurar arquivo", "procure o arquivo",
+            "busque o arquivo", "buscar arquivo", "pesquise o arquivo", "pesquisar arquivo"
+        ]):
+            # Extrai termo de busca removendo o prefixo
+            search_term = re.sub(
+                r"^(buscar|busque|pesquisar|pesquise|procurar|procure|encontrar|encontre|onde está|onde esta)\s+(nos\s+meus\s+documentos|no\s+meu\s+documento|em\s+documentos|documentos|o\s+documento|documento|o\s+arquivo|arquivo)?\s*(sobre|de|com)?\s*",
+                "",
+                prompt_clean,
+                flags=re.I,
+            ).strip()
+            if not search_term:
+                search_term = prompt_clean
+
+            if getattr(self, "rag", None):
+                results = self.rag.search(search_term, limit=4)
+                if results:
+                    thought_lines = [f"Encontrei {len(results)} trecho(s) relevante(s) nos seus documentos para '{search_term}':\n"]
+                    actions = []
+                    for r in results:
+                        thought_lines.append(r.format_citation())
+                        actions.append(
+                            DesktopAction(
+                                ActionType.OPEN_DOCUMENT,
+                                r.file_path,
+                                {"page_number": r.page_number},
+                                description=f"Abrir {r.file_name} (Pág. {r.page_number})",
+                            )
+                        )
+                    return ActionPlan(
+                        thought="\n\n".join(thought_lines),
+                        actions=actions,
+                    )
+                else:
+                    return ActionPlan(
+                        thought=f"Nenhum documento contendo '{search_term}' foi encontrado em ~/Documentos ou ~/Downloads.",
+                        actions=[],
+                    )
+
         # Interação com Elementos da Janela Ativa (AT-SPI2)
         if low.startswith(("clicar em ", "clique em ", "aperte ", "pressione ")):
             target = re.sub(r"^(clicar em|clique em|aperte|pressione)\s+", "", prompt_clean, flags=re.I).strip("'\"")
@@ -706,6 +753,19 @@ class IntentEngine:
                 app_names = [a.get_name() for a in AppManager.get_all_apps() if a.get_name()]
                 context_parts = [self.memory.get_context_summary()]
 
+                doc_matches = []
+                if getattr(self, "rag", None):
+                    try:
+                        doc_matches = self.rag.search(prompt_clean, limit=3)
+                        if doc_matches:
+                            rag_text = "[Documentos Locais Relevantes]:\n" + "\n\n".join(
+                                f"📄 {d.file_name} (Pág. {d.page_number}):\n\"{d.snippet}\""
+                                for d in doc_matches
+                            )
+                            context_parts.append(rag_text)
+                    except Exception as exc:
+                        logger.debug(f"Erro ao consultar RAG no chat: {exc}")
+
                 search_results = []
                 if self.config.web_search_enabled and self.search_client.is_search_needed(prompt_clean):
                     clean_q = self.search_client.clean_search_query(prompt_clean)
@@ -721,6 +781,18 @@ class IntentEngine:
                     context_summary=context_summary,
                     history=history,
                 )
+
+                # Se foram encontrados documentos locais relevantes e a IA não gerou ação de abrir documento
+                if doc_matches and not any(a.action_type == ActionType.OPEN_DOCUMENT for a in actions):
+                    top_doc = doc_matches[0]
+                    actions.append(
+                        DesktopAction(
+                            ActionType.OPEN_DOCUMENT,
+                            top_doc.file_path,
+                            {"page_number": top_doc.page_number},
+                            description=f"Abrir {top_doc.file_name} (Pág. {top_doc.page_number})",
+                        )
+                    )
 
                 # Se houve busca na web e a IA não gerou ação de link, oferece a fonte primária
                 if search_results and not any(a.action_type == ActionType.OPEN_URL for a in actions):
