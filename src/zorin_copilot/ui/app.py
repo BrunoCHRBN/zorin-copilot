@@ -114,6 +114,10 @@ def get_action_icon(action: DesktopAction) -> str:
         return "input-mouse-symbolic"
     if action.action_type == ActionType.NOTIFY:
         return "dialog-information-symbolic"
+    if action.action_type == ActionType.FIX_COMMAND:
+        return "utilities-terminal-symbolic"
+    if action.action_type == ActionType.SMART_OCR:
+        return "edit-copy-symbolic"
     return "system-run-symbolic"
 
 
@@ -757,6 +761,28 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.vision_thumbnail.add_css_class("card")
         self.vision_preview_box.append(self.vision_thumbnail)
 
+        # Botão Smart OCR para cópia direta do conteúdo identificado na imagem
+        self.ocr_btn = Gtk.Button()
+        self.ocr_btn.set_tooltip_text("Copiar texto ou código extraído da imagem")
+        self.ocr_btn.add_css_class("flat")
+        self.ocr_btn.add_css_class("pill")
+        self.ocr_btn.add_css_class("glass-pill")
+        self.ocr_btn.set_halign(Gtk.Align.START)
+        self.ocr_btn.set_margin_top(4)
+        self.ocr_btn.set_visible(False)
+        self.ocr_btn.connect("clicked", self._on_copy_ocr_text)
+
+        ocr_btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        ocr_icon = Gtk.Image.new_from_icon_name("edit-copy-symbolic")
+        ocr_icon.set_pixel_size(14)
+        ocr_btn_box.append(ocr_icon)
+        self.ocr_btn_label = Gtk.Label(label="Copiar Conteúdo Extraído")
+        self.ocr_btn_label.add_css_class("caption")
+        ocr_btn_box.append(self.ocr_btn_label)
+        self.ocr_btn.set_child(ocr_btn_box)
+
+        self.vision_preview_box.append(self.ocr_btn)
+
         self.answer_card.append(self.vision_preview_box)
 
         # Texto formatado da resposta (Markdown / Pango Markup)
@@ -1090,6 +1116,17 @@ class CopilotWindow(Adw.ApplicationWindow):
         else:
             self.vision_preview_box.set_visible(False)
 
+        # Smart OCR: Se houver texto ou código identificado na imagem
+        ocr_text = plan.extracted_text or next((a.target for a in plan.actions if a.action_type == ActionType.SMART_OCR), None)
+        if ocr_text and self.vision_preview_box.get_visible():
+            self._current_ocr_text = ocr_text
+            is_code = plan.extracted_kind in ("code", "código") or any(k in ocr_text for k in ["def ", "import ", "class ", "sudo ", "function", "const ", "let "])
+            self.ocr_btn_label.set_text("📋 Copiar Código Extraído" if is_code else "📋 Copiar Texto da Imagem")
+            self.ocr_btn.set_visible(True)
+        else:
+            self._current_ocr_text = None
+            self.ocr_btn.set_visible(False)
+
         # 1. Renderiza a Resposta / Pensamento com Pango Markup
         explanation_text = plan.thought.strip()
         self._raw_answer_text = explanation_text
@@ -1138,12 +1175,34 @@ class CopilotWindow(Adw.ApplicationWindow):
                     ActionType.CLICK: "interação acessível",
                     ActionType.NOTIFY: "notificação",
                     ActionType.CAPTURE_SCREEN: "visão da tela",
+                    ActionType.FIX_COMMAND: "auto-cura do sistema",
+                    ActionType.SMART_OCR: "smart ocr",
                 }.get(action.action_type, action.action_type.value)
 
-                row = Adw.ActionRow(
-                    title=action.describe(),
-                    subtitle=f"Tipo: {badge_desc}",
-                )
+                # Customização visual especializada para FIX_COMMAND e SMART_OCR
+                if action.action_type == ActionType.FIX_COMMAND:
+                    cmd_show = action.params.get("command") or action.target
+                    row = Adw.ActionRow(
+                        title=f"<b>⚡ Auto-Cura: {html.escape(action.target)}</b>",
+                        subtitle=f"Comando: <tt><b>{html.escape(cmd_show)}</b></tt>",
+                    )
+                    row.set_use_markup(True)
+                    exec_label = "Executar Correção"
+                elif action.action_type == ActionType.SMART_OCR:
+                    preview_txt = (action.target[:42] + "...") if len(action.target) > 42 else action.target
+                    row = Adw.ActionRow(
+                        title=f"<b>📋 Smart OCR: {html.escape(action.describe())}</b>",
+                        subtitle=f"Texto: {html.escape(preview_txt)}",
+                    )
+                    row.set_use_markup(True)
+                    exec_label = "Copiar Conteúdo"
+                else:
+                    row = Adw.ActionRow(
+                        title=action.describe(),
+                        subtitle=f"Tipo: {badge_desc}",
+                    )
+                    exec_label = "Recortar Agora" if (action.action_type == ActionType.CAPTURE_SCREEN and action.target == "area") else "Executar"
+
                 row.add_css_class("card")
                 row.add_css_class("glass-row")
 
@@ -1155,7 +1214,7 @@ class CopilotWindow(Adw.ApplicationWindow):
                 row.add_prefix(prefix_icon)
 
                 # Botão direto de execução na linha da ação
-                exec_btn = Gtk.Button(label="Recortar Agora" if (action.action_type == ActionType.CAPTURE_SCREEN and action.target == "area") else "Executar")
+                exec_btn = Gtk.Button(label=exec_label)
                 exec_btn.add_css_class("suggested-action")
                 exec_btn.add_css_class("pill")
                 exec_btn.set_valign(Gtk.Align.CENTER)
@@ -1255,6 +1314,22 @@ class CopilotWindow(Adw.ApplicationWindow):
                 return GLib.SOURCE_REMOVE
 
             GLib.timeout_add(2000, reset_copy)
+
+    def _on_copy_ocr_text(self, _btn: Gtk.Button) -> None:
+        ocr_text = getattr(self, "_current_ocr_text", None)
+        if not ocr_text:
+            return
+        ok = ClipboardService.set_text(ocr_text)
+        if ok:
+            old_label = self.ocr_btn_label.get_text()
+            self.ocr_btn_label.set_text("✓ Conteúdo Copiado!")
+            self.show_toast("Texto da imagem copiado para a área de transferência!")
+
+            def reset_ocr():
+                self.ocr_btn_label.set_text(old_label)
+                return GLib.SOURCE_REMOVE
+
+            GLib.timeout_add(2200, reset_ocr)
 
     def _build_history_popover(self) -> None:
         """Constrói o popover de histórico de tópicos associado ao botão do HeaderBar."""

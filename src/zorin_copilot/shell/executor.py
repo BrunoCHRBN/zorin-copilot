@@ -13,6 +13,7 @@ from typing import Sequence
 from ..ai.actions import ActionPlan, ActionType, DesktopAction
 from ..core.a11y import DesktopInspector, UIElement
 from ..core.apps import AppManager
+from ..core.clipboard import ClipboardService
 from .system import SystemController
 
 
@@ -74,11 +75,90 @@ class ActionExecutor:
         if action.action_type == ActionType.ANSWER:
             return ExecutionReport(action=action, success=True, message=action.target)
 
+        if action.action_type == ActionType.SMART_OCR:
+            return self._copy_ocr_text(action)
+
+        if action.action_type == ActionType.FIX_COMMAND:
+            return self._execute_fix_command(action)
+
         return ExecutionReport(
             action=action,
             success=False,
             message=f"Tipo de ação não implementado: {action.action_type}",
         )
+
+    def _copy_ocr_text(self, action: DesktopAction) -> ExecutionReport:
+        text = action.target
+        if not text:
+            return ExecutionReport(action=action, success=False, message="Nenhum texto disponível para cópia.")
+        ok = ClipboardService.set_text(text)
+        kind = action.params.get("kind", "conteúdo")
+        if ok:
+            return ExecutionReport(
+                action=action,
+                success=True,
+                message=f"✓ {kind.capitalize()} extraído da tela copiado para a área de transferência!",
+            )
+        return ExecutionReport(
+            action=action,
+            success=False,
+            message="Falha ao copiar conteúdo para a área de transferência.",
+        )
+
+    def _execute_fix_command(self, action: DesktopAction) -> ExecutionReport:
+        cmd = action.params.get("command") or action.target
+        if not cmd:
+            return ExecutionReport(action=action, success=False, message="Nenhum comando especificado para auto-cura.")
+
+        requires_sudo = bool(action.params.get("requires_sudo", False) or "sudo " in cmd)
+        terminal = bool(action.params.get("terminal", True))
+
+        if terminal or requires_sudo:
+            term_bin = shutil.which("gnome-terminal") or shutil.which("ptyxis") or shutil.which("xterm")
+            if term_bin:
+                try:
+                    wrapper = (
+                        f"echo '========================================'; "
+                        f"echo '   Zorin Copilot • Auto-Cura do Sistema'; "
+                        f"echo '========================================'; "
+                        f"echo 'Comando a executar:'; "
+                        f"echo '  {cmd}'; "
+                        f"echo '----------------------------------------'; "
+                        f"{cmd}; "
+                        f"RET=$?; "
+                        f"echo; "
+                        f"echo '----------------------------------------'; "
+                        f"if [ $RET -eq 0 ]; then "
+                        f"  echo '✓ Execução finalizada com sucesso (código 0).'; "
+                        f"else "
+                        f"  echo '⚠️ Comando retornou código de saída '$RET'.'; "
+                        f"fi; "
+                        f"read -p 'Pressione [Enter] para fechar esta janela...' -r"
+                    )
+                    if "gnome-terminal" in term_bin or "ptyxis" in term_bin:
+                        subprocess.Popen([term_bin, "--", "bash", "-c", wrapper])
+                    else:
+                        subprocess.Popen([term_bin, "-e", f"bash -c \"{wrapper}\""])
+                    return ExecutionReport(
+                        action=action,
+                        success=True,
+                        message=f"Terminal aberto executando: {cmd}",
+                    )
+                except Exception as exc:
+                    return ExecutionReport(action=action, success=False, message=f"Erro ao abrir terminal: {exc}")
+            else:
+                return ExecutionReport(action=action, success=False, message="Nenhum terminal encontrado para execução interativa.")
+        else:
+            try:
+                res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=25)
+                if res.returncode == 0:
+                    out = res.stdout.strip()[:100] or "Comando executado com sucesso."
+                    return ExecutionReport(action=action, success=True, message=out)
+                else:
+                    err = res.stderr.strip()[:120] or f"Falha (código {res.returncode})"
+                    return ExecutionReport(action=action, success=False, message=err)
+            except Exception as exc:
+                return ExecutionReport(action=action, success=False, message=f"Falha na execução: {exc}")
 
     def _launch_app(self, app_name: str) -> ExecutionReport:
         act = DesktopAction(ActionType.LAUNCH_APP, app_name)

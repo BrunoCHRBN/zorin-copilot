@@ -20,6 +20,8 @@ class ActionType(str, Enum):
     COMMAND = "command"
     ANSWER = "answer"
     CAPTURE_SCREEN = "capture_screen"
+    FIX_COMMAND = "fix_command"
+    SMART_OCR = "smart_ocr"
 
 
 @dataclass
@@ -52,6 +54,12 @@ class DesktopAction:
             return f"Capturar e analisar {'área da tela' if self.target == 'area' else 'tela inteira'}"
         if self.action_type == ActionType.ANSWER:
             return f"Resposta: {self.target}"
+        if self.action_type == ActionType.FIX_COMMAND:
+            cmd = self.params.get("command") or self.target
+            return f"Auto-Cura: {cmd}"
+        if self.action_type == ActionType.SMART_OCR:
+            kind = self.params.get("kind", "conteúdo")
+            return f"Copiar {kind} extraído da tela"
         return f"Ação {self.action_type.value} em {self.target}"
 
 
@@ -60,6 +68,8 @@ class ActionPlan:
     thought: str
     actions: list[DesktopAction] = field(default_factory=list)
     raw_response: str = ""
+    extracted_text: str | None = None
+    extracted_kind: str = "text"
 
     @property
     def is_empty(self) -> bool:

@@ -34,28 +34,37 @@ DIRETRIZES FUNDAMENTAIS:
 - Exemplo crucial: Se o usuário definiu que seu navegador preferido é o Google Chrome, NUNCA proponha abrir em outro navegador como o Brave ou Firefox. Proponha abrir no navegador explicitado pelo usuário.
 - Se houver caminhos de projetos ou preferências de PWA (ex: WhatsApp, Gmail), utilize-os fielmente.
 
-3. Modo de Visão Computacional (Multimodalidade):
+3. Modo de Visão Computacional (Multimodalidade) e Auto-Cura (Self-Healing):
 - Quando uma imagem de recorte ou tela for fornecida, analise com profundidade:
   a) Descreva o conteúdo central e transcreva com exatidão qualquer texto, código, log ou erro visível.
-  b) Se for um erro ou aviso técnico, explique a causa raiz de forma simples e forneça os passos de correção.
-  c) Proponha ações práticas em "actions" para o usuário (ex: abrir o site identificado respeitando o navegador preferido, ou executar uma ação de sistema).
+  b) Smart OCR: Se houver código de programação, logs ou texto relevante na imagem, preencha o campo "extracted_text" com o texto/código exato fielmente extraído (sem truncamento) e defina "extracted_kind" como "code" ou "text".
+  c) Auto-Cura (Self-Healing): Se a tela exibir um erro técnico, pacote quebrado, comando com falha, dependência ausente ou serviço inativo no Linux/Zorin OS:
+     - Explique a causa raiz de forma simples e didática.
+     - Crie OBRIGATORIAMENTE uma ação "fix_command" contendo o comando exato de solução no parâmetro "command" e "requires_sudo": true/false.
+  d) Proponha ações práticas em "actions" para o usuário (ex: abrir o site identificado respeitando o navegador preferido, ou executar uma ação de sistema).
 
 4. Regras para o array "actions":
-- Se o usuário pediu para acessar um site/serviço online (ex: "acessar gmail", "abrir youtube", "ver previsão do tempo", ou identificado em imagem), crie uma ação "open_url" com target sendo o endereço completo (ex: "https://mail.google.com").
-- Se o usuário pediu para abrir um aplicativo instalado (ex: "abrir navegador", "abrir steam", "abrir terminal", "abrir calendário"), crie uma ação "launch_app" com o nome do aplicativo.
-- Se o usuário pediu ajustes de sistema (tema escuro/claro, volume, luz noturna, captura de tela), crie "system_control" com target correspondente.
-- Se a pergunta for conceitual, informativa ou de suporte ("o que é wayland?", "que dia será amanhã?"), deixe "actions": [].
-- Se o usuário perguntar como acessar ou configurar algo e for conveniente oferecer um atalho, explique no campo "explanation" E proponha a ação em "actions" para que ele possa executar com 1 clique!
+- "fix_command": para comandos de terminal que resolvem um erro identificado ou instalam dependências necessárias. Defina "target": "descrição curta do conserto", "description": "Executar correção no terminal", "params": {"command": "comando bash completo", "requires_sudo": true/false, "terminal": true}.
+- "smart_ocr": para bloco de código ou texto extraído da imagem pronto para cópia. Defina "target": "texto_ou_codigo_completo", "params": {"kind": "code"|"text"}, "description": "Copiar código/texto extraído".
+- "open_url": para sites ou links.
+- "launch_app": para abrir aplicativos instalados.
+- "system_control": para controles de sistema.
+- "notify": para notificações.
 
 Você DEVE responder EXCLUSIVAMENTE em formato JSON com o seguinte esquema:
 {
   "explanation": "Texto explicativo direto, detalhado e conclusivo para a pergunta do usuário.",
+  "extracted_text": "Texto ou código puro extraído da tela/imagem (ou null se não aplicável)",
+  "extracted_kind": "code" | "text",
   "actions": [
     {
-      "type": "open_url" | "launch_app" | "system_control" | "notify",
-      "target": "alvo da ação",
+      "type": "fix_command" | "open_url" | "launch_app" | "system_control" | "notify",
+      "target": "alvo da ação ou descrição do conserto",
       "description": "descrição amigável da ação em português",
-      "params": {}
+      "params": {
+        "command": "comando bash se type for fix_command",
+        "requires_sudo": true | false
+      }
     }
   ]
 }
@@ -99,14 +108,61 @@ class BaseLLMProvider(ABC):
         try:
             data = json.loads(cleaned)
             explanation = data.get("explanation", raw_text)
+            extracted_text = data.get("extracted_text")
+            extracted_kind = data.get("extracted_kind", "text")
             raw_actions = data.get("actions", [])
             actions: list[DesktopAction] = []
 
+            # 1. Se houver texto/código extraído via Smart OCR no JSON raiz
+            if extracted_text and isinstance(extracted_text, str) and extracted_text.strip():
+                clean_ocr = extracted_text.strip()
+                is_code = extracted_kind == "code" or any(k in clean_ocr for k in ["def ", "import ", "class ", "function", "const ", "var ", "SELECT "])
+                actions.append(
+                    DesktopAction(
+                        action_type=ActionType.SMART_OCR,
+                        target=clean_ocr,
+                        params={"kind": "código" if is_code else "texto"},
+                        description=f"Copiar {'código' if is_code else 'texto'} extraído da imagem",
+                    )
+                )
+
+            # 2. Se houver fix_command no nível da raiz
+            if data.get("fix_command") and isinstance(data["fix_command"], str):
+                cmd_root = data["fix_command"].strip()
+                actions.append(
+                    DesktopAction(
+                        action_type=ActionType.FIX_COMMAND,
+                        target=cmd_root,
+                        params={"command": cmd_root, "requires_sudo": "sudo " in cmd_root, "terminal": True},
+                        description=f"Executar correção: {cmd_root[:45]}",
+                        requires_confirmation=True,
+                    )
+                )
+
+            # 3. Processa lista de ações
             for act in raw_actions:
                 act_type_str = str(act.get("type", "")).lower()
                 target = str(act.get("target", "")).strip()
                 desc = str(act.get("description", ""))
                 params = act.get("params", {})
+
+                if act_type_str in ("fix_command", "fix", "repair", "terminal_command"):
+                    cmd = params.get("command") or target
+                    if cmd:
+                        actions.append(
+                            DesktopAction(
+                                action_type=ActionType.FIX_COMMAND,
+                                target=target or f"Executar {cmd[:35]}...",
+                                params={
+                                    "command": cmd,
+                                    "requires_sudo": params.get("requires_sudo", "sudo " in cmd),
+                                    "terminal": params.get("terminal", True),
+                                },
+                                description=desc or f"Executar correção: {cmd[:45]}",
+                                requires_confirmation=True,
+                            )
+                        )
+                    continue
 
                 if not target:
                     continue
@@ -117,6 +173,7 @@ class BaseLLMProvider(ABC):
                     "system_control": ActionType.SYSTEM_CONTROL,
                     "notify": ActionType.NOTIFY,
                     "click": ActionType.CLICK,
+                    "smart_ocr": ActionType.SMART_OCR,
                 }
                 action_type = type_map.get(act_type_str)
                 if action_type:
@@ -131,8 +188,22 @@ class BaseLLMProvider(ABC):
 
             return explanation, actions
         except Exception:
-            # Fallback seguro: trata o texto cru como explicação
-            return raw_text, []
+            # Fallback inteligente se a IA respondeu em texto livre/Markdown
+            fallback_actions: list[DesktopAction] = []
+            bash_matches = re.findall(r"```(?:bash|sh)?\n(sudo\s+[^\n]+|[a-zA-Z0-9_\-\./]+\s+[^\n]+)\n```", raw_text)
+            for m in bash_matches:
+                cmd = m.strip()
+                if any(cmd.startswith(pfx) for pfx in ("sudo apt", "sudo dpkg", "pip install", "npm install", "systemctl", "kill")):
+                    fallback_actions.append(
+                        DesktopAction(
+                            action_type=ActionType.FIX_COMMAND,
+                            target=cmd,
+                            params={"command": cmd, "requires_sudo": "sudo " in cmd, "terminal": True},
+                            description=f"Executar correção: {cmd[:40]}",
+                            requires_confirmation=True,
+                        )
+                    )
+            return raw_text, fallback_actions
 
 
 class GeminiProvider(BaseLLMProvider):

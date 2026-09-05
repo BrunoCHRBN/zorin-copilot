@@ -96,10 +96,15 @@ class IntentEngine:
                                 description="Análise visual do Zorin Copilot",
                             )
                         ]
+                    ocr_act = next((a for a in actions if a.action_type == ActionType.SMART_OCR), None)
+                    ext_text = ocr_act.target if ocr_act else None
+                    ext_kind = ocr_act.params.get("kind", "texto") if ocr_act else "text"
                     return ActionPlan(
                         thought=explanation,
                         actions=actions,
                         raw_response=explanation,
+                        extracted_text=ext_text,
+                        extracted_kind=ext_kind,
                     )
                 except Exception as exc:
                     logger.error(f"Erro na análise visual da imagem: {exc}")
@@ -232,7 +237,16 @@ class IntentEngine:
                                     description="Análise da imagem copiada na área de transferência",
                                 )
                             ]
-                        return ActionPlan(thought=explanation, actions=actions, raw_response=explanation)
+                        ocr_act = next((a for a in actions if a.action_type == ActionType.SMART_OCR), None)
+                        ext_text = ocr_act.target if ocr_act else None
+                        ext_kind = ocr_act.params.get("kind", "texto") if ocr_act else "text"
+                        return ActionPlan(
+                            thought=explanation,
+                            actions=actions,
+                            raw_response=explanation,
+                            extracted_text=ext_text,
+                            extracted_kind=ext_kind,
+                        )
                     except Exception as exc:
                         logger.error(f"Erro na análise visual do clipboard: {exc}")
                         return ActionPlan(
@@ -611,10 +625,15 @@ class IntentEngine:
                         )
                     ]
 
+                ocr_act = next((a for a in actions if a.action_type == ActionType.SMART_OCR), None)
+                ext_text = ocr_act.target if ocr_act else None
+                ext_kind = ocr_act.params.get("kind", "texto") if ocr_act else "text"
                 return ActionPlan(
                     thought=explanation,
                     actions=actions,
                     raw_response=explanation,
+                    extracted_text=ext_text,
+                    extracted_kind=ext_kind,
                 )
             except Exception as exc:
                 logger.error(f"Erro na consulta ao provedor LLM: {exc}")
