@@ -16,6 +16,8 @@ from ..core.a11y import DesktopInspector
 from ..core.apps import AppManager
 from ..core.clipboard import ClipboardService
 from ..core.config import CopilotConfig
+from ..core.files import FileManager
+from ..core.media import MediaPlayerManager
 from ..core.memory import MemoryManager
 from ..core.web_search import WebSearchClient
 
@@ -548,6 +550,121 @@ class IntentEngine:
                 ],
             )
 
+        # =========================================================================
+        # 1.5 CONTROLE DE MÍDIA E ORGANIZAÇÃO RÁPIDA (0ms)
+        # =========================================================================
+
+        # Controle de Mídia / Spotify (Pausar)
+        if any(w in low for w in [
+            "pausar musica", "pausar música", "pausa a musica", "pausa a música",
+            "pausa musica", "pausa música", "pausa o spotify", "pausar spotify",
+            "pausar som", "pausa som", "parar a musica", "para a musica"
+        ]):
+            return ActionPlan(
+                thought="Pausar reprodução de mídia",
+                actions=[
+                    DesktopAction(
+                        ActionType.MEDIA_CONTROL,
+                        "pause",
+                        {"action": "pause"},
+                        description="Pausar mídia (Spotify/reprodutor ativo)",
+                    )
+                ],
+            )
+
+        # Controle de Mídia / Spotify (Tocar / Continuar)
+        if any(w in low for w in [
+            "tocar musica", "tocar música", "play na musica", "play na música",
+            "play musica", "continuar musica", "continuar música", "retomar musica",
+            "iniciar musica", "tocar spotify"
+        ]):
+            return ActionPlan(
+                thought="Iniciar/retomar reprodução de mídia",
+                actions=[
+                    DesktopAction(
+                        ActionType.MEDIA_CONTROL,
+                        "play",
+                        {"action": "play"},
+                        description="Tocar mídia (Spotify/reprodutor ativo)",
+                    )
+                ],
+            )
+
+        # Controle de Mídia / Spotify (Avançar)
+        if any(w in low for w in [
+            "proxima musica", "próxima música", "proxima faixa", "próxima faixa",
+            "pular musica", "pula a musica", "avancar musica", "avançar música",
+            "pular faixa", "proximo som"
+        ]):
+            return ActionPlan(
+                thought="Avançar para a próxima faixa",
+                actions=[
+                    DesktopAction(
+                        ActionType.MEDIA_CONTROL,
+                        "next",
+                        {"action": "next"},
+                        description="Avançar faixa (Spotify/reprodutor ativo)",
+                    )
+                ],
+            )
+
+        # Controle de Mídia / Spotify (Voltar)
+        if any(w in low for w in [
+            "musica anterior", "música anterior", "faixa anterior", "voltar musica",
+            "volta a musica", "retroceder musica", "retroceder faixa"
+        ]):
+            return ActionPlan(
+                thought="Retroceder para a faixa anterior",
+                actions=[
+                    DesktopAction(
+                        ActionType.MEDIA_CONTROL,
+                        "previous",
+                        {"action": "previous"},
+                        description="Faixa anterior (Spotify/reprodutor ativo)",
+                    )
+                ],
+            )
+
+        # Controle de Mídia / Spotify (Status / Faixa atual)
+        if any(w in low for w in [
+            "qual musica esta tocando", "qual música está tocando", "que musica e essa",
+            "que música é essa", "qual e a musica", "qual é a música", "musica atual",
+            "música atual", "status da musica", "status da música", "o que esta tocando",
+            "o que está tocando"
+        ]):
+            info = MediaPlayerManager.get_track_info()
+            summary = info.summary()
+            return ActionPlan(
+                thought=summary,
+                actions=[
+                    DesktopAction(
+                        ActionType.MEDIA_CONTROL,
+                        "get_status",
+                        {"action": "get_status"},
+                        description="Consultar faixa e status de mídia atual",
+                    )
+                ],
+            )
+
+        # Organização de Pastas (Downloads / Documentos)
+        if any(w in low for w in [
+            "organizar downloads", "organizar meus downloads", "organizar a pasta de downloads",
+            "organizar pasta de downloads", "organize downloads", "organize meus downloads",
+            "organize a pasta de downloads", "organize minha pasta de downloads",
+            "arrumar downloads", "limpar downloads"
+        ]):
+            return ActionPlan(
+                thought="Organização inteligente da pasta Downloads por categorias seguras",
+                actions=[
+                    DesktopAction(
+                        ActionType.ORGANIZE_FILES,
+                        "~/Downloads",
+                        {"directory": "~/Downloads", "dry_run": False},
+                        description="Organizar pasta ~/Downloads em subpastas categorizadas",
+                    )
+                ],
+            )
+
         # Interação com Elementos da Janela Ativa (AT-SPI2)
         if low.startswith(("clicar em ", "clique em ", "aperte ", "pressione ")):
             target = re.sub(r"^(clicar em|clique em|aperte|pressione)\s+", "", prompt_clean, flags=re.I).strip("'\"")
@@ -613,6 +730,29 @@ class IntentEngine:
                             ActionType.OPEN_URL,
                             primary.url,
                             description=f"Abrir fonte: {primary.title[:45]}...",
+                        )
+                    )
+
+                # Se o usuário pediu para salvar/gerar relatório em arquivo e a IA não gerou a ação diretamente
+                if any(w in low for w in [
+                    "salve em um arquivo", "salve num arquivo", "crie um arquivo",
+                    "salve o relatorio", "salve o relatório", "gere um relatorio",
+                    "gere um relatório", "salvar relatorio", "salvar relatório",
+                    "salve em arquivo", "salve num documento", "salve em documento",
+                    "escreva um relatorio", "escreva um relatório", "salvar em arquivo"
+                ]) and not any(a.action_type == ActionType.WRITE_FILE for a in actions):
+                    slug = re.sub(r"[^a-z0-9]+", "_", low[:30]).strip("_") or "relatorio"
+                    fname = f"{slug}.md"
+                    actions.append(
+                        DesktopAction(
+                            ActionType.WRITE_FILE,
+                            fname,
+                            {
+                                "filename": fname,
+                                "content": explanation,
+                                "directory": "~/Documentos/Relatorios",
+                            },
+                            description=f"Salvar relatório em '~/Documentos/Relatorios/{fname}'",
                         )
                     )
 

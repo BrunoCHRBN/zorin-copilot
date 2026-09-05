@@ -22,6 +22,9 @@ class ActionType(str, Enum):
     CAPTURE_SCREEN = "capture_screen"
     FIX_COMMAND = "fix_command"
     SMART_OCR = "smart_ocr"
+    MEDIA_CONTROL = "media_control"
+    WRITE_FILE = "write_file"
+    ORGANIZE_FILES = "organize_files"
 
 
 @dataclass
@@ -60,6 +63,16 @@ class DesktopAction:
         if self.action_type == ActionType.SMART_OCR:
             kind = self.params.get("kind", "conteúdo")
             return f"Copiar {kind} extraído da tela"
+        if self.action_type == ActionType.MEDIA_CONTROL:
+            act = self.params.get("action", self.target)
+            player = self.params.get("player", "")
+            return f"Controle de mídia: {act} ({player})" if player else f"Controle de mídia: {act}"
+        if self.action_type == ActionType.WRITE_FILE:
+            fname = self.params.get("filename", self.target)
+            return f"Salvar documento '{fname}'"
+        if self.action_type == ActionType.ORGANIZE_FILES:
+            folder = self.params.get("directory", self.target)
+            return f"Organizar pasta '{folder}'"
         return f"Ação {self.action_type.value} em {self.target}"
 
 

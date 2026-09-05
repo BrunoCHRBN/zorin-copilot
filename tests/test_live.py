@@ -24,7 +24,11 @@ class LiveVoiceClientTest(unittest.TestCase):
         funcs = LIVE_TOOLS_DECLARATION[0]["functionDeclarations"]
         func_names = [f["name"] for f in funcs]
 
-        for expected in ["launch_app", "system_control", "capture_screen", "open_url", "get_system_info", "web_search"]:
+        for expected in [
+            "launch_app", "system_control", "capture_screen", "open_url",
+            "get_system_info", "web_search", "media_control", "write_document",
+            "organize_directory"
+        ]:
             self.assertIn(expected, func_names)
 
     def test_toggle_mute(self):
@@ -89,6 +93,33 @@ class LiveVoiceClientTest(unittest.TestCase):
         res = self.client._dispatch_tool("ferramenta_magica", {})
         self.assertFalse(res["success"])
         self.assertIn("desconhecida", res["message"])
+
+    @patch("zorin_copilot.core.media.MediaPlayerManager.control")
+    def test_dispatch_tool_media_control(self, mock_control):
+        """Testa despacho de comando de mídia na chamada de voz."""
+        mock_control.return_value = (True, "Música pausada no Spotify.")
+        res = self.client._dispatch_tool("media_control", {"action": "pause", "player": "spotify"})
+        self.assertTrue(res["success"])
+        self.assertIn("Spotify", res["message"])
+        mock_control.assert_called_once_with("pause", player_name="spotify")
+
+    @patch("zorin_copilot.core.files.FileManager.write_document")
+    def test_dispatch_tool_write_document(self, mock_write):
+        """Testa despacho de criação de arquivo na chamada de voz."""
+        mock_write.return_value = (True, "Arquivo salvo", "/home/bruno/doc.md")
+        res = self.client._dispatch_tool("write_document", {"filename": "doc.md", "content": "olá mundo"})
+        self.assertTrue(res["success"])
+        self.assertEqual(res["path"], "/home/bruno/doc.md")
+        mock_write.assert_called_once_with("doc.md", "olá mundo", directory=None)
+
+    @patch("zorin_copilot.core.files.FileManager.organize_directory")
+    def test_dispatch_tool_organize_directory(self, mock_org):
+        """Testa despacho de organização de pasta na chamada de voz."""
+        mock_org.return_value = (True, "Organizado com sucesso", {"Imagens": 2})
+        res = self.client._dispatch_tool("organize_directory", {"directory": "~/Downloads", "dry_run": False})
+        self.assertTrue(res["success"])
+        self.assertIn("Imagens", res["stats"])
+        mock_org.assert_called_once_with(directory="~/Downloads", dry_run=False)
 
 
 if __name__ == "__main__":

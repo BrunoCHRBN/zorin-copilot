@@ -14,6 +14,8 @@ from ..ai.actions import ActionPlan, ActionType, DesktopAction
 from ..core.a11y import DesktopInspector, UIElement
 from ..core.apps import AppManager
 from ..core.clipboard import ClipboardService
+from ..core.files import FileManager
+from ..core.media import MediaPlayerManager
 from .system import SystemController
 
 
@@ -80,6 +82,15 @@ class ActionExecutor:
 
         if action.action_type == ActionType.FIX_COMMAND:
             return self._execute_fix_command(action)
+
+        if action.action_type == ActionType.MEDIA_CONTROL:
+            return self._control_media(action)
+
+        if action.action_type == ActionType.WRITE_FILE:
+            return self._write_file(action)
+
+        if action.action_type == ActionType.ORGANIZE_FILES:
+            return self._organize_files(action)
 
         return ExecutionReport(
             action=action,
@@ -262,3 +273,26 @@ class ActionExecutor:
             success=True,
             message=f"Layout de janelas '{layout_name}' aplicado.",
         )
+
+    def _control_media(self, action: DesktopAction) -> ExecutionReport:
+        act = action.params.get("action", action.target)
+        player = action.params.get("player")
+        ok, msg = MediaPlayerManager.control(act, player_name=player)
+        return ExecutionReport(action=action, success=ok, message=msg)
+
+    def _write_file(self, action: DesktopAction) -> ExecutionReport:
+        filename = action.params.get("filename") or action.target
+        content = action.params.get("content", "")
+        directory = action.params.get("directory")
+        append = bool(action.params.get("append", False))
+        ok, msg, _ = FileManager.write_document(
+            filename=filename, content=content, directory=directory, append=append
+        )
+        return ExecutionReport(action=action, success=ok, message=msg)
+
+    def _organize_files(self, action: DesktopAction) -> ExecutionReport:
+        directory = action.params.get("directory") or action.target or "~/Downloads"
+        dry_run = bool(action.params.get("dry_run", False))
+        ok, msg, _ = FileManager.organize_directory(directory=directory, dry_run=dry_run)
+        return ExecutionReport(action=action, success=ok, message=msg)
+

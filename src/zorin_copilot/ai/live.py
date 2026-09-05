@@ -128,6 +128,64 @@ LIVE_TOOLS_DECLARATION = [
                     "required": ["query"],
                 },
             },
+            {
+                "name": "media_control",
+                "description": "Controla tocadores de música e reprodutores de mídia como Spotify, VLC e navegadores (tocar, pausar, avançar faixa, retroceder, ou consultar que música está tocando).",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "action": {
+                            "type": "STRING",
+                            "enum": ["play", "pause", "play_pause", "next", "previous", "get_status"],
+                            "description": "Ação de controle de mídia",
+                        },
+                        "player": {
+                            "type": "STRING",
+                            "description": "Nome opcional do reprodutor (ex: 'spotify')",
+                        },
+                    },
+                    "required": ["action"],
+                },
+            },
+            {
+                "name": "write_document",
+                "description": "Cria ou salva um documento, anotação ou relatório em formato Markdown ou texto no computador do usuário.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "filename": {
+                            "type": "STRING",
+                            "description": "Nome do arquivo (ex: 'relatorio_pesquisa.md')",
+                        },
+                        "content": {
+                            "type": "STRING",
+                            "description": "Conteúdo textual ou Markdown completo do documento",
+                        },
+                        "directory": {
+                            "type": "STRING",
+                            "description": "Pasta de destino (opcional, padrão ~/Documentos/Relatorios)",
+                        },
+                    },
+                    "required": ["filename", "content"],
+                },
+            },
+            {
+                "name": "organize_directory",
+                "description": "Organiza arquivos de uma pasta (como Downloads) categorizando em subpastas seguras (Imagens, Documentos, Instaladores, etc.).",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "directory": {
+                            "type": "STRING",
+                            "description": "Caminho da pasta a ser organizada (opcional, padrão ~/Downloads)",
+                        },
+                        "dry_run": {
+                            "type": "BOOLEAN",
+                            "description": "Se true, apenas simula sem mover arquivos; se false, organiza os arquivos",
+                        },
+                    },
+                },
+            },
         ]
     }
 ]
@@ -610,6 +668,28 @@ class GeminiLiveClient:
                     for r in results
                 ]
                 return {"success": True, "results": formatted}
+
+            elif name == "media_control":
+                from ..core.media import MediaPlayerManager
+                act = args.get("action", "play_pause")
+                player = args.get("player")
+                ok, msg = MediaPlayerManager.control(act, player_name=player)
+                return {"success": ok, "message": msg}
+
+            elif name == "write_document":
+                from ..core.files import FileManager
+                filename = args.get("filename", "documento.md")
+                content = args.get("content", "")
+                directory = args.get("directory")
+                ok, msg, path = FileManager.write_document(filename, content, directory=directory)
+                return {"success": ok, "message": msg, "path": path}
+
+            elif name == "organize_directory":
+                from ..core.files import FileManager
+                directory = args.get("directory", "~/Downloads")
+                dry_run = bool(args.get("dry_run", False))
+                ok, msg, stats = FileManager.organize_directory(directory=directory, dry_run=dry_run)
+                return {"success": ok, "message": msg, "stats": stats}
 
             return {"success": False, "message": f"Ferramenta desconhecida: {name}"}
 

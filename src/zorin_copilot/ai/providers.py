@@ -49,6 +49,9 @@ DIRETRIZES FUNDAMENTAIS:
 - "open_url": para sites ou links.
 - "launch_app": para abrir aplicativos instalados.
 - "system_control": para controles de sistema.
+- "media_control": para controlar reprodutores de mídia e música (Spotify, VLC). Defina "target": "play"|"pause"|"next"|"previous"|"get_status", "params": {"action": "play"|"pause"|"next"|"previous"|"get_status", "player": "spotify"|null}.
+- "write_file": para criar ou salvar relatórios e arquivos Markdown/texto no sistema. Defina "target": "nome_arquivo.md", "params": {"filename": "nome_arquivo.md", "content": "conteúdo completo em markdown", "directory": "~/Documentos"|null}.
+- "organize_files": para organizar pastas (ex: ~/Downloads) em subpastas categorizadas. Defina "target": "diretório", "params": {"directory": "~/Downloads", "dry_run": false}.
 - "notify": para notificações.
 
 Você DEVE responder EXCLUSIVAMENTE em formato JSON com o seguinte esquema:
@@ -58,7 +61,7 @@ Você DEVE responder EXCLUSIVAMENTE em formato JSON com o seguinte esquema:
   "extracted_kind": "code" | "text",
   "actions": [
     {
-      "type": "fix_command" | "open_url" | "launch_app" | "system_control" | "notify",
+      "type": "fix_command" | "open_url" | "launch_app" | "system_control" | "media_control" | "write_file" | "organize_files" | "notify",
       "target": "alvo da ação ou descrição do conserto",
       "description": "descrição amigável da ação em português",
       "params": {
@@ -174,6 +177,11 @@ class BaseLLMProvider(ABC):
                     "notify": ActionType.NOTIFY,
                     "click": ActionType.CLICK,
                     "smart_ocr": ActionType.SMART_OCR,
+                    "media_control": ActionType.MEDIA_CONTROL,
+                    "write_file": ActionType.WRITE_FILE,
+                    "write_document": ActionType.WRITE_FILE,
+                    "organize_files": ActionType.ORGANIZE_FILES,
+                    "organize_directory": ActionType.ORGANIZE_FILES,
                 }
                 action_type = type_map.get(act_type_str)
                 if action_type:

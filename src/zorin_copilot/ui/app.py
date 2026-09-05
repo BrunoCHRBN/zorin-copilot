@@ -120,6 +120,12 @@ def get_action_icon(action: DesktopAction) -> str:
         return "utilities-terminal-symbolic"
     if action.action_type == ActionType.SMART_OCR:
         return "edit-copy-symbolic"
+    if action.action_type == ActionType.MEDIA_CONTROL:
+        return "multimedia-player-symbolic"
+    if action.action_type == ActionType.WRITE_FILE:
+        return "document-save-symbolic"
+    if action.action_type == ActionType.ORGANIZE_FILES:
+        return "folder-symbolic"
     return "system-run-symbolic"
 
 
@@ -1392,9 +1398,12 @@ class CopilotWindow(Adw.ApplicationWindow):
                     ActionType.CAPTURE_SCREEN: "visão da tela",
                     ActionType.FIX_COMMAND: "auto-cura do sistema",
                     ActionType.SMART_OCR: "smart ocr",
+                    ActionType.MEDIA_CONTROL: "controle de mídia",
+                    ActionType.WRITE_FILE: "salvar documento",
+                    ActionType.ORGANIZE_FILES: "organização de arquivos",
                 }.get(action.action_type, action.action_type.value)
 
-                # Customização visual especializada para FIX_COMMAND e SMART_OCR
+                # Customização visual especializada para ações do Copilot
                 if action.action_type == ActionType.FIX_COMMAND:
                     cmd_show = action.params.get("command") or action.target
                     row = Adw.ActionRow(
@@ -1411,6 +1420,29 @@ class CopilotWindow(Adw.ApplicationWindow):
                     )
                     row.set_use_markup(True)
                     exec_label = "Copiar Conteúdo"
+                elif action.action_type == ActionType.WRITE_FILE:
+                    dest_dir = action.params.get("directory") or "~/Documentos/Relatorios"
+                    row = Adw.ActionRow(
+                        title=f"<b>📝 Salvar: {html.escape(action.describe())}</b>",
+                        subtitle=f"Destino: <tt>{html.escape(dest_dir)}</tt>",
+                    )
+                    row.set_use_markup(True)
+                    exec_label = "Salvar Arquivo"
+                elif action.action_type == ActionType.ORGANIZE_FILES:
+                    target_dir = action.params.get("directory") or "~/Downloads"
+                    row = Adw.ActionRow(
+                        title=f"<b>📁 Organizar: {html.escape(action.describe())}</b>",
+                        subtitle=f"Pasta: <tt>{html.escape(target_dir)}</tt> (Lixeira reversível)",
+                    )
+                    row.set_use_markup(True)
+                    exec_label = "Organizar Agora"
+                elif action.action_type == ActionType.MEDIA_CONTROL:
+                    row = Adw.ActionRow(
+                        title=f"<b>🎵 Mídia: {html.escape(action.describe())}</b>",
+                        subtitle="Spotify / Reprodutor ativo MPRIS2",
+                    )
+                    row.set_use_markup(True)
+                    exec_label = "Controlar"
                 else:
                     row = Adw.ActionRow(
                         title=action.describe(),
