@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import html
-import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -20,49 +19,10 @@ from gi.repository import Adw, Gdk, GLib, Gtk, Pango  # noqa: E402
 from ...ai.actions import ActionPlan, ActionType, DesktopAction
 from ...core.session import ChatTurn
 from ...shell.action_status import ActionOutcome, ActionOutcomeRegistry
+from ..markdown import format_markdown_to_markup  # noqa: F401 - reexportado por compatibilidade
 
 if TYPE_CHECKING:  # pragma: no cover - apenas para type checking
     from ..app import CopilotWindow
-
-
-def format_markdown_to_markup(text: str) -> str:
-    """Converte markdown comum (negrito, itálico, código, links) em GTK/Pango markup válido."""
-    if not text:
-        return ""
-    try:
-        s = html.escape(text)
-
-        # 1. Blocos de código multilinhas: ```lang\ncode\n```
-        s = re.sub(
-            r"```(?:[a-zA-Z0-9_-]+)?\n?(.*?)```",
-            lambda m: f"\n<tt><b>{m.group(1).strip()}</b></tt>\n",
-            s,
-            flags=re.DOTALL,
-        )
-
-        # 2. Código inline / caminhos de diretório: `código` -> <tt><b>código</b></tt>
-        s = re.sub(r"`([^`\n]+)`", r"<tt><b>\1</b></tt>", s)
-
-        # 3. Links markdown: [texto](url) -> <a href="url">texto</a>
-        s = re.sub(
-            r"\[([^\]]+)\]\((https?://[^\s\)]+)\)",
-            lambda m: f'<a href="{m.group(2)}">{m.group(1)}</a>',
-            s,
-        )
-
-        # 4. Negrito: **texto** ou __texto__ -> <b>texto</b>
-        s = re.sub(r"\*\*([^\*\n]+)\*\*", r"<b>\1</b>", s)
-        s = re.sub(r"__([^_\n]+)__", r"<b>\1</b>", s)
-
-        # 5. Itálico: *texto* -> <i>texto</i>
-        s = re.sub(r"(?<!\*)\*([^\*\n]+)\*(?!\*)", r"<i>\1</i>", s)
-
-        # 6. Marcadores de lista
-        s = re.sub(r"(?m)^[\t ]*[-*]\s+", "  • ", s)
-
-        return s
-    except Exception:
-        return html.escape(text)
 
 
 def get_action_icon(action: DesktopAction) -> str:

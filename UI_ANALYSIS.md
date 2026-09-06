@@ -113,6 +113,17 @@ O visualizador (`_draw_audio_visualizer` L267–299) tem 3 círculos concêntric
 
 **Recomendação:** usar `python-markdown` + `pycmarkgfm` ou `mistune`, com extensão `fenced_code` + `tables`. **OU** renderizar markdown num WebView (WebKitGTK) com `Gtk.WebView` — o ChatGPT desktop faz exatamente isso e ganha com syntax highlight (highlight.js), copiar imagem, etc. Custaria ~10MB de dependência mas dá flexibilidade absurda.
 
+> **Status: RESOLVIDO (Sprint 3)** por renderer próprio em `ui/markdown.py`, sem nova
+> dependência. Motivo da escolha: WebView exigiria webkit2gtk e quebraria o visual
+> nativo (o app inteiro é glassmorphism em GTK); `python-markdown` adicionaria uma
+> dependência de empacotamento a um app distribuído como `.deb` — decisão que não
+> cabe a quem só mexe na UI. ~250 linhas resolvem o subconjunto que os modelos
+> realmente emitem.
+>
+> Perda silenciosa mais grave que a análise não tinha notado: **listas aninhadas**.
+> O regex achatava tudo no mesmo nível (`'  • um\n  • filho'`), então a hierarquia
+> simplesmente desaparecia.
+
 ### 2.7 — Atalho `Esc` no `on_key_pressed` (L562–574) tem **fallthrough perigoso**
 
 ```python
@@ -212,7 +223,7 @@ Sprint 2 — CONCLUÍDO
 
 Sprint 3 (2 semanas)
   [x] Feedback de falha em ações (item 2.8) — com bug de "falso sucesso" corrigido
-  → Markdown renderer real (item 2.6) OU WebView
+  [x] Markdown renderer real (item 2.6) — renderer próprio, sem nova dependência
   → Temas customizáveis (item 2.10)
 
 Backlog
