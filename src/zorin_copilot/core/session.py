@@ -17,12 +17,16 @@ class ChatTurn:
     prompt: str
     answer: str
     timestamp: float = field(default_factory=time.time)
+    # Identificador estável: permite associar resultados de execução a um turno
+    # específico mesmo depois de o fluxo de chat ser reconstruído do zero.
+    id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     def to_dict(self) -> dict:
         return {
             "prompt": self.prompt,
             "answer": self.answer,
             "timestamp": self.timestamp,
+            "id": self.id,
         }
 
     @classmethod
@@ -31,6 +35,9 @@ class ChatTurn:
             prompt=data.get("prompt", ""),
             answer=data.get("answer", ""),
             timestamp=float(data.get("timestamp", time.time())),
+            # Turnos gravados antes deste campo existir recebem um id novo na
+            # leitura — aceitável, porque o registro de execução é em memória.
+            id=data.get("id") or uuid.uuid4().hex,
         )
 
 
@@ -125,8 +132,11 @@ class TopicSession:
             return cleaned
         return cleaned[:47].rstrip() + "..."
 
-    def record_turn(self, prompt: str, answer: str) -> None:
-        """Registra uma interação usuário/assistente na demanda ativa."""
+    def record_turn(self, prompt: str, answer: str) -> ChatTurn:
+        """Registra uma interação usuário/assistente na demanda ativa.
+
+        Retorna o turno criado para que a interface possa renderizá-lo imediatamente.
+        """
         clean_p = prompt.strip()
         clean_a = answer.strip()
         turn = ChatTurn(prompt=clean_p, answer=clean_a)
@@ -144,6 +154,8 @@ class TopicSession:
         else:
             # Guarda em memória temporária caso o usuário decida fixar logo em seguida
             self._last_unpinned_turn = turn
+
+        return turn
 
     def get_history_for_llm(self) -> list[dict[str, str]]:
         """Retorna o histórico formatado para envio aos provedores de IA (Gemini, Ollama, OpenAI)."""
