@@ -36,6 +36,18 @@ from .preferences import PreferencesDialog
 from .style import setup_glass_window
 
 
+def get_dynamic_greeting() -> str:
+    """Retorna uma saudação dinâmica e calorosa baseada no horário atual do dia."""
+    hour = datetime.now().hour
+    if 5 <= hour < 12:
+        salute = "Bom dia!"
+    elif 12 <= hour < 18:
+        salute = "Boa tarde!"
+    else:
+        salute = "Boa noite!"
+    return f"<b>{salute} Como posso ajudar hoje?</b>"
+
+
 def format_relative_timestamp(iso_str: str) -> str:
     """Formata timestamp ISO de forma amigável para exibição no histórico de tópicos."""
     if not iso_str:
@@ -726,31 +738,46 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.chat_scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
 
         clamp_chat = Adw.Clamp(maximum_size=820)
+        clamp_chat.set_vexpand(True)
         self.chat_stream_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        self.chat_stream_box.set_vexpand(True)
         self.chat_stream_box.set_margin_start(16)
         self.chat_stream_box.set_margin_end(16)
         self.chat_stream_box.set_margin_top(16)
         self.chat_stream_box.set_margin_bottom(16)
 
+        # Slot Central para o cluster de entrada na tela inicial
+        self.center_input_slot = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.center_input_slot.set_hexpand(True)
+        self.center_input_slot.set_size_request(660, -1)
+
         # Tela de Boas-vindas quando o chat está limpo (Sem mensagens)
-        self.welcome_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        self.welcome_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
         self.welcome_box.set_valign(Gtk.Align.CENTER)
         self.welcome_box.set_halign(Gtk.Align.CENTER)
-        self.welcome_box.set_margin_top(40)
-        self.welcome_box.set_margin_bottom(20)
+        self.welcome_box.set_vexpand(True)
+        self.welcome_box.set_hexpand(True)
+        self.welcome_box.set_margin_start(16)
+        self.welcome_box.set_margin_end(16)
+        self.welcome_box.set_margin_top(16)
+        self.welcome_box.set_margin_bottom(16)
 
-        header_welcome = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        header_welcome = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         header_welcome.set_halign(Gtk.Align.CENTER)
 
-        welcome_icon = Gtk.Image.new_from_icon_name("system-help-symbolic")
-        welcome_icon.set_pixel_size(44)
-        welcome_icon.add_css_class("welcome-icon")
-        header_welcome.append(welcome_icon)
+        # Emblema de centelha inteligente em vidro (Hero AI Sparkle Badge)
+        avatar_badge = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        avatar_badge.add_css_class("welcome-avatar-badge")
+        avatar_badge.set_halign(Gtk.Align.CENTER)
+        welcome_icon = Gtk.Image.new_from_icon_name("starred-symbolic")
+        welcome_icon.set_pixel_size(30)
+        avatar_badge.append(welcome_icon)
+        header_welcome.append(avatar_badge)
 
-        welcome_title = Gtk.Label(label="<b>Como posso ajudar hoje?</b>", use_markup=True)
-        welcome_title.add_css_class("title-2")
-        welcome_title.add_css_class("welcome-title")
-        header_welcome.append(welcome_title)
+        self.welcome_title = Gtk.Label(label=get_dynamic_greeting(), use_markup=True)
+        self.welcome_title.add_css_class("title-2")
+        self.welcome_title.add_css_class("welcome-title")
+        header_welcome.append(self.welcome_title)
 
         welcome_desc = Gtk.Label(label="Peça tarefas no desktop, consulte seus projetos ou converse por voz")
         welcome_desc.add_css_class("caption")
@@ -758,18 +785,23 @@ class CopilotWindow(Adw.ApplicationWindow):
         header_welcome.append(welcome_desc)
         self.welcome_box.append(header_welcome)
 
-        # Grid de sugestões rápidas
+        # Barra de Entrada integrada no centro da tela de boas-vindas
+        self.welcome_box.append(self.center_input_slot)
+
+        # Grid de sugestões rápidas (3 colunas x 2 linhas)
         grid = Gtk.Grid()
         grid.set_column_spacing(10)
         grid.set_row_spacing(10)
         grid.set_halign(Gtk.Align.CENTER)
-        grid.set_margin_top(10)
+        grid.set_margin_top(6)
 
         suggestions = [
             ("audio-input-microphone-symbolic", "Voz ao Vivo (Gemini Live)", "voz_ao_vivo", 0, 0),
             ("edit-cut-symbolic", "Recortar Área da Tela", "recortar_area", 1, 0),
-            ("edit-paste-symbolic", "Analisar Copiado", "analisar_copiado", 0, 1),
-            ("weather-clear-night-symbolic", "Alternar modo escuro", "ativar modo escuro", 1, 1),
+            ("edit-paste-symbolic", "Analisar Copiado", "analisar_copiado", 2, 0),
+            ("folder-symbolic", "Organizar Downloads", "organizar_downloads", 0, 1),
+            ("system-search-symbolic", "Buscar em Documentos", "buscar_documentos", 1, 1),
+            ("utilities-system-monitor-symbolic", "Consumo do Sistema", "consumo_sistema", 2, 1),
         ]
 
         for icon_name, label_text, prompt_val, col, row in suggestions:
@@ -803,12 +835,19 @@ class CopilotWindow(Adw.ApplicationWindow):
         # ---------------------------------------------------------------------
         # 2.2 Barra de Resposta e Entrada Fixada Abaixo do Chat (Estilo Gemini)
         # ---------------------------------------------------------------------
-        clamp_bottom = Adw.Clamp(maximum_size=820)
-        bottom_container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        bottom_container.set_margin_start(16)
-        bottom_container.set_margin_end(16)
-        bottom_container.set_margin_bottom(10)
-        bottom_container.set_margin_top(4)
+        self.clamp_bottom = Adw.Clamp(maximum_size=820)
+        self.bottom_container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        self.bottom_container.set_margin_start(16)
+        self.bottom_container.set_margin_end(16)
+        self.bottom_container.set_margin_bottom(10)
+        self.bottom_container.set_margin_top(4)
+
+        self.bottom_input_slot = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.bottom_input_slot.set_hexpand(True)
+        self.bottom_container.append(self.bottom_input_slot)
+
+        self.clamp_bottom.set_child(self.bottom_container)
+        chat_main_box.append(self.clamp_bottom)
 
         # Barra dinâmica de detecção de aplicativos instalados (abre acima da entrada)
         self.app_preview_revealer = Gtk.Revealer()
@@ -857,7 +896,6 @@ class CopilotWindow(Adw.ApplicationWindow):
 
         self.app_preview_card.append(app_info_box)
         self.app_preview_revealer.set_child(self.app_preview_card)
-        bottom_container.append(self.app_preview_revealer)
 
         # Card de prévia da imagem capturada/anexada (aparece acima da barra)
         self.vision_preview_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
@@ -911,8 +949,6 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.ocr_btn_label = Gtk.Label(label="Copiar Texto da Imagem")
         self.ocr_btn.set_visible(False)
         self.vision_preview_box.append(self.ocr_btn)
-
-        bottom_container.append(self.vision_preview_box)
 
         # O Card Principal da Barra de Prompt (Floating Pill)
         self.prompt_bar_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -1016,6 +1052,7 @@ class CopilotWindow(Adw.ApplicationWindow):
 
         # Entrada de Texto Principal
         self.entry = Gtk.Entry()
+        self.entry.add_css_class("flat")
         self.entry.set_placeholder_text("Peça ao Zorin Copilot ou digite um comando...")
         self.entry.set_hexpand(True)
         self.entry.connect("activate", self._on_submit)
@@ -1047,19 +1084,24 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.submit_btn.connect("clicked", self._on_submit)
         self.prompt_bar_box.append(self.submit_btn)
 
-        bottom_container.append(self.prompt_bar_box)
+        # Cluster Integrado de Entrada (Prévia de App + Recorte Ativo + Barra de Prompt + Legenda)
+        self.input_cluster = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        self.input_cluster.set_hexpand(True)
+        self.input_cluster.append(self.app_preview_revealer)
+        self.input_cluster.append(self.vision_preview_box)
+        self.input_cluster.append(self.prompt_bar_box)
 
         # Legenda discreta abaixo da barra de resposta
-        disclaimer_lbl = Gtk.Label(
+        self.disclaimer_lbl = Gtk.Label(
             label="<span size='small' alpha='65%'>O Zorin Copilot é um assistente com IA e pode cometer erros. Verifique informações importantes.</span>",
             use_markup=True,
             xalign=0.5,
         )
-        disclaimer_lbl.add_css_class("disclaimer-caption")
-        bottom_container.append(disclaimer_lbl)
+        self.disclaimer_lbl.add_css_class("disclaimer-caption")
+        self.input_cluster.append(self.disclaimer_lbl)
 
-        clamp_bottom.set_child(bottom_container)
-        chat_main_box.append(clamp_bottom)
+        # Inicializa o cluster no slot central da tela inicial
+        self.center_input_slot.append(self.input_cluster)
 
         self.split_box.append(chat_main_box)
 
@@ -1067,6 +1109,24 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.toast_overlay.set_child(self.split_box)
         self.toolbar_view.set_content(self.toast_overlay)
         self.set_content(self.toolbar_view)
+
+    def _update_input_position(self) -> None:
+        """Posiciona dinamicamente a barra de entrada no centro (se vazia) ou no rodapé (se houver mensagens)."""
+        is_empty = len(self.session.turns) == 0 and not getattr(self, "_is_busy", False) and self._pending_turn_box is None
+        target_slot = self.center_input_slot if is_empty else self.bottom_input_slot
+
+        current_parent = self.input_cluster.get_parent()
+        if current_parent != target_slot:
+            if current_parent is not None:
+                current_parent.remove(self.input_cluster)
+            target_slot.append(self.input_cluster)
+
+        if is_empty:
+            self.clamp_bottom.set_visible(False)
+            self.welcome_box.set_visible(True)
+        else:
+            self.clamp_bottom.set_visible(True)
+            self.welcome_box.set_visible(False)
 
     def show_toast(self, message: str) -> None:
         """Exibe uma notificação flutuante elegante na janela."""
@@ -1077,6 +1137,7 @@ class CopilotWindow(Adw.ApplicationWindow):
         if self.config.is_configured():
             prov_name = {
                 "gemini": f"Gemini ({self.config.gemini_model})",
+                "workbuddy": f"WorkBuddy ({getattr(self.config, 'workbuddy_model', 'hy4-preview')})",
                 "ollama": f"Ollama ({self.config.ollama_model})",
                 "openai": f"API ({self.config.openai_model})",
             }.get(self.config.provider, "IA Ativa")
@@ -1108,6 +1169,18 @@ class CopilotWindow(Adw.ApplicationWindow):
             self.entry.set_text("📋 Analisar conteúdo da área de transferência")
             self._on_submit(self.entry)
             return
+        if text == "organizar_downloads":
+            self.entry.set_text("Organizar os arquivos na pasta Downloads")
+            self._on_submit(self.entry)
+            return
+        if text == "buscar_documentos":
+            self.entry.set_text("Pesquisar nos meus documentos indexados")
+            self._on_submit(self.entry)
+            return
+        if text == "consumo_sistema":
+            self.entry.set_text("Como está o consumo de memória RAM e processador?")
+            self._on_submit(self.entry)
+            return
         self.entry.set_text(text)
         self._on_submit(self.entry)
 
@@ -1121,12 +1194,7 @@ class CopilotWindow(Adw.ApplicationWindow):
         if not text:
             self.app_preview_revealer.set_reveal_child(False)
             self._matched_preview_app = None
-            if not self.answer_group.get_visible():
-                self.welcome_box.set_visible(True)
             return
-
-        # Esconde imediatamente a tela de sugestões ao começar a digitar
-        self.welcome_box.set_visible(False)
 
         if len(text) < 2:
             self.app_preview_revealer.set_reveal_child(False)
@@ -1288,7 +1356,11 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.vision_btn.set_sensitive(False)
         self.clipboard_btn.set_sensitive(False)
         self.bottom_voice_btn.set_sensitive(False)
+
+        if self.welcome_box.get_parent() == self.chat_stream_box:
+            self.chat_stream_box.remove(self.welcome_box)
         self.welcome_box.set_visible(False)
+        self._update_input_position()
 
         # Limpa o texto da barra de entrada imediatamente (estilo Gemini)
         self.entry.set_text("")
@@ -1333,7 +1405,6 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.clipboard_btn.set_sensitive(True)
         self.bottom_voice_btn.set_sensitive(True)
         self.current_plan = plan
-        self.welcome_box.set_visible(False)
 
         try:
             explanation_text = (plan.thought or "").strip() if plan else ""
@@ -1355,6 +1426,11 @@ class CopilotWindow(Adw.ApplicationWindow):
             if self._pending_turn_box and self._pending_turn_box.get_parent() == self.chat_stream_box:
                 self.chat_stream_box.remove(self._pending_turn_box)
                 self._pending_turn_box = None
+
+            if self.welcome_box.get_parent() == self.chat_stream_box:
+                self.chat_stream_box.remove(self.welcome_box)
+            self.welcome_box.set_visible(False)
+            self._update_input_position()
 
             # Auto-save e pin UI protegidos
             try:
@@ -1450,7 +1526,7 @@ class CopilotWindow(Adw.ApplicationWindow):
         assistant_card.add_css_class("assistant-message-card")
 
         a_hdr = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        a_icon = Gtk.Image.new_from_icon_name("system-help-symbolic")
+        a_icon = Gtk.Image.new_from_icon_name("starred-symbolic")
         a_icon.set_pixel_size(18)
         a_hdr.append(a_icon)
 
@@ -1458,7 +1534,12 @@ class CopilotWindow(Adw.ApplicationWindow):
         a_name.add_css_class("heading")
         a_hdr.append(a_name)
 
-        prov_str = self.config.gemini_model if self.config.provider == "gemini" else self.config.provider
+        if self.config.provider == "gemini":
+            prov_str = self.config.gemini_model
+        elif self.config.provider == "workbuddy":
+            prov_str = f"WorkBuddy ({getattr(self.config, 'workbuddy_model', 'hy4-preview')})"
+        else:
+            prov_str = self.config.provider
         a_badge = Gtk.Label(label=f"● {prov_str}", xalign=0)
         a_badge.add_css_class("caption")
         a_badge.add_css_class("dim-label")
@@ -1741,11 +1822,15 @@ class CopilotWindow(Adw.ApplicationWindow):
             self.chat_stream_box.remove(child)
 
         if not self.session.turns:
+            if hasattr(self, "welcome_title"):
+                self.welcome_title.set_label(get_dynamic_greeting())
             self.chat_stream_box.append(self.welcome_box)
             self.welcome_box.set_visible(True)
+            self._update_input_position()
             return
 
         self.welcome_box.set_visible(False)
+        self._update_input_position()
         for i, turn in enumerate(self.session.turns):
             is_last = (i == len(self.session.turns) - 1)
             plan_to_use = self.current_plan if is_last else None
@@ -1815,7 +1900,7 @@ class CopilotWindow(Adw.ApplicationWindow):
             item_box.set_margin_end(4)
 
             # Indicador / Ícone de conversa
-            chat_icon = Gtk.Image.new_from_icon_name("user-available-symbolic" if is_active else "dialog-information-symbolic")
+            chat_icon = Gtk.Image.new_from_icon_name("user-available-symbolic" if is_active else "chat-message-new-symbolic")
             chat_icon.set_pixel_size(14)
             item_box.append(chat_icon)
 
@@ -1844,6 +1929,7 @@ class CopilotWindow(Adw.ApplicationWindow):
             del_btn.add_css_class("flat")
             del_btn.add_css_class("circular")
             del_btn.add_css_class("glass-icon-btn")
+            del_btn.add_css_class("sidebar-del-btn")
             del_btn.set_tooltip_text("Excluir conversa")
             del_btn.set_valign(Gtk.Align.CENTER)
             tid = topic["id"]

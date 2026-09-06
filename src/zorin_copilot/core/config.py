@@ -33,6 +33,11 @@ class CopilotConfig:
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
 
+    # Configurações do WorkBuddy AI (Tencent Hunyuan / HY4)
+    workbuddy_url: str = "https://www.workbuddy.ai/v2"
+    workbuddy_api_key: str = ""
+    workbuddy_model: str = "hy4-preview"
+
     # Pesquisa na Web em tempo real
     web_search_enabled: bool = True
 
@@ -112,6 +117,8 @@ class CopilotConfig:
             config.gemini_api_key = os.environ.get("GEMINI_API_KEY", "")
         if not config.openai_api_key:
             config.openai_api_key = os.environ.get("OPENAI_API_KEY", "")
+        if not config.workbuddy_api_key:
+            config.workbuddy_api_key = os.environ.get("WORKBUDDY_API_KEY", "")
 
         return config
 
@@ -135,4 +142,6 @@ class CopilotConfig:
             return bool(self.ollama_url.strip())
         if self.provider == "openai":
             return bool(self.openai_api_key.strip())
+        if self.provider == "workbuddy":
+            return bool(self.workbuddy_api_key.strip())
         return False

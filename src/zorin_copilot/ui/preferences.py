@@ -13,7 +13,13 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
-from ..ai.providers import GeminiProvider, HybridProvider, OllamaProvider, OpenAICompatProvider
+from ..ai.providers import (
+    GeminiProvider,
+    HybridProvider,
+    OllamaProvider,
+    OpenAICompatProvider,
+    WorkBuddyProvider,
+)
 from ..core.config import CopilotConfig
 from ..core.memory import MemoryManager
 from ..core.shortcuts import AutostartManager, ShortcutManager
@@ -44,6 +50,7 @@ class PreferencesDialog(Adw.PreferencesDialog):
         self.provider_model = Gtk.StringList.new([
             "Híbrido Inteligente (Gemini + Auto-Failover Local GPU)",
             "Google Gemini (Nuvem / AI Studio)",
+            "WorkBuddy AI (Tencent HY4 / Hunyuan)",
             "Ollama (100% Local Offline / RX 7600 GPU)",
             "OpenAI / Compatível (Groq, OpenRouter)",
         ])
@@ -97,6 +104,40 @@ class PreferencesDialog(Adw.PreferencesDialog):
         link_row.add_suffix(link_btn)
         self.gemini_group.add(link_row)
         page.add(self.gemini_group)
+
+        # ---------------------------------------------------------------------
+        # Grupo: WorkBuddy AI (Tencent HY4)
+        # ---------------------------------------------------------------------
+        self.workbuddy_group = Adw.PreferencesGroup(
+            title="Configuração do WorkBuddy AI",
+            description="Agente Tencent HY4 (Hunyuan MoE 770B) com raciocínio e visão multimodal.",
+        )
+        self.workbuddy_key_row = Adw.PasswordEntryRow(title="Chave de API (WorkBuddy ck_...)")
+        self.workbuddy_group.add(self.workbuddy_key_row)
+
+        self.workbuddy_models_list = [
+            "hy4-preview",
+            "default-model",
+            "primary-model",
+            "deep-model",
+            "fast-model",
+            "Outro (Personalizado)",
+        ]
+        self.workbuddy_model_row = Adw.ComboRow(
+            title="Modelo WorkBuddy",
+            subtitle="hy4-preview (Tencent HY4 MoE) ou selecione outro",
+            model=Gtk.StringList.new(self.workbuddy_models_list),
+        )
+        self.workbuddy_model_row.connect("notify::selected", self._on_workbuddy_model_changed)
+        self.workbuddy_group.add(self.workbuddy_model_row)
+
+        self.workbuddy_custom_model_row = Adw.EntryRow(title="Nome do Modelo Personalizado")
+        self.workbuddy_custom_model_row.set_visible(False)
+        self.workbuddy_group.add(self.workbuddy_custom_model_row)
+
+        self.workbuddy_url_row = Adw.EntryRow(title="URL Base da API (Endpoint v2)")
+        self.workbuddy_group.add(self.workbuddy_url_row)
+        page.add(self.workbuddy_group)
 
         # ---------------------------------------------------------------------
         # Grupo: Ollama (Local)
@@ -441,7 +482,7 @@ class PreferencesDialog(Adw.PreferencesDialog):
 
     def _load_values(self) -> None:
         # Define provedor ativo no ComboRow
-        prov_map = {"hybrid": 0, "gemini": 1, "ollama": 2, "openai": 3}
+        prov_map = {"hybrid": 0, "gemini": 1, "workbuddy": 2, "ollama": 3, "openai": 4}
         self.provider_row.set_selected(prov_map.get(self.config.provider, 0))
 
         # Gemini
@@ -455,6 +496,20 @@ class PreferencesDialog(Adw.PreferencesDialog):
             self.gemini_model_row.set_selected(custom_idx)
             self.gemini_custom_model_row.set_text(self.config.gemini_model)
             self.gemini_custom_model_row.set_visible(True)
+
+        # WorkBuddy
+        self.workbuddy_key_row.set_text(getattr(self.config, "workbuddy_api_key", ""))
+        wb_model = getattr(self.config, "workbuddy_model", "hy4-preview")
+        if wb_model in self.workbuddy_models_list[:-1]:
+            wb_idx = self.workbuddy_models_list.index(wb_model)
+            self.workbuddy_model_row.set_selected(wb_idx)
+            self.workbuddy_custom_model_row.set_visible(False)
+        else:
+            custom_wb_idx = len(self.workbuddy_models_list) - 1
+            self.workbuddy_model_row.set_selected(custom_wb_idx)
+            self.workbuddy_custom_model_row.set_text(wb_model)
+            self.workbuddy_custom_model_row.set_visible(True)
+        self.workbuddy_url_row.set_text(getattr(self.config, "workbuddy_url", "https://www.workbuddy.ai/v2"))
 
         # Ollama
         self.ollama_url_row.set_text(self.config.ollama_url)
@@ -522,6 +577,10 @@ class PreferencesDialog(Adw.PreferencesDialog):
         is_custom = self.gemini_model_row.get_selected() == len(self.gemini_models_list) - 1
         self.gemini_custom_model_row.set_visible(is_custom)
 
+    def _on_workbuddy_model_changed(self, *_args) -> None:
+        is_custom = self.workbuddy_model_row.get_selected() == len(self.workbuddy_models_list) - 1
+        self.workbuddy_custom_model_row.set_visible(is_custom)
+
     def _on_provider_changed(self, *_args) -> None:
         self._update_visibility()
 
@@ -529,16 +588,18 @@ class PreferencesDialog(Adw.PreferencesDialog):
         sel = self.provider_row.get_selected()
         # 0: Híbrido (exibe Gemini + Ollama para que o usuário veja ambas configurações)
         # 1: Gemini (apenas Gemini)
-        # 2: Ollama (apenas Ollama)
-        # 3: OpenAI (apenas OpenAI)
+        # 2: WorkBuddy (apenas WorkBuddy)
+        # 3: Ollama (apenas Ollama)
+        # 4: OpenAI (apenas OpenAI)
         self.gemini_group.set_visible(sel in (0, 1))
-        self.ollama_group.set_visible(sel in (0, 2))
-        self.openai_group.set_visible(sel == 3)
+        self.workbuddy_group.set_visible(sel == 2)
+        self.ollama_group.set_visible(sel in (0, 3))
+        self.openai_group.set_visible(sel == 4)
 
     def _collect_current_config(self) -> CopilotConfig:
         cfg = CopilotConfig()
         sel = self.provider_row.get_selected()
-        prov_rev = {0: "hybrid", 1: "gemini", 2: "ollama", 3: "openai"}
+        prov_rev = {0: "hybrid", 1: "gemini", 2: "workbuddy", 3: "ollama", 4: "openai"}
         cfg.provider = prov_rev.get(sel, "hybrid")
 
         # Gemini
@@ -550,6 +611,17 @@ class PreferencesDialog(Adw.PreferencesDialog):
             cfg.gemini_model = self.gemini_models_list[g_idx]
         else:
             cfg.gemini_model = "gemini-3.8-flash"
+
+        # WorkBuddy
+        cfg.workbuddy_api_key = self.workbuddy_key_row.get_text().strip()
+        wb_idx = self.workbuddy_model_row.get_selected()
+        if wb_idx == len(self.workbuddy_models_list) - 1:
+            cfg.workbuddy_model = self.workbuddy_custom_model_row.get_text().strip() or "hy4-preview"
+        elif wb_idx < len(self.workbuddy_models_list):
+            cfg.workbuddy_model = self.workbuddy_models_list[wb_idx]
+        else:
+            cfg.workbuddy_model = "hy4-preview"
+        cfg.workbuddy_url = self.workbuddy_url_row.get_text().strip() or "https://www.workbuddy.ai/v2"
 
         # Ollama
         cfg.ollama_url = self.ollama_url_row.get_text().strip() or "http://127.0.0.1:11434"
@@ -622,6 +694,8 @@ class PreferencesDialog(Adw.PreferencesDialog):
                 )
             elif cfg.provider == "gemini":
                 prov = GeminiProvider(cfg.gemini_api_key, cfg.gemini_model)
+            elif cfg.provider == "workbuddy":
+                prov = WorkBuddyProvider(cfg.workbuddy_api_key, cfg.workbuddy_model, cfg.workbuddy_url)
             elif cfg.provider == "ollama":
                 prov = OllamaProvider(cfg.ollama_url, cfg.ollama_model, cfg.ollama_vision_model)
             else:

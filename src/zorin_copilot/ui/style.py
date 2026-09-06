@@ -24,23 +24,23 @@ GLASS_CSS = """
 @define-color accent_bg_color #15a6f0;
 @define-color accent_fg_color #ffffff;
 
-/* --- Janela Principal Translúcida (Equilíbrio entre vidro e legibilidade) --- */
+/* --- Janela Principal Sólida e Limpa (Zero vazamento de textos do fundo) --- */
 window.glass-window,
 window.glass-window.background,
 window.glass-window > contents {
-    background-color: alpha(@window_bg_color, 0.96);
+    background-color: @window_bg_color;
 }
 
 window.light-glass,
 window.light-glass.background,
 window.light-glass > contents {
-    background-color: rgba(245, 247, 251, 0.96);
+    background-color: #f7f9fc;
 }
 
 window.dark-glass,
 window.dark-glass.background,
 window.dark-glass > contents {
-    background-color: rgba(20, 24, 33, 0.96);
+    background-color: #141821;
 }
 
 /* --- Unificação e Blindagem de Cores dos Ícones (Monocromático Neutro) --- */
@@ -236,8 +236,8 @@ window.light-glass .glass-entry,
 
 window.light-glass .glass-entry:focus-within {
     background-color: #ffffff;
-    border: 1px solid #15a6f0;
-    box-shadow: 0 0 0 2px rgba(21, 166, 240, 0.28), 0 2px 10px rgba(21, 166, 240, 0.12);
+    border: 1.5px solid #15a6f0;
+    box-shadow: 0 2px 10px rgba(18, 51, 84, 0.08), 0 0 0 1px rgba(21, 166, 240, 0.20);
     color: #123354;
 }
 
@@ -250,8 +250,8 @@ window.dark-glass .glass-entry {
 
 window.dark-glass .glass-entry:focus-within {
     background-color: rgba(36, 44, 58, 0.96);
-    border: 1px solid #62a0ea;
-    box-shadow: 0 0 0 2px rgba(98, 160, 234, 0.32), 0 2px 10px rgba(0, 0, 0, 0.4);
+    border: 1.5px solid #62a0ea;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(98, 160, 234, 0.25);
     color: #ffffff;
 }
 
@@ -274,6 +274,34 @@ window.dark-glass .glass-entry:focus-within {
 
 .glass-submit-btn:active {
     background-color: #0c7eb9;
+}
+
+/* --- Emblema Central de Boas-vindas (Hero AI Sparkle Badge) --- */
+.welcome-avatar-badge {
+    border-radius: 9999px;
+    padding: 14px;
+    margin-bottom: 6px;
+    transition: all 180ms ease;
+}
+
+window.light-glass .welcome-avatar-badge {
+    background: linear-gradient(135deg, rgba(21, 166, 240, 0.14) 0%, rgba(13, 143, 209, 0.24) 100%);
+    border: 1.5px solid rgba(21, 166, 240, 0.32);
+    box-shadow: 0 4px 16px rgba(21, 166, 240, 0.14);
+}
+
+window.light-glass .welcome-avatar-badge image {
+    color: #0d8fd1;
+}
+
+window.dark-glass .welcome-avatar-badge {
+    background: linear-gradient(135deg, rgba(21, 166, 240, 0.22) 0%, rgba(98, 160, 234, 0.34) 100%);
+    border: 1.5px solid rgba(98, 160, 234, 0.45);
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35), 0 0 16px rgba(21, 166, 240, 0.18);
+}
+
+window.dark-glass .welcome-avatar-badge image {
+    color: #78aeed;
 }
 
 /* --- Títulos da Tela Inicial --- */
@@ -500,6 +528,15 @@ window.dark-glass .sidebar-chat-row.active {
     border-left: 3px solid #62a0ea;
 }
 
+.sidebar-chat-row .sidebar-del-btn {
+    opacity: 0.20;
+    transition: opacity 160ms ease;
+}
+
+.sidebar-chat-row:hover .sidebar-del-btn {
+    opacity: 1.0;
+}
+
 /* --- Bolha de Mensagem do Usuário (Estilo Gemini) --- */
 .user-chat-bubble {
     border-radius: 18px 18px 4px 18px;
@@ -539,38 +576,45 @@ window.dark-glass .assistant-message-card {
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
 }
 
-/* --- Barra de Entrada Inferior (Estilo Gemini) --- */
+/* --- Barra de Entrada (Estilo Gemini / Zorin Native) --- */
 .prompt-bar-card {
     border-radius: 28px;
-    padding: 4px 8px 4px 12px;
+    padding: 4px 8px 4px 14px;
     transition: all 180ms ease;
 }
 
 window.light-glass .prompt-bar-card {
-    background-color: rgba(255, 255, 255, 0.96);
-    border: 1px solid rgba(18, 51, 84, 0.14);
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.06), inset 0 1px 0 rgba(255, 255, 255, 0.95);
+    background-color: rgba(255, 255, 255, 0.94);
+    border: 1px solid rgba(18, 51, 84, 0.11);
+    box-shadow: 0 4px 20px rgba(18, 51, 84, 0.05), inset 0 1px 0 rgba(255, 255, 255, 0.98);
 }
 
 window.light-glass .prompt-bar-card:focus-within {
-    border: 1px solid #15a6f0;
-    box-shadow: 0 0 0 2px rgba(21, 166, 240, 0.25), 0 4px 20px rgba(21, 166, 240, 0.12);
+    background-color: #ffffff;
+    border: 1.5px solid #15a6f0;
+    box-shadow: 0 6px 20px rgba(18, 51, 84, 0.08), 0 0 0 1px rgba(21, 166, 240, 0.20);
 }
 
 window.dark-glass .prompt-bar-card {
-    background-color: rgba(32, 38, 50, 0.94);
-    border: 1px solid rgba(255, 255, 255, 0.14);
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    background-color: rgba(30, 36, 48, 0.92);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.07);
 }
 
 window.dark-glass .prompt-bar-card:focus-within {
-    border: 1px solid #62a0ea;
-    box-shadow: 0 0 0 2px rgba(98, 160, 234, 0.30), 0 4px 20px rgba(0, 0, 0, 0.4);
+    background-color: rgba(36, 44, 58, 0.96);
+    border: 1.5px solid #62a0ea;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(98, 160, 234, 0.25);
 }
 
-.prompt-bar-card entry {
+.prompt-bar-card entry,
+.prompt-bar-card entry > text,
+.prompt-bar-card entry:focus,
+.prompt-bar-card entry:focus-within {
+    background: transparent;
     background-color: transparent;
     border: none;
+    outline: none;
     box-shadow: none;
     padding: 6px 8px;
     font-size: 14px;

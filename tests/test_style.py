@@ -45,6 +45,16 @@ class GlassmorphismStyleTest(unittest.TestCase):
         self.assertIn("@define-color accent_color #15a6f0;", GLASS_CSS)
         self.assertIn("@define-color accent_bg_color #15a6f0;", GLASS_CSS)
 
+    def test_welcome_avatar_badge_defined(self):
+        """Garante que a classe de emblema heroico de IA está declarada no CSS."""
+        self.assertIn(".welcome-avatar-badge", GLASS_CSS)
+        self.assertIn("border-radius: 9999px;", GLASS_CSS)
+
+    def test_calibrated_prompt_bar_glow_defined(self):
+        """Garante que a barra de entrada usa iluminação calibrada e borda refinada."""
+        self.assertIn(".prompt-bar-card:focus-within", GLASS_CSS)
+        self.assertIn("border: 1.5px solid #15a6f0;", GLASS_CSS)
+
 
 if __name__ == "__main__":
     unittest.main()

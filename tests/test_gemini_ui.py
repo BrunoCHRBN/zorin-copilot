@@ -180,6 +180,21 @@ class GeminiUILayoutTest(unittest.TestCase):
             self.assertIsNotNone(row)
             self.assertIsInstance(row, Adw.ActionRow)
 
+    def test_centered_input_slot_on_empty_chat(self):
+        """Garante que a barra de entrada fica no centro no estado vazio da conversa."""
+        self.win._rebuild_chat_stream()
+        self.assertTrue(self.win.welcome_box.get_visible())
+        self.assertFalse(self.win.clamp_bottom.get_visible())
+        self.assertEqual(self.win.input_cluster.get_parent(), self.win.center_input_slot)
+
+    def test_docked_input_slot_when_conversation_has_turns(self):
+        """Garante que a barra de entrada migra para o rodapé quando há mensagens."""
+        self.win.session.record_turn("Como usar Docker?", "Use docker run.")
+        self.win._rebuild_chat_stream()
+        self.assertFalse(self.win.welcome_box.get_visible())
+        self.assertTrue(self.win.clamp_bottom.get_visible())
+        self.assertEqual(self.win.input_cluster.get_parent(), self.win.bottom_input_slot)
+
 
 if __name__ == "__main__":
     unittest.main()

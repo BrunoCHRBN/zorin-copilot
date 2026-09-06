@@ -558,6 +558,142 @@ class OpenAICompatProvider(BaseLLMProvider):
             return f"Erro na requisição: {exc}", []
 
 
+class WorkBuddyProvider(BaseLLMProvider):
+    """Provedor oficial WorkBuddy AI / Tencent Hunyuan (Tencent HY4 MoE)."""
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "hy4-preview",
+        api_url: str = "https://www.workbuddy.ai/v2",
+    ):
+        self.api_key = api_key.strip()
+        self.model = model.strip() or "hy4-preview"
+        self.api_url = api_url.rstrip("/")
+
+    def is_configured(self) -> bool:
+        return bool(self.api_url and self.api_key)
+
+    def test_connection(self) -> tuple[bool, str]:
+        if not self.is_configured():
+            return False, "Chave de API do WorkBuddy AI não informada."
+
+        url = f"{self.api_url}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        # O endpoint do WorkBuddy exige stream: true e primeiro item como system prompt
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": "Você é um verificador de conectividade. Responda OK."},
+                {"role": "user", "content": "ping"},
+            ],
+            "stream": True,
+        }
+        try:
+            resp = requests.post(url, headers=headers, json=payload, stream=True, timeout=12)
+            if resp.status_code == 200:
+                return True, f"Conexão com WorkBuddy AI ({self.model}) bem-sucedida!"
+            err_msg = resp.text[:180]
+            return False, f"Erro no WorkBuddy AI ({resp.status_code}): {err_msg}"
+        except Exception as exc:
+            return False, f"Falha ao conectar com WorkBuddy AI: {exc}"
+
+    def chat(
+        self,
+        prompt: str,
+        app_list: list[str] | None = None,
+        context_summary: str | None = None,
+        history: list[dict[str, str]] | None = None,
+        image_bytes: bytes | None = None,
+        image_mime: str = "image/jpeg",
+    ) -> tuple[str, list[DesktopAction]]:
+        if not self.is_configured():
+            return "Chave de API do WorkBuddy AI não configurada.", []
+
+        url = f"{self.api_url}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+
+        sys_instruction = SYSTEM_PROMPT
+        if context_summary:
+            sys_instruction += f"\n\n{context_summary}"
+        if app_list:
+            sys_instruction += f"\n\nAplicativos disponíveis no sistema:\n{', '.join(app_list[:30])}"
+
+        # WorkBuddy exige estritamente que a primeira mensagem seja role: 'system'
+        messages: list[dict[str, Any]] = [{"role": "system", "content": sys_instruction}]
+
+        if history:
+            for turn in history[-10:]:
+                r = turn.get("role", "user")
+                c = turn.get("content", "")
+                if r in ("user", "assistant") and c:
+                    messages.append({"role": r, "content": c})
+
+        if image_bytes:
+            import base64
+            b64_img = base64.b64encode(image_bytes).decode("utf-8")
+            messages.append({
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{image_mime};base64,{b64_img}"},
+                    },
+                ],
+            })
+        else:
+            messages.append({"role": "user", "content": prompt})
+
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "stream": True,
+        }
+
+        timeout_sec = 120 if image_bytes else 90
+        try:
+            resp = requests.post(url, headers=headers, json=payload, stream=True, timeout=timeout_sec)
+            if resp.status_code != 200:
+                err_text = resp.text[:200]
+                return f"Erro no WorkBuddy AI ({resp.status_code}): {err_text}", []
+
+            collected_tokens: list[str] = []
+            try:
+                for line in resp.iter_lines():
+                    if not line:
+                        continue
+                    txt = line.decode("utf-8", errors="replace")
+                    if txt.startswith("data: "):
+                        chunk_str = txt[6:].strip()
+                        if chunk_str == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(chunk_str)
+                            delta = chunk.get("choices", [{}])[0].get("delta", {})
+                            part = delta.get("content", "")
+                            if part:
+                                collected_tokens.append(part)
+                        except Exception:
+                            pass
+            except Exception as stream_err:
+                logger.warning(f"Aviso na transmissão da stream do WorkBuddy: {stream_err}")
+
+            raw_text = "".join(collected_tokens)
+            if not raw_text.strip():
+                return "O WorkBuddy AI não retornou conteúdo na resposta.", []
+
+            return self.parse_response_payload(raw_text)
+        except Exception as exc:
+            return f"Erro na comunicação com WorkBuddy AI: {exc}", []
+
+
 class HybridProvider(BaseLLMProvider):
     """Provedor híbrido inteligente: Google Gemini primário com auto-failover instantâneo para Ollama local."""
 
@@ -675,6 +811,12 @@ def get_llm_provider(config: CopilotConfig) -> BaseLLMProvider:
 
     if config.provider == "ollama":
         return ollama_prov
+    if config.provider == "workbuddy":
+        return WorkBuddyProvider(
+            api_key=config.workbuddy_api_key,
+            model=getattr(config, "workbuddy_model", "hy4-preview"),
+            api_url=getattr(config, "workbuddy_url", "https://www.workbuddy.ai/v2"),
+        )
     if config.provider == "openai":
         return OpenAICompatProvider(
             api_url=config.openai_url,

@@ -23,7 +23,10 @@ import wave
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-import numpy as np
+try:
+    import numpy as np
+except ImportError:
+    np = None
 
 from ..core.config import CopilotConfig
 from .actions import ActionPlan, ActionType, DesktopAction
@@ -398,7 +401,11 @@ class LocalVoiceTranscriber:
 
         try:
             # Converte bytes int16 para array numpy float32 normalizado (-1.0 a 1.0)
-            audio_f32 = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+            if np is not None:
+                audio_f32 = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+            else:
+                import array
+                audio_f32 = [x / 32768.0 for x in array.array("h", pcm_bytes)]
 
             segments, _info = self._model.transcribe(
                 audio_f32,

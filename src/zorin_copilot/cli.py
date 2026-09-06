@@ -47,7 +47,9 @@ def build_parser() -> argparse.ArgumentParser:
     config_cmd.add_argument("--show", action="store_true", help="exibe configuração atual")
     config_cmd.add_argument("--set-gemini-key", help="define a chave de API do Gemini")
     config_cmd.add_argument("--set-gemini-model", help="define o modelo Gemini (ex: gemini-3.8-flash, gemini-3.6-flash)")
-    config_cmd.add_argument("--set-provider", choices=["gemini", "ollama", "openai"], help="define o provedor ativo")
+    config_cmd.add_argument("--set-workbuddy-key", help="define a chave de API do WorkBuddy AI / Tencent HY4")
+    config_cmd.add_argument("--set-workbuddy-model", help="define o modelo WorkBuddy (ex: hy4-preview)")
+    config_cmd.add_argument("--set-provider", choices=["gemini", "ollama", "openai", "workbuddy"], help="define o provedor ativo")
 
     # memory
     memory_cmd = sub.add_parser("memory", help="gerencia a base de conhecimento e histórico de execuções")
@@ -263,6 +265,16 @@ def cmd_config(args: argparse.Namespace) -> int:
         changed = True
         print(f"Modelo Gemini alterado para '{args.set_gemini_model}'.")
 
+    if args.set_workbuddy_key:
+        cfg.workbuddy_api_key = args.set_workbuddy_key
+        changed = True
+        print("Chave WorkBuddy atualizada.")
+
+    if args.set_workbuddy_model:
+        cfg.workbuddy_model = args.set_workbuddy_model
+        changed = True
+        print(f"Modelo WorkBuddy alterado para '{args.set_workbuddy_model}'.")
+
     if args.set_provider:
         cfg.provider = args.set_provider
         changed = True
@@ -277,6 +289,8 @@ def cmd_config(args: argparse.Namespace) -> int:
         print(f"  Provedor ativo: {cfg.provider}")
         print(f"  Gemini Configurado: {'Sim' if bool(cfg.gemini_api_key) else 'Não'}")
         print(f"  Gemini Modelo: {cfg.gemini_model}")
+        print(f"  WorkBuddy Configurado: {'Sim' if bool(cfg.workbuddy_api_key) else 'Não'}")
+        print(f"  WorkBuddy Modelo: {cfg.workbuddy_model}")
         print(f"  Ollama URL: {cfg.ollama_url} (Modelo: {cfg.ollama_model})")
         print(f"  Arquivo: {cfg.config_file()}")
 

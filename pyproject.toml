@@ -32,6 +32,7 @@ dependencies = [
 [project.scripts]
 zorin-copilot = "zorin_copilot.ui.app:main"
 zorin-copilot-cli = "zorin_copilot.cli:main"
+hy4 = "zorin_copilot.hy4:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
