@@ -68,6 +68,7 @@ python3 -m unittest discover -s tests
 |---|---|
 | `Ctrl+K` | Painel de comandos (busca difusa sobre tudo que o app faz) |
 | `Ctrl+S` | Exportar a conversa como Markdown |
+| `Ctrl+Z` | Desfazer a última ação reversível |
 | `Ctrl+N` | Nova conversa |
 | `Ctrl+H` | Mostrar/ocultar a barra de conversas |
 | `Ctrl+P` | Fixar a conversa atual no topo |
@@ -75,8 +76,35 @@ python3 -m unittest discover -s tests
 | `Ctrl+Q` | Sair |
 
 O painel de comandos também tem um botão de lupa no canto superior esquerdo.
-Com o foco num campo de texto, `Ctrl+K` continua sendo o atalho de edição do GTK
-(apagar até o fim da linha) — o app não rouba a combinação.
+Com o foco num campo de texto, `Ctrl+K` e `Ctrl+Z` continuam sendo os atalhos de
+edição do GTK — o app não rouba a combinação.
+
+---
+
+## ↩️ Desfazendo ações
+
+O Copilot executa ações no desktop, e parte delas mexe nos seus arquivos. Essas
+têm volta: depois de executar, aparece um toast com **Desfazer**, e o `Ctrl+Z`
+(ou o painel de comandos) desfaz a última ação reversível a qualquer momento —
+as últimas 5 ficam na pilha.
+
+| Ação | Desfazer |
+|---|---|
+| Salvar/escrever arquivo | Restaura o conteúdo anterior; se o arquivo foi criado pela ação, é removido. Em modo *append*, volta ao tamanho anterior. |
+| Organizar pasta | Devolve cada arquivo à pasta de origem e remove as pastas de categoria que ficaram vazias. |
+
+**O que não entra na pilha, e por que:** clique, digitação, abrir aplicativo,
+abrir URL, controle de mídia e execução de comando mexem em estado de terceiros.
+Prometer desfazer isso seria uma promessa falsa — é melhor não oferecer do que
+oferecer e falhar. A linha da ação mostra **Desfeito ↩** quando você desfaz,
+para não ficar marcada como “Executado”.
+
+Casos em que o desfazer avisa em vez de prometer:
+
+- o arquivo foi movido ou apagado por você depois da ação (a mensagem diz quais
+  não foram encontrados e quantos voltaram);
+- o arquivo original era binário, ou maior que 1 MB — restaurar por texto
+  corromperia o conteúdo, então a ação acontece sem snapshot.
 
 ---
 
