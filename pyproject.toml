@@ -33,3 +33,7 @@ zorin-copilot-cli = "zorin_copilot.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# A folha de estilo precisa viajar dentro do pacote, senão o app sobe sem tema.
+[tool.setuptools.package-data]
+"zorin_copilot.data" = ["*.css"]
