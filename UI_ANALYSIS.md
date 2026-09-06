@@ -174,6 +174,13 @@ Economiza scroll e deixa óbvio que são mutuamente exclusivos. A flag `_update_
 
 **Sugestão:** mover para `data/zorin-copilot.css` carregado de `/usr/share/zorin-copilot/` (system) e `~/.config/zorin-copilot/user.css` (override). Suporte a `@import` no GTK4 já existe.
 
+> **Status: RESOLVIDO (Sprint 3).** O CSS agora vive em
+> `src/zorin_copilot/data/zorin-copilot.css` e é carregado via
+> `importlib.resources`. A cadeia de prioridade ficou:
+> embutido → `/usr/share/...` → `themes/*.css` (alfabética) → `user.css`.
+> Verificado que o arquivo entra no wheel (`pip wheel` + inspeção do zip) e que
+> o app sobe com overrides reais aplicados.
+
 ---
 
 ## 3. Ideias incrementais (nice-to-have)
@@ -221,10 +228,10 @@ Sprint 2 — CONCLUÍDO
   [x] Sidebar: ícones corretos no histórico (item 2.4) [debounce feito no Sprint 1]
   [x] Histórico rolável + cronômetro no live widget (item 2.5)
 
-Sprint 3 (2 semanas)
+Sprint 3 (2 semanas) — CONCLUÍDO
   [x] Feedback de falha em ações (item 2.8) — com bug de "falso sucesso" corrigido
   [x] Markdown renderer real (item 2.6) — renderer próprio, sem nova dependência
-  → Temas customizáveis (item 2.10)
+  [x] Temas customizáveis (item 2.10) — CSS extraído + cadeia de sobrescrita
 
 Backlog
   → Command palette, drag-and-drop, status bar, undo de ações
