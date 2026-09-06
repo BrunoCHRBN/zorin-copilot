@@ -67,6 +67,7 @@ python3 -m unittest discover -s tests
 | Atalho | Ação |
 |---|---|
 | `Ctrl+K` | Painel de comandos (busca difusa sobre tudo que o app faz) |
+| `Ctrl+S` | Exportar a conversa como Markdown |
 | `Ctrl+N` | Nova conversa |
 | `Ctrl+H` | Mostrar/ocultar a barra de conversas |
 | `Ctrl+P` | Fixar a conversa atual no topo |
@@ -76,6 +77,45 @@ python3 -m unittest discover -s tests
 O painel de comandos também tem um botão de lupa no canto superior esquerdo.
 Com o foco num campo de texto, `Ctrl+K` continua sendo o atalho de edição do GTK
 (apagar até o fim da linha) — o app não rouba a combinação.
+
+---
+
+## 📤 Exportando uma conversa
+
+`Ctrl+S` (ou "Exportar conversa (.md)" no painel de comandos) salva a conversa atual
+em Markdown, com frontmatter YAML pronto para Obsidian, Docusaurus ou Jekyll:
+
+```markdown
+---
+title: "Como listar arquivos grandes?"
+source: "zorin-copilot"
+topic_id: "2a9650a7681e"
+provider: "gemini"
+model: "gemini-flash-latest"
+turn_count: 2
+created_at: "2025-03-12T09:05:00"
+updated_at: "2025-03-12T14:22:10"
+exported_at: "2025-03-12T14:30:00"
+---
+
+# Como listar arquivos grandes?
+
+> Exportado do Zorin Copilot em 12/03/2025 14:30 · gemini · gemini-flash-latest
+
+## Você · 12/03/2025 09:05
+
+como listar arquivos grandes?
+
+## Copilot
+
+Use `find`: …
+
+---
+```
+
+As respostas são gravadas literalmente — blocos de código, tabelas e links chegam
+intactos ao arquivo. O nome sugerido é `<titulo>-<AAAA-MM-DD>.md`, com acentos
+removidos para evitar problemas ao compartilhar.
 
 ---
 

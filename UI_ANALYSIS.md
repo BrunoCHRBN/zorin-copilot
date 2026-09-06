@@ -190,7 +190,7 @@ Economiza scroll e deixa óbvio que são mutuamente exclusivos. A flag `_update_
 | 1 | **Command palette** (Ctrl+K) estilo VSCode, listando todos os comandos da app | 1 dia | Alto — descobribilidade | **FEITO** |
 | 2 | **Indicador de tokens consumidos** no badge do modelo (estilo Raycast) | 2h | Médio — usuários Pro adoram | |
 | 3 | **Drag-and-drop** de arquivos no chat (imagem, PDF, txt) → anexa como contexto | 1 dia | Alto | |
-| 4 | **Markdown export** da conversa (`⌘+S` ou botão) → `.md` bem formatado com frontmatter | 2h | Médio | |
+| 4 | **Markdown export** da conversa (`⌘+S` ou botão) → `.md` bem formatado com frontmatter | 2h | Médio | **FEITO** |
 | 5 | **Split view** para comparar 2 respostas lado a lado | 3 dias | Médio — útil pra debug | |
 | 6 | **Animação de "digitando..."** no user-bubble antes da resposta (estilo iMessage) | 4h | Baixo — cosmético | |
 | 7 | **Suporte a temas customizados** carregados de `~/.config/zorin-copilot/themes/*.css` | 2 dias | Médio | **FEITO** (item 2.10) |
@@ -234,8 +234,21 @@ Sprint 3 (2 semanas) — CONCLUÍDO
   [x] Temas customizáveis (item 2.10) — CSS extraído + cadeia de sobrescrita
 
 Backlog
-  → Command palette, drag-and-drop, status bar, undo de ações
+  [x] Command palette (Ctrl+K) — busca difusa sobre todos os comandos [PR #5]
+  [x] Exportar conversa em Markdown (Ctrl+S) — `core/export.py` + FileDialog
+  → drag-and-drop, status bar, undo de ações
 ```
+
+### Detalhe do backlog — exportação em Markdown
+
+| Decisão | Motivo |
+|---|---|
+| Módulo `core/export.py`, sem GTK | É uma função pura (sessão → texto). Testável sem display e reutilizável pela CLI. |
+| Frontmatter YAML | `title`/`provider`/`model`/`turn_count` tornam o arquivo indexável por Obsidian, Docusaurus e Jekyll sem pós-processamento. |
+| Respostas copiadas literalmente | O `ui/markdown.py` converte para Pango e perde informação (ex.: cerca de código). Exportar o *fonte* preserva blocos e tabelas. |
+| Inclui `_last_unpinned_turn` | O turno ainda não fixado aparece na tela; omiti-lo do arquivo seria um "furo" silencioso. A checagem é por identidade, não por `==`. |
+| `Gtk.FileDialog` assíncrono | O antigo `Gtk.FileChooserDialog` bloqueava o main loop; o novo usa o portal XDG e não trava a janela. |
+| Cancelar não gera toast | `GLib.Error` com `Gtk.DialogError.DISMISSED` é uma ação legítima do usuário, não falha. |
 
 ### Estrutura resultante dos Sprints 1 + 2
 
