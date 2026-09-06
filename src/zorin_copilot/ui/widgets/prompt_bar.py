@@ -17,6 +17,7 @@ from gi.repository import Gio, GLib, Gtk  # noqa: E402
 
 from ...ai.actions import ActionType
 from ...core.apps import AppManager
+from ...core.attachments import DEFAULT_QUESTION, compose_prompt
 from ...core.clipboard import ClipboardService
 from ...core.session import ChatTurn
 
@@ -73,6 +74,7 @@ class PromptBar:
         self.submit_btn: Gtk.Button
 
         self._build_app_preview()
+        self.container.append(ctx.attachment_bar.box)
         self.container.append(ctx.vision.preview_box)
         self._build_prompt_bar()
         self.container.append(self._build_disclaimer())
@@ -373,8 +375,9 @@ class PromptBar:
         text = ctx.entry.get_text().strip()
         active_img = getattr(ctx, "_active_image_bytes", None)
         active_is_area = getattr(ctx, "_active_image_is_area", False)
+        attachments = list(getattr(ctx, "attachments", None) or [])
 
-        if not text and not active_img:
+        if not text and not active_img and not attachments:
             return
         if ctx._is_busy:
             return
@@ -385,6 +388,10 @@ class PromptBar:
                 if active_is_area
                 else "Analise esta captura de tela."
             )
+        elif not text and attachments:
+            # Soltar um arquivo e mandar sem digitar nada é um caso comum;
+            # o prompt precisa de uma pergunta, mas a bolha do usuário também.
+            text = DEFAULT_QUESTION
 
         low = text.lower()
         if any(w in low for w in ["copiad", "copiei", "clipboard", "área de transferência", "area de transferencia"]):
@@ -415,10 +422,14 @@ class PromptBar:
         ctx.chat_stream.stream_box.append(ctx._pending_turn_box)
         ctx.chat_stream.scroll_to_bottom()
 
+        # O texto enviado à IA ganha o contexto dos anexos; o que fica no
+        # histórico (e na bolha do usuário) é só o que ele digitou.
+        engine_text = compose_prompt(text, attachments) if attachments else text
+
         def parse_thread():
             history = ctx.session.get_history_for_llm()
             plan = ctx.engine.parse(
-                text,
+                engine_text,
                 history=history,
                 image_bytes=active_img,
                 is_area_capture=active_is_area,
