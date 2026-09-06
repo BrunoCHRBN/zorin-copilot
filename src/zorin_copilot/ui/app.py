@@ -379,8 +379,8 @@ class CopilotWindow(Adw.ApplicationWindow):
             turn, plan=plan, image_bytes=image_bytes, is_pending=is_pending
         )
 
-    def _create_action_row(self, action):
-        return self.chat_stream.create_action_row(action)
+    def _create_action_row(self, action, turn=None, index=0):
+        return self.chat_stream.create_action_row(action, turn=turn, index=index)
 
     def _scroll_to_bottom(self) -> None:
         self.chat_stream.scroll_to_bottom()
@@ -525,22 +525,6 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.chat_stream.scroll_to_bottom()
         self.entry.grab_focus()
         return GLib.SOURCE_REMOVE
-
-    def _on_execute_all(self, _widget: Gtk.Widget) -> None:
-        if not self.current_plan:
-            return
-        prompt_text = self.entry.get_text().strip()
-        reports = self.executor.execute_plan(self.current_plan, dry_run=False)
-        for r in reports:
-            self.engine.memory.log_action(
-                prompt=prompt_text,
-                action_type=r.action.action_type.value,
-                target=r.action.target,
-                params=r.action.params,
-                success=r.success,
-                message=r.message,
-            )
-        self.show_toast(" • ".join(r.message for r in reports))
 
     def _on_copy_answer(self, _btn: Gtk.Button) -> None:
         text = self._raw_answer_text or self.answer_label.get_text()

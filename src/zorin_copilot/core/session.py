@@ -17,12 +17,16 @@ class ChatTurn:
     prompt: str
     answer: str
     timestamp: float = field(default_factory=time.time)
+    # Identificador estável: permite associar resultados de execução a um turno
+    # específico mesmo depois de o fluxo de chat ser reconstruído do zero.
+    id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     def to_dict(self) -> dict:
         return {
             "prompt": self.prompt,
             "answer": self.answer,
             "timestamp": self.timestamp,
+            "id": self.id,
         }
 
     @classmethod
@@ -31,6 +35,9 @@ class ChatTurn:
             prompt=data.get("prompt", ""),
             answer=data.get("answer", ""),
             timestamp=float(data.get("timestamp", time.time())),
+            # Turnos gravados antes deste campo existir recebem um id novo na
+            # leitura — aceitável, porque o registro de execução é em memória.
+            id=data.get("id") or uuid.uuid4().hex,
         )
 
 

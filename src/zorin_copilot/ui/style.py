@@ -428,6 +428,34 @@ window.dark-glass .glass-row {
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
 }
 
+/* --- Estado final de uma ação já executada (rastro de sucesso/falha) --- */
+.glass-row.action-done {
+    border-left: 3px solid #33d17a;
+}
+
+.glass-row.action-failed {
+    border-left: 3px solid #e01b24;
+}
+
+window.light-glass .glass-row.action-failed {
+    background-color: rgba(224, 27, 36, 0.07);
+}
+
+window.dark-glass .glass-row.action-failed {
+    background-color: rgba(224, 27, 36, 0.14);
+}
+
+/* Ícone de estado colorido explicitamente (não depende das classes de acento) */
+.glass-row.action-done image {
+    color: #33d17a;
+    margin-right: 2px;
+}
+
+.glass-row.action-failed image {
+    color: #e01b24;
+    margin-right: 2px;
+}
+
 /* --- Botão Circular de Ícone (Copiar Resposta, Configurações, etc.) --- */
 .glass-icon-btn {
     border-radius: 9999px;

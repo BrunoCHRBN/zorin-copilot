@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import html
 import re
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import gi
@@ -18,6 +19,7 @@ from gi.repository import Adw, Gdk, GLib, Gtk, Pango  # noqa: E402
 
 from ...ai.actions import ActionPlan, ActionType, DesktopAction
 from ...core.session import ChatTurn
+from ...shell.action_status import ActionOutcome, ActionOutcomeRegistry
 
 if TYPE_CHECKING:  # pragma: no cover - apenas para type checking
     from ..app import CopilotWindow
@@ -99,11 +101,23 @@ def get_action_icon(action: DesktopAction) -> str:
     return "system-run-symbolic"
 
 
+@dataclass
+class ActionRowHandle:
+    """Trio (linha, botão, chave) de uma ação proposta, para atualização após executar."""
+
+    row: "Adw.ActionRow"
+    button: "Gtk.Button"
+    action: DesktopAction
+    key: str | None
+
+
 class ChatStreamView:
     """Fluxo rolável de mensagens com tela de boas-vindas e ações executáveis."""
 
     def __init__(self, ctx: "CopilotWindow"):
         self.ctx = ctx
+
+        self.outcomes = ActionOutcomeRegistry()
 
         self.scrolled = Gtk.ScrolledWindow()
         self.scrolled.set_vexpand(True)
@@ -423,17 +437,22 @@ class ChatStreamView:
         acts_title.add_css_class("dim-label")
         acts_box.append(acts_title)
 
-        for act in executable:
-            acts_box.append(self.create_action_row(act))
+        handles = [self._create_action_handle(act, turn, i) for i, act in enumerate(executable)]
+        for handle in handles:
+            acts_box.append(handle.row)
 
         if len(executable) > 1:
-            acts_box.append(self._build_execute_all_button(plan, turn, len(executable)))
+            acts_box.append(self._build_execute_all_button(plan, turn, handles))
 
         assistant_card.append(acts_box)
 
-    def _build_execute_all_button(self, plan: ActionPlan, turn: ChatTurn, count: int) -> Gtk.Button:
+    def _build_execute_all_button(
+        self, plan: ActionPlan, turn: ChatTurn, handles: list[ActionRowHandle]
+    ) -> Gtk.Button:
+        """Botão único para executar o plano inteiro, com contagem honesta de falhas."""
         ctx = self.ctx
-        exec_all = Gtk.Button(label=f"Executar Todas as {count} Ações")
+        total = len(handles)
+        exec_all = Gtk.Button(label=f"Executar Todas as {total} Ações")
         exec_all.add_css_class("suggested-action")
         exec_all.add_css_class("pill")
         exec_all.set_halign(Gtk.Align.START)
@@ -443,17 +462,38 @@ class ChatStreamView:
             exec_all.set_sensitive(False)
             exec_all.set_label("Executando...")
             reports = ctx.executor.execute_plan(plan, dry_run=False)
-            for r in reports:
+
+            ok = 0
+            failed = 0
+            for report, handle in zip(reports, handles):
+                outcome = ActionOutcome.from_report(report)
+                if handle.key:
+                    self.outcomes.record(handle.key, outcome)
+                self._apply_outcome_to_row(handle.row, handle.button, outcome)
                 ctx.engine.memory.log_action(
                     prompt=turn.prompt,
-                    action_type=r.action.action_type.value,
-                    target=r.action.target,
-                    params=r.action.params,
-                    success=r.success,
-                    message=r.message,
+                    action_type=report.action.action_type.value,
+                    target=report.action.target,
+                    params=report.action.params,
+                    success=report.success,
+                    message=report.message,
                 )
-            exec_all.set_label("Todas Executadas ✓")
-            ctx.show_toast(f"✓ {len(reports)} ações executadas com sucesso!")
+                if report.success:
+                    ok += 1
+                else:
+                    failed += 1
+
+            skipped = total - len(reports)
+            exec_all.remove_css_class("suggested-action")
+            if failed:
+                exec_all.add_css_class("destructive-action")
+                exec_all.set_label(f"{ok} ok • {failed} falharam")
+                ctx.show_toast(f"⚠ {ok} ação(ões) executadas, {failed} falharam.")
+            else:
+                exec_all.add_css_class("flat")
+                suffix = f" ({skipped} interrompidas)" if skipped else ""
+                exec_all.set_label(f"Todas executadas ✓ ({ok}){suffix}")
+                ctx.show_toast(f"✓ {ok} ações executadas com sucesso!")
 
         exec_all.connect("clicked", on_exec_all)
         return exec_all
@@ -461,8 +501,27 @@ class ChatStreamView:
     # ------------------------------------------------------------------
     # Linhas de ação proposta
     # ------------------------------------------------------------------
-    def create_action_row(self, action: DesktopAction) -> Gtk.Widget:
+    def create_action_row(
+        self,
+        action: DesktopAction,
+        turn: ChatTurn | None = None,
+        index: int = 0,
+    ) -> Gtk.Widget:
         """Renderiza uma linha de ação proposta com ícone semântico e botão de execução."""
+        return self._create_action_handle(action, turn, index).row
+
+    def _create_action_handle(
+        self,
+        action: DesktopAction,
+        turn: ChatTurn | None,
+        index: int,
+    ) -> ActionRowHandle:
+        """Monta a linha e devolve também o botão e a chave, para atualização posterior.
+
+        Se a ação já foi executada — nesta sessão ou em uma reconstrução do fluxo —
+        a linha nasce direto no estado final, com a mensagem de sucesso ou de falha
+        visível. Uma falha não pode simplesmente desaparecer do histórico.
+        """
         badge_desc = {
             ActionType.LAUNCH_APP: "abrir aplicativo",
             ActionType.OPEN_URL: "abrir link web",
@@ -481,13 +540,24 @@ class ChatStreamView:
         row.add_css_class("card")
         row.add_css_class("glass-row")
 
-        icon_name = (
-            "camera-photo-symbolic"
-            if action.action_type == ActionType.CAPTURE_SCREEN
-            else get_action_icon(action)
+        key = (
+            ActionOutcomeRegistry.make_key(turn.id, index, action)
+            if turn is not None
+            else None
         )
+        outcome = self.outcomes.get(key) if key else None
+
+        if outcome is not None:
+            icon_name = "emblem-ok-symbolic" if outcome.success else "dialog-error-symbolic"
+        elif action.action_type == ActionType.CAPTURE_SCREEN:
+            icon_name = "camera-photo-symbolic"
+        else:
+            icon_name = get_action_icon(action)
+
         prefix_icon = Gtk.Image.new_from_icon_name(icon_name)
         prefix_icon.set_pixel_size(20)
+        if outcome is not None:
+            prefix_icon.add_css_class("success" if outcome.success else "error")
         row.add_prefix(prefix_icon)
 
         exec_btn = Gtk.Button(label=exec_label)
@@ -502,10 +572,43 @@ class ChatStreamView:
                 lambda _, a=is_area_target: self.ctx._start_screen_capture(interactive=a),
             )
         else:
-            exec_btn.connect("clicked", self._make_exec_handler(action, exec_btn))
+            exec_btn.connect(
+                "clicked",
+                self._make_exec_handler(action, exec_btn, turn=turn, index=index, row=row),
+            )
+
+        if outcome is not None:
+            self._apply_outcome_to_row(row, exec_btn, outcome)
 
         row.add_suffix(exec_btn)
-        return row
+        return ActionRowHandle(row=row, button=exec_btn, action=action, key=key)
+
+    def _apply_outcome_to_row(
+        self, row: Adw.ActionRow, btn: Gtk.Button, outcome: ActionOutcome
+    ) -> None:
+        """Pinta a linha com o resultado da execução e revela a mensagem recebida."""
+        btn.remove_css_class("suggested-action")
+        if outcome.success:
+            btn.add_css_class("flat")
+            btn.set_label("Executado ✓")
+            row.add_css_class("action-done")
+        else:
+            # Falha continua clicável: o botão vira "Tentar novamente".
+            btn.add_css_class("destructive-action")
+            btn.set_label("Tentar novamente")
+            btn.set_sensitive(True)
+            row.add_css_class("action-failed")
+
+        # Guarda o subtítulo original para que novas tentativas não empilhem linhas.
+        base = getattr(row, "_zc_base_subtitle", None)
+        if base is None:
+            base = (row.get_subtitle() or "").rstrip()
+            row._zc_base_subtitle = base
+
+        detail = outcome.message if not row.get_use_markup() else html.escape(outcome.message)
+        prefix = "✓ " if outcome.success else "✗ "
+        row.set_subtitle(f"{base}\n{prefix}{detail}" if base else f"{prefix}{detail}")
+        row.set_subtitle_lines(3)
 
     def _build_action_row_content(self, action: DesktopAction, badge_desc: str):
         """Monta título/subtítulo específicos por tipo de ação e o rótulo do botão."""
@@ -564,9 +667,25 @@ class ChatStreamView:
         )
         return row, exec_label
 
-    def _make_exec_handler(self, action: DesktopAction, btn: Gtk.Button):
-        """Cria o handler de execução individual de uma ação proposta."""
+    def _make_exec_handler(
+        self,
+        action: DesktopAction,
+        btn: Gtk.Button,
+        turn: ChatTurn | None = None,
+        index: int = 0,
+        row: Adw.ActionRow | None = None,
+    ):
+        """Cria o handler de execução individual de uma ação proposta.
+
+        O resultado fica registrado em ``self.outcomes`` e visível na própria linha,
+        então a falha sobrevive tanto ao toast quanto a uma reconstrução do fluxo.
+        """
         ctx = self.ctx
+        key = (
+            ActionOutcomeRegistry.make_key(turn.id, index, action)
+            if turn is not None
+            else None
+        )
 
         def handler(_):
             btn.set_sensitive(False)
@@ -577,26 +696,27 @@ class ChatStreamView:
             )
             reports = ctx.executor.execute_plan(single_plan, dry_run=False)
             rep = reports[0] if reports else None
-            prompt_text = ctx.entry.get_text().strip()
 
-            if rep and rep.success:
-                btn.set_label("Executado ✓")
-                btn.remove_css_class("suggested-action")
-                btn.add_css_class("flat")
-                ctx.show_toast(f"✓ {rep.message}")
+            if rep is None:
+                outcome = ActionOutcome(success=False, message="O executor não retornou resultado.")
             else:
-                err = rep.message if rep else "Erro"
-                btn.set_label("Falha ✗")
-                ctx.show_toast(f"✗ {err}")
+                outcome = ActionOutcome.from_report(rep)
 
-            if rep:
-                ctx.engine.memory.log_action(
-                    prompt=prompt_text,
-                    action_type=action.action_type.value,
-                    target=action.target,
-                    params=action.params,
-                    success=rep.success,
-                    message=rep.message,
-                )
+            if key:
+                self.outcomes.record(key, outcome)
+
+            if row is not None:
+                self._apply_outcome_to_row(row, btn, outcome)
+
+            ctx.show_toast(f"{'✓' if outcome.success else '✗'} {outcome.message}")
+
+            ctx.engine.memory.log_action(
+                prompt=(turn.prompt if turn else "") or ctx.entry.get_text().strip(),
+                action_type=action.action_type.value,
+                target=action.target,
+                params=action.params,
+                success=outcome.success,
+                message=outcome.message,
+            )
 
         return handler
