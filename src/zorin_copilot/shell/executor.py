@@ -17,6 +17,11 @@ from ..core.clipboard import ClipboardService
 from ..core.files import FileManager
 from ..core.media import MediaPlayerManager
 from .system import SystemController
+from .undo import UndoStack
+
+#: Acima disso o conteúdo anterior não cabe em memória de forma razoável: a
+#: ação acontece, mas entra na pilha sem snapshot (sem promessa de desfazer).
+MAX_SNAPSHOT_BYTES = 1_000_000
 
 
 @dataclass
@@ -26,11 +31,115 @@ class ExecutionReport:
     message: str
 
 
+@dataclass(frozen=True)
+class FileSnapshot:
+    """Estado de um arquivo antes de ser escrito pelo Copilot."""
+
+    existed: bool
+    size: int
+    #: Vazio em modo append (basta truncar) ou quando o arquivo não existia.
+    content: str = ""
+
+
+def snapshot_file(path: str, append: bool) -> FileSnapshot | None:
+    """Fotografa o arquivo antes da escrita. `None` = não dá para desfazer."""
+    try:
+        if not os.path.exists(path):
+            return FileSnapshot(existed=False, size=0)
+
+        size = os.path.getsize(path)
+        if append:
+            # Só o tamanho importa: desfazer um append é truncar de volta.
+            return FileSnapshot(existed=True, size=size)
+
+        if size > MAX_SNAPSHOT_BYTES:
+            return None
+
+        with open(path, "rb") as handle:
+            raw = handle.read()
+        # Binário: restaurar por texto corromperia o arquivo. Melhor não prometer.
+        if b"\x00" in raw[:4096]:
+            return None
+        return FileSnapshot(existed=True, size=size, content=raw.decode("utf-8", "replace"))
+    except OSError:
+        return None
+
+
+def make_file_revert(path: str, snapshot: FileSnapshot):
+    """Devolve a função que desfaz uma escrita em `path`."""
+    name = os.path.basename(path)
+
+    def revert() -> tuple[bool, str]:
+        try:
+            if not snapshot.existed:
+                if os.path.exists(path):
+                    os.remove(path)
+                return True, f"Arquivo '{name}' criado pela ação foi removido."
+
+            if not os.path.exists(path):
+                return False, f"'{name}' não existe mais; não há o que restaurar."
+
+            if snapshot.content:
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write(snapshot.content)
+            else:
+                # Append desfeito, ou arquivo que já era vazio.
+                os.truncate(path, snapshot.size)
+            return True, f"Conteúdo anterior de '{name}' restaurado."
+        except OSError as exc:
+            return False, f"Falha ao desfazer: {exc}"
+
+    return revert
+
+
+def make_organize_revert(moves: Sequence[tuple[str, str]]):
+    """Devolve a função que devolve cada arquivo à pasta de origem."""
+    pairs = list(moves)
+
+    def revert() -> tuple[bool, str]:
+        restored = 0
+        missing: list[str] = []
+        for source, destination in reversed(pairs):
+            if not os.path.exists(destination):
+                missing.append(os.path.basename(source))
+                continue
+            try:
+                os.makedirs(os.path.dirname(source), exist_ok=True)
+                shutil.move(destination, source)
+                restored += 1
+            except OSError:
+                missing.append(os.path.basename(source))
+
+        # Pastas de categoria criadas pela organização e agora vazias são lixo.
+        for _source, destination in pairs:
+            folder = os.path.dirname(destination)
+            try:
+                if os.path.isdir(folder) and not os.listdir(folder):
+                    os.rmdir(folder)
+            except OSError:
+                pass
+
+        if missing:
+            shown = ", ".join(missing[:3]) + ("…" if len(missing) > 3 else "")
+            return False, (
+                f"{restored} arquivo(s) voltaram ao lugar; "
+                f"{len(missing)} não foram encontrados ({shown})."
+            )
+        return True, f"{restored} arquivo(s) voltaram ao lugar."
+
+    return revert
+
+
 class ActionExecutor:
     """Executa ações concretas no ambiente de desktop Zorin/GNOME."""
 
-    def __init__(self, inspector: DesktopInspector | None = None):
+    def __init__(
+        self,
+        inspector: DesktopInspector | None = None,
+        undo_stack: UndoStack | None = None,
+    ):
         self.inspector = inspector or DesktopInspector()
+        self.undo_stack = undo_stack or UndoStack()
 
     def execute_plan(
         self, plan: ActionPlan, dry_run: bool = False
@@ -296,14 +405,35 @@ class ActionExecutor:
         content = action.params.get("content", "")
         directory = action.params.get("directory")
         append = bool(action.params.get("append", False))
+
+        # Fotografa antes: depois da escrita o conteúdo anterior já era.
+        path = FileManager.resolve_target_path(filename, directory)
+        snapshot = snapshot_file(path, append)
+
         ok, msg, _ = FileManager.write_document(
             filename=filename, content=content, directory=directory, append=append
         )
+        if ok and snapshot is not None:
+            self.undo_stack.push(
+                label=f"Salvar '{os.path.basename(path)}'",
+                revert=make_file_revert(path, snapshot),
+                action_type=ActionType.WRITE_FILE.value,
+            )
         return ExecutionReport(action=action, success=ok, message=msg)
 
     def _organize_files(self, action: DesktopAction) -> ExecutionReport:
         directory = action.params.get("directory") or action.target or "~/Downloads"
         dry_run = bool(action.params.get("dry_run", False))
-        ok, msg, _ = FileManager.organize_directory(directory=directory, dry_run=dry_run)
+        moves: list[tuple[str, str]] = []
+        ok, msg, _ = FileManager.organize_directory(
+            directory=directory, dry_run=dry_run, moves=moves
+        )
+        if ok and moves:
+            folder = os.path.basename(os.path.expanduser(directory).rstrip("/")) or directory
+            self.undo_stack.push(
+                label=f"Organizar '{folder}' ({len(moves)} arquivo{'s' if len(moves) > 1 else ''})",
+                revert=make_organize_revert(moves),
+                action_type=ActionType.ORGANIZE_FILES.value,
+            )
         return ExecutionReport(action=action, success=ok, message=msg)
 

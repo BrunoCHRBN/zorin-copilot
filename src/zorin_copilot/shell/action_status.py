@@ -23,6 +23,9 @@ class ActionOutcome:
     success: bool
     message: str
     timestamp: float = field(default_factory=time.time)
+    #: A ação foi executada e depois revertida pelo usuário. Não é sucesso nem
+    #: falha — é um terceiro estado, e a linha precisa mostrá-lo.
+    undone: bool = False
 
     @classmethod
     def from_report(cls, report: ExecutionReport) -> ActionOutcome:

@@ -38,7 +38,9 @@ from ..core.fence import ScreenFenceManager
 from ..core.rag import LocalDocumentRAG
 from ..core.session import TopicSession
 from ..core.shortcuts import APP_SHORTCUTS, ShortcutManager
-from ..shell.executor import ActionExecutor
+from ..shell.action_status import ActionOutcome
+from ..shell.executor import ActionExecutor, ExecutionReport
+from ..shell.undo import UndoEntry
 from .live_view import LiveVoiceWidget
 from .preferences import PreferencesDialog
 from .style import setup_glass_window
@@ -224,6 +226,7 @@ class CopilotWindow(Adw.ApplicationWindow):
             "app.toggle-pin": self._on_toggle_pin,
             "app.command-palette": self._open_command_palette,
             "app.export-conversation": self.export_conversation,
+            "app.undo-action": self._on_undo_shortcut,
         }
 
         controller = Gtk.ShortcutController()
@@ -393,6 +396,17 @@ class CopilotWindow(Adw.ApplicationWindow):
         ]
 
         # Só aparece quando faz sentido: comando que não tem efeito polui a busca.
+        undo_stack = getattr(self.executor, "undo_stack", None)
+        undo_entry = undo_stack.peek() if undo_stack is not None else None
+        if undo_entry is not None:
+            commands.append(
+                PaletteCommand(
+                    "app.undo-action", f"Desfazer: {undo_entry.label}",
+                    "Reverte a última ação reversível",
+                    "edit-undo-symbolic", acc("app.undo-action"),
+                    ("desfazer", "voltar", "undo", "ctrl+z"),
+                )
+            )
         if self.attachments:
             commands.append(
                 PaletteCommand(
@@ -415,6 +429,7 @@ class CopilotWindow(Adw.ApplicationWindow):
             "app.toggle-dark-mode": lambda: self._trigger_prompt("ativar modo escuro"),
             "app.copy-answer": self._on_copy_answer,
             "app.export-conversation": self.export_conversation,
+            "app.undo-action": self.undo_last_action,
             "app.clear-attachments": self.clear_attachments,
             "app.open-settings": self._open_settings,
             "app.clear-history": self.sidebar.clear_history,
@@ -719,6 +734,73 @@ class CopilotWindow(Adw.ApplicationWindow):
         from ..core.clipboard import ClipboardService
         if ClipboardService.set_text(ocr_text):
             self.show_toast("Texto copiado para a área de transferência!")
+
+    # ------------------------------------------------------------------
+    # Desfazer ações (Ctrl+Z)
+    # ------------------------------------------------------------------
+    def execute_plan_with_undo(
+        self,
+        plan: ActionPlan,
+        *,
+        ui_key: str | None = None,
+        on_undone=None,
+    ) -> list[ExecutionReport]:
+        """Executa o plano e oferece desfazer se alguma ação for reversível.
+
+        Compara o topo da pilha por identidade, não por tamanho: com a pilha
+        cheia um `push` descarta a mais antiga e o tamanho não muda.
+        """
+        stack = getattr(self.executor, "undo_stack", None)
+        if stack is None:
+            # Executor sem suporte a desfazer (ou substituído por um duplo em
+            # teste): executa normalmente, só não oferece o botão.
+            return self.executor.execute_plan(plan, dry_run=False)
+
+        top_before = stack.peek()
+        reports = self.executor.execute_plan(plan, dry_run=False)
+        top_after = stack.peek()
+
+        if top_after is not None and top_after is not top_before:
+            top_after.ui_key = ui_key
+            top_after.on_undone = on_undone
+            self._offer_undo(top_after)
+        return reports
+
+    def _offer_undo(self, entry: UndoEntry) -> None:
+        """Toast com botão "Desfazer" — o jeito GTK de não interromper o fluxo."""
+        toast = Adw.Toast.new(f"✓ {entry.label}")
+        toast.set_button_label("Desfazer")
+        # Mais tempo que o padrão: decidir se quer desfazer leva alguns segundos.
+        toast.set_timeout(10)
+        toast.connect("button-clicked", lambda *_: self.undo_last_action())
+        self.toast_overlay.add_toast(toast)
+
+    def undo_last_action(self, *_args) -> None:
+        """Reverte a ação reversível mais recente e avisa o resultado."""
+        stack = getattr(self.executor, "undo_stack", None)
+        if stack is None or not len(stack):
+            self.show_toast("Nada para desfazer.")
+            return
+
+        ok, message, entry = stack.undo()
+        if entry is not None and entry.ui_key and entry.on_undone is None:
+            # Sem hook de repintura, o histórico ainda assim fica correto.
+            self.chat_stream.outcomes.record(
+                entry.ui_key, ActionOutcome(success=ok, message=message, undone=ok)
+            )
+        self.show_toast(f"{'↩' if ok else '✗'} {message}")
+
+    def _on_undo_shortcut(self, *_args) -> bool:
+        """`Ctrl+Z` desfaz a ação — mas não rouba o undo de texto do campo.
+
+        Devolve False com o foco num campo editável, deixando o evento seguir
+        para o widget (mesma regra do Ctrl+K).
+        """
+        focus = self.get_focus()
+        if isinstance(focus, (Gtk.Editable, Gtk.TextView)):
+            return False
+        self.undo_last_action()
+        return True
 
     # ------------------------------------------------------------------
     # Exportação da conversa (Markdown)
