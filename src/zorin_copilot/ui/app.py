@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+import os
 
 import gi
 
@@ -22,6 +23,11 @@ from ..ai.engine import IntentEngine
 from ..ai.live import GeminiLiveClient
 from ..core.a11y import DesktopInspector
 from ..core.config import CopilotConfig
+from ..core.export import (
+    exportable_turns,
+    render_conversation_markdown,
+    suggest_filename,
+)
 from ..core.fence import ScreenFenceManager
 from ..core.rag import LocalDocumentRAG
 from ..core.session import TopicSession
@@ -48,6 +54,22 @@ from .widgets.sidebar import (
 from .widgets.vision import VisionAttachment
 
 logger = logging.getLogger(__name__)
+
+
+def _is_dialog_dismissed(error: GLib.Error) -> bool:
+    """Distingue "usuário cancelou" de uma falha real do Gtk.FileDialog.
+
+    Cancelar é uma ação legítima e não deve gerar toast de erro; qualquer outra
+    falha do diálogo (portal ausente, permissão negada) deve.
+    """
+    quark_fn = getattr(Gtk, "dialog_error_quark", None)
+    dismissed = getattr(getattr(Gtk, "DialogError", None), "DISMISSED", None)
+    if quark_fn is None or dismissed is None:
+        return False
+    try:
+        return bool(error.matches(quark_fn(), int(dismissed)))
+    except (TypeError, ValueError):  # bindings antigos sem Gtk.DialogError
+        return False
 
 
 class CopilotWindow(Adw.ApplicationWindow):
@@ -186,6 +208,7 @@ class CopilotWindow(Adw.ApplicationWindow):
             "app.new-topic": self._on_new_topic,
             "app.toggle-pin": self._on_toggle_pin,
             "app.command-palette": self._open_command_palette,
+            "app.export-conversation": self.export_conversation,
         }
 
         controller = Gtk.ShortcutController()
@@ -336,6 +359,11 @@ class CopilotWindow(Adw.ApplicationWindow):
                 "edit-copy-symbolic", "", ("copiar", "clipboard"),
             ),
             PaletteCommand(
+                "app.export-conversation", "Exportar conversa (.md)", "Salva a conversa em Markdown",
+                "document-save-symbolic", acc("app.export-conversation"),
+                ("exportar", "salvar", "markdown", "md", "arquivo"),
+            ),
+            PaletteCommand(
                 "app.open-settings", "Preferências", "Provedor de IA e chaves",
                 "preferences-system-symbolic", "", ("configurações", "chave", "api", "modelo"),
             ),
@@ -360,6 +388,7 @@ class CopilotWindow(Adw.ApplicationWindow):
             "app.analyze-clipboard": lambda: self._trigger_prompt("analisar_copiado"),
             "app.toggle-dark-mode": lambda: self._trigger_prompt("ativar modo escuro"),
             "app.copy-answer": self._on_copy_answer,
+            "app.export-conversation": self.export_conversation,
             "app.open-settings": self._open_settings,
             "app.clear-history": self.sidebar.clear_history,
             "app.quit": self._quit_application,
@@ -663,6 +692,80 @@ class CopilotWindow(Adw.ApplicationWindow):
         from ..core.clipboard import ClipboardService
         if ClipboardService.set_text(ocr_text):
             self.show_toast("Texto copiado para a área de transferência!")
+
+    # ------------------------------------------------------------------
+    # Exportação da conversa (Markdown)
+    # ------------------------------------------------------------------
+    def _export_metadata(self) -> tuple[str, str]:
+        """(provedor, modelo) ativos, para o frontmatter do arquivo exportado."""
+        config = self.config
+        provider = getattr(config, "provider", "") or ""
+        model = {
+            "gemini": getattr(config, "gemini_model", ""),
+            "ollama": getattr(config, "ollama_model", ""),
+            "openai": getattr(config, "openai_model", ""),
+        }.get(provider, "")
+        return provider, (model or "")
+
+    def build_conversation_markdown(self) -> str:
+        """Texto Markdown da conversa atual ("" se não houver nada a exportar)."""
+        provider, model = self._export_metadata()
+        return render_conversation_markdown(
+            self.session, provider=provider, model=model
+        )
+
+    def export_conversation(self, *_args) -> None:
+        """Abre o diálogo "salvar como" e grava a conversa em `.md`.
+
+        O `Gtk.FileDialog` é assíncrono e não bloqueia a interface — diferente do
+        antigo `Gtk.FileChooserDialog`, que travava o loop principal.
+        """
+        if not exportable_turns(self.session):
+            self.show_toast("Nada para exportar: a conversa está vazia.")
+            return
+
+        dialog = Gtk.FileDialog()
+        dialog.set_title("Exportar conversa como Markdown")
+        dialog.set_initial_name(suggest_filename(self.session))
+
+        md_filter = Gtk.FileFilter()
+        md_filter.set_name("Markdown (*.md)")
+        md_filter.add_pattern("*.md")
+        dialog.set_default_filter(md_filter)
+
+        dialog.save(self, None, self._on_export_target_chosen, None)
+
+    def _on_export_target_chosen(
+        self, dialog: Gtk.FileDialog, result: Gio.AsyncResult
+    ) -> None:
+        """Conclusão do diálogo de salvar: escreve o arquivo escolhido."""
+        try:
+            target = dialog.save_finish(result)
+        except GLib.Error as err:
+            if _is_dialog_dismissed(err):
+                return
+            logger.warning("Falha ao escolher destino da exportação: %s", err)
+            self.show_toast("Não foi possível escolher onde salvar o arquivo.")
+            return
+
+        if target is None:
+            return
+
+        markdown = self.build_conversation_markdown()
+        if not markdown:
+            self.show_toast("Nada para exportar: a conversa está vazia.")
+            return
+
+        path = target.get_path()
+        try:
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(markdown)
+        except OSError as err:
+            logger.warning("Falha ao gravar a exportação em %s: %s", path, err)
+            self.show_toast("Não foi possível gravar o arquivo.")
+            return
+
+        self.show_toast(f"✓ Conversa exportada para {os.path.basename(path)}")
 
     # ------------------------------------------------------------------
     # Sessão e histórico
