@@ -195,10 +195,13 @@ Sprint 1 — CONCLUÍDO
   [x] Fix do Esc handler: fecha popovers antes de esconder a janela (item 2.7)
   [x] Correções extras: record_turn devolve o turno; empacotamento inclui ui/
 
-Sprint 2 (1 semana)
-  → Adw.ViewStack no PreferencesDialog (item 2.9)
-  → Sidebar: ícones corretos no histórico (item 2.4) [debounce já feito]
-  → Histórico rolável no live widget (item 2.5)
+Sprint 2 — CONCLUÍDO
+  [x] Seletor de provedor segmentado no PreferencesDialog (item 2.9)
+      └─ Adw.PreferencesPage.add() só aceita PreferencesGroup, então Adw.ViewStack
+         não pôde ser embutido. Solução equivalente: 3 ToggleButtons linkados
+         dentro de um PreferencesGroup, com exclusão mútua e ícones validados.
+  [x] Sidebar: ícones corretos no histórico (item 2.4) [debounce feito no Sprint 1]
+  [x] Histórico rolável + cronômetro no live widget (item 2.5)
 
 Sprint 3 (2 semanas)
   → Markdown renderer real (item 2.6) OU WebView
@@ -209,13 +212,13 @@ Backlog
   → Command palette, drag-and-drop, status bar, undo de ações
 ```
 
-### Estrutura resultante do Sprint 1
+### Estrutura resultante dos Sprints 1 + 2
 
 ```
 src/zorin_copilot/ui/
 ├── app.py            823 linhas  (orquestração: sessão, voz, HUD, ciclo de mensagem)
-├── live_view.py      342 linhas
-├── preferences.py    481 linhas
+├── live_view.py      487 linhas  (log de sessão acumulativo + cronômetro)
+├── preferences.py    539 linhas  (seletor de provedor segmentado)
 ├── style.py          626 linhas
 └── widgets/
     ├── header.py      221  HeaderBar, badge de modelo, popover de cerca espacial
@@ -224,6 +227,15 @@ src/zorin_copilot/ui/
     ├── prompt_bar.py  445  barra de prompt, prévia de app, envio
     └── vision.py      180  anexo visual e captura de tela
 ```
+
+#### Detalhe do Sprint 2 — live widget
+
+| Antes | Depois |
+|---|---|
+| `subtitle_lbl` sobrescrito a cada transcrição | `_append_log_row()` acumula linhas com ícone de papel |
+| Pill de ação que some em 5 s (`GLib.timeout_add_seconds` + truque de tupla) | Linha permanente no log, com ícone por ferramenta |
+| Sem noção de duração da chamada | `timer_lbl` com `mm:ss`, inicia no CONNECTING e para no DISCONNECTED |
+| Erros só no log | Erros também entram no log como linha de aviso |
 
 ---
 
