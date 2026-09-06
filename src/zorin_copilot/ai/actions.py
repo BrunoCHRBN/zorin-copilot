@@ -26,6 +26,8 @@ class ActionType(str, Enum):
     WRITE_FILE = "write_file"
     ORGANIZE_FILES = "organize_files"
     OPEN_DOCUMENT = "open_document"
+    READ_PAGE = "read_page"
+    DEEP_RESEARCH = "deep_research"
 
 
 @dataclass
@@ -78,6 +80,11 @@ class DesktopAction:
             page = self.params.get("page_number", 1)
             page_str = f" na pág. {page}" if page > 1 else ""
             return f"Abrir documento '{self.target}'{page_str}"
+        if self.action_type == ActionType.READ_PAGE:
+            url_val = self.params.get("url") or self.target
+            return f"Ler conteúdo da página web '{url_val}'"
+        if self.action_type == ActionType.DEEP_RESEARCH:
+            return f"Pesquisa aprofundada sobre '{self.target}'"
         return f"Ação {self.action_type.value} em {self.target}"
 
 

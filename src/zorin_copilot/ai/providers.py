@@ -18,56 +18,73 @@ from ..core.config import CopilotConfig
 logger = logging.getLogger(__name__)
 
 
-SYSTEM_PROMPT = """Você é o Zorin Copilot, assistente inteligente integrado ao sistema operacional Zorin OS 18 Core (Linux / GNOME 46 no Wayland).
-Sua missão é ajudar o usuário a usar o computador, tirar dúvidas sobre o sistema e realizar ações no desktop.
+SYSTEM_PROMPT = """Você é o Zorin Copilot, assistente e parceiro de desktop nativo do usuário no Zorin OS 18 Core (Linux / GNOME 46 no Wayland).
+Sua missão é atuar como um colega de bancada inteligente, ágil, empático e resolutivo — ajudando a operar o computador, solucionar problemas técnicos, resumir informações e realizar tarefas no desktop.
 
-Sempre responda em português brasileiro de forma amigável, clara, didática e objetiva.
+PERSONALIDADE & TOM DE VOZ (PARCEIRO DE DESKTOP):
+1. Linguagem Natural e Descomplicada: Responda em português brasileiro de forma fluida, acolhedora, competente e direta ao ponto.
+2. Fim do Formalismo Robótico: NUNCA inicie com clichês como "Certamente! Como seu assistente...", "Com base nas diretrizes...", ou "Aqui está a resposta:". Vá direto ao assunto como um colega de trabalho parceiro.
+3. Tom Camaleônico:
+   - Para pedidos operacionais rápidos (ex: "abre o terminal", "muta o som", "memória livre"): seja breve, ágil (1 frase) e forneça a ação correspondente.
+   - Para perguntas conceituais, análises ou depuração de erros: seja didático, detalhado e estruturado, usando formatação Markdown elegante (negrito, listas e blocos de código).
+4. Proatividade Leve (Micro-Hooks Situacionais):
+   - Ao concluir uma ação, você pode incluir no final de "explanation" UMA frase opcional sugerindo o próximo passo natural mais provável (ex: "Já abri o documento de metas. Se quiser que eu resuma os pontos principais ou calcule as médias, só me avisar!").
+   - Evite insistência ou prolixidade: a sugestão deve ser curta, situacional e não obstrutiva.
+5. Memória Orgânica e Transparente:
+   - Aplique as preferências do usuário (ex: navegador favorito, caminhos de projetos, estilo de código) de forma invisível e natural. NUNCA diga "de acordo com a Base de Conhecimento" ou "conforme memorizado". Apenas aplique a preferência diretamente como se fosse seu hábito natural.
+6. Tratamento Humanizado de Incertezas e Falhas:
+   - Se um documento, arquivo ou comando não for encontrado, nunca responda com mensagens frias de erro técnico. Explique com naturalidade e proponha caminhos alternativos úteis.
 
-DIRETRIZES FUNDAMENTAIS:
-1. Respostas Diretas e Fatuais (Sem Evasão):
-- Quando o usuário perguntar sobre data, dia da semana, horário, calendário, hardware ou fatos gerais (ex: "que dia é hoje?", "que dia será amanhã?", "tenho espaço em disco?"), RESPONDA DIRETAMENTE E CONCLUSIVAMENTE no campo "explanation" utilizando as informações de tempo real fornecidas no contexto.
-- NUNCA seja evasivo e NUNCA mande o usuário olhar o relógio, o painel do sistema ou abrir o aplicativo Calendário/Calculadora para perguntas que você mesmo pode responder imediatamente.
-- Se a pergunta for apenas informativa sobre datas ou dias (ex: "que dia será amanhã?"), informe o dia e a data exata no campo "explanation" e deixe "actions": [].
+DIRETRIZES TÉCNICAS E DE RESPOSTA:
+1. Respostas Fatuais Diretas (Sem Evasão):
+   - Para perguntas sobre data, dia da semana, horário, hardware ou status do sistema, RESPONDA DIRETAMENTE E CONCLUSIVAMENTE no campo "explanation" com os dados do contexto em tempo real. Nunca mande o usuário olhar o relógio ou abrir outro app para algo que você mesmo pode responder.
+2. Multimodalidade e Auto-Cura (Self-Healing):
+   - Ao receber capturas de tela ou recortes de erros:
+     a) Descreva a causa raiz do problema em linguagem clara e acessível.
+     b) Smart OCR: Se houver código, logs ou textos visíveis relevantes, transcreva com fidelidade em "extracted_text" ("code" ou "text").
+     c) Crie OBRIGATORIAMENTE a ação "fix_command" pronta para execução quando houver erro de pacote, dependência quebrada ou serviço inativo no Linux.
+3. Consciência Situacional:
+   - Utilize as informações de [Contexto Situacional do Desktop] (janela em foco, horário, mídia ativa) para compreender referências imediatas do usuário.
+4. Fidelidade Temporal e de Calendário:
+   - Use SEMPRE a "Data e Horário" fornecida no [Contexto Situacional do Desktop] como verdade factual absoluta. O ano corrente é o indicado nesse contexto. O Natal ocorre invariavelmente em 25 de Dezembro de cada ano, e o Ano Novo em 1º de Janeiro. NUNCA invente datas ou anos distantes (como 2029) para datas comemorativas anuais. Para contagem de dias ou feriados, apoie-se nas informações temporais e feriados de referência do contexto situacional.
+5. Concisão Executiva em Ações e Busca Web:
+   - Ao executar ações que abrem conteúdo no desktop (como "open_url" para páginas web, "launch_app" para programas ou "open_document"):
+     * O campo "explanation" DEVE ser uma confirmação executiva e acolhedora de apenas 1 a 2 frases curtas (ex: "Abri a pesquisa no Mercado Livre no seu navegador para você.", "Abri a Calculadora para você.").
+     * NUNCA copie ou despeje trechos brutos de busca web, rodapés promocionais, menus de navegação institucionais ("Lojas oficiais. Categorias. Ofertas do dia..."), termos de serviço ou números de citação como "[1]" em "explanation" quando estiver abrindo a página correspondente. A página já estará aberta e visível na tela para o usuário!
+   - Em perguntas puramente informativas baseadas na busca web (sem abrir URLs):
+     * Resuma os fatos apurados em 2 a 3 frases objetivas em linguagem própria, sem copiar textos de menus, rodapés ou citações como "[1]".
 
-2. Priorização Absoluta da Memória e Preferências do Usuário:
-- Respeite rigorosamente as preferências salvas no contexto da Base de Conhecimento.
-- Exemplo crucial: Se o usuário definiu que seu navegador preferido é o Google Chrome, NUNCA proponha abrir em outro navegador como o Brave ou Firefox. Proponha abrir no navegador explicitado pelo usuário.
-- Se houver caminhos de projetos ou preferências de PWA (ex: WhatsApp, Gmail), utilize-os fielmente.
-
-3. Modo de Visão Computacional (Multimodalidade) e Auto-Cura (Self-Healing):
-- Quando uma imagem de recorte ou tela for fornecida, analise com profundidade:
-  a) Descreva o conteúdo central e transcreva com exatidão qualquer texto, código, log ou erro visível.
-  b) Smart OCR: Se houver código de programação, logs ou texto relevante na imagem, preencha o campo "extracted_text" com o texto/código exato fielmente extraído (sem truncamento) e defina "extracted_kind" como "code" ou "text".
-  c) Auto-Cura (Self-Healing): Se a tela exibir um erro técnico, pacote quebrado, comando com falha, dependência ausente ou serviço inativo no Linux/Zorin OS:
-     - Explique a causa raiz de forma simples e didática.
-     - Crie OBRIGATORIAMENTE uma ação "fix_command" contendo o comando exato de solução no parâmetro "command" e "requires_sudo": true/false.
-  d) Proponha ações práticas em "actions" para o usuário (ex: abrir o site identificado respeitando o navegador preferido, ou executar uma ação de sistema).
-
-4. Regras para o array "actions":
-- "fix_command": para comandos de terminal que resolvem um erro identificado ou instalam dependências necessárias. Defina "target": "descrição curta do conserto", "description": "Executar correção no terminal", "params": {"command": "comando bash completo", "requires_sudo": true/false, "terminal": true}.
-- "smart_ocr": para bloco de código ou texto extraído da imagem pronto para cópia. Defina "target": "texto_ou_codigo_completo", "params": {"kind": "code"|"text"}, "description": "Copiar código/texto extraído".
-- "open_url": para sites ou links.
-- "launch_app": para abrir aplicativos instalados.
-- "system_control": para controles de sistema.
-- "media_control": para controlar reprodutores de mídia e música (Spotify, VLC). Defina "target": "play"|"pause"|"next"|"previous"|"get_status", "params": {"action": "play"|"pause"|"next"|"previous"|"get_status", "player": "spotify"|null}.
-- "write_file": para criar ou salvar relatórios e arquivos Markdown/texto no sistema. Defina "target": "nome_arquivo.md", "params": {"filename": "nome_arquivo.md", "content": "conteúdo completo em markdown", "directory": "~/Documentos"|null}.
-- "organize_files": para organizar pastas (ex: ~/Downloads) em subpastas categorizadas. Defina "target": "diretório", "params": {"directory": "~/Downloads", "dry_run": false}.
-- "notify": para notificações.
+AÇÕES DISPONÍVEIS NO ARRAY "actions":
+- "fix_command": comando bash para correção no terminal. target: "descrição curta", params: {"command": "...", "requires_sudo": bool, "terminal": true}.
+- "smart_ocr": texto ou código extraído da tela para o clipboard. target: "conteúdo", params: {"kind": "code"|"text"}.
+- "open_url": abrir link no navegador. Para serviços web (Gmail, Google Drive, YouTube, Maps), use deep links específicos com parâmetros de pesquisa ou criação para executar a ação diretamente dentro do serviço:
+  * Gmail busca: "https://mail.google.com/mail/u/0/#search/<query>" (ex: "is:unread")
+  * Gmail novo email: "https://mail.google.com/mail/u/0/?view=cm&fs=1&to=<email>&su=<assunto>&body=<corpo>"
+  * Google Drive busca: "https://drive.google.com/drive/search?q=<query>"
+  * Google Docs criar: "https://docs.google.com/document/create"
+  * Google Sheets criar: "https://sheets.google.com/create"
+  * YouTube busca: "https://www.youtube.com/results?search_query=<query>"
+  * Google Maps busca: "https://www.google.com/maps/search/<query>"
+- "launch_app": abrir aplicativo do desktop. target: "nome_app".
+- "open_document": abrir arquivo de documento localizado no visualizador. target: "/caminho/arquivo", params: {"page_number": 1}.
+- "system_control": ajustes do sistema (volume, tema). target: "ação", params: {"action": "...", "value": "..."}.
+- "media_control": controle de música e Spotify. target: "play"|"pause"|"next"|"previous"|"search", params: {"action": "play"|"pause"|"search", "query": "nome da música ou artista", "player": "spotify"}.
+- "type_text": digitar texto na aplicação ativa. target: "descrição do campo", params: {"text": "conteúdo a digitar"}.
+- "write_file": gerar arquivo ou relatório em disco. target: "nome.md", params: {"filename": "...", "content": "...", "directory": "~/Documentos"}.
+- "organize_files": organizar pastas em categorias. target: "caminho", params: {"directory": "...", "dry_run": false}.
+- "notify": emitir notificação no sistema.
 
 Você DEVE responder EXCLUSIVAMENTE em formato JSON com o seguinte esquema:
 {
-  "explanation": "Texto explicativo direto, detalhado e conclusivo para a pergunta do usuário.",
+  "explanation": "Texto conversacional, acolhedor e direto ao ponto para o usuário.",
   "extracted_text": "Texto ou código puro extraído da tela/imagem (ou null se não aplicável)",
   "extracted_kind": "code" | "text",
   "actions": [
     {
-      "type": "fix_command" | "open_url" | "launch_app" | "system_control" | "media_control" | "write_file" | "organize_files" | "notify",
-      "target": "alvo da ação ou descrição do conserto",
-      "description": "descrição amigável da ação em português",
-      "params": {
-        "command": "comando bash se type for fix_command",
-        "requires_sudo": true | false
-      }
+      "type": "fix_command" | "open_url" | "launch_app" | "open_document" | "system_control" | "media_control" | "type_text" | "write_file" | "organize_files" | "notify",
+      "target": "alvo da ação",
+      "description": "descrição clara e amigável da ação em português",
+      "params": {}
     }
   ]
 }
@@ -180,6 +197,7 @@ class BaseLLMProvider(ABC):
                     "media_control": ActionType.MEDIA_CONTROL,
                     "write_file": ActionType.WRITE_FILE,
                     "write_document": ActionType.WRITE_FILE,
+                    "open_document": ActionType.OPEN_DOCUMENT,
                     "organize_files": ActionType.ORGANIZE_FILES,
                     "organize_directory": ActionType.ORGANIZE_FILES,
                 }
@@ -198,6 +216,21 @@ class BaseLLMProvider(ABC):
         except Exception:
             # Fallback inteligente se a IA respondeu em texto livre/Markdown
             fallback_actions: list[DesktopAction] = []
+            
+            # Smart OCR: extrai bloco de código mais relevante para cópia rápida
+            code_blocks = re.findall(r"```(?:\w+)?\n([\s\S]+?)\n```", raw_text)
+            if code_blocks:
+                longest_code = max(code_blocks, key=len).strip()
+                if len(longest_code) > 10:
+                    fallback_actions.append(
+                        DesktopAction(
+                            action_type=ActionType.SMART_OCR,
+                            target=longest_code,
+                            params={"kind": "código"},
+                            description="Copiar código transcrito da imagem",
+                        )
+                    )
+
             bash_matches = re.findall(r"```(?:bash|sh)?\n(sudo\s+[^\n]+|[a-zA-Z0-9_\-\./]+\s+[^\n]+)\n```", raw_text)
             for m in bash_matches:
                 cmd = m.strip()
@@ -228,7 +261,7 @@ class GeminiProvider(BaseLLMProvider):
         if not self.is_configured():
             return False, "Chave de API do Gemini não informada."
         
-        models_to_test = [self.model, "gemini-3.6-flash", "gemini-3.5-flash"]
+        models_to_test = [self.model, "gemini-flash-latest"] if self.model != "gemini-flash-latest" else [self.model]
         last_error = ""
         for m in models_to_test:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={self.api_key}"
@@ -237,12 +270,15 @@ class GeminiProvider(BaseLLMProvider):
                 "generationConfig": {"maxOutputTokens": 10},
             }
             try:
-                resp = requests.post(url, json=payload, timeout=12)
+                resp = requests.post(url, json=payload, timeout=6)
                 if resp.status_code == 200:
                     return True, f"Conexão com Gemini ({m}) bem-sucedida!"
                 last_error = f"Status {resp.status_code}: {resp.text[:140]}"
+                if resp.status_code in (429, 403):
+                    break
             except Exception as exc:
                 last_error = str(exc)
+                break
 
         return False, f"Falha ao conectar com Gemini: {last_error}"
 
@@ -304,7 +340,7 @@ class GeminiProvider(BaseLLMProvider):
 
         # Modelos com fallback em caso de alta demanda temporária (503 / 429 / 404)
         models_to_try = [self.model]
-        for fallback in ["gemini-flash-latest", "gemini-flash-lite-latest", "gemini-2.5-flash", "gemini-3.5-flash"]:
+        for fallback in ["gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-flash-latest", "gemini-flash-lite-latest"]:
             if fallback not in models_to_try:
                 models_to_try.append(fallback)
 
@@ -312,7 +348,7 @@ class GeminiProvider(BaseLLMProvider):
         for current_model in models_to_try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{current_model}:generateContent?key={self.api_key}"
             try:
-                resp = requests.post(url, json=payload, timeout=25)
+                resp = requests.post(url, json=payload, timeout=12)
                 if resp.status_code == 200:
                     data = resp.json()
                     candidates = data.get("candidates", [])
@@ -321,10 +357,16 @@ class GeminiProvider(BaseLLMProvider):
                         if content_parts:
                             raw_text = content_parts[0].get("text", "")
                             return self.parse_response_payload(raw_text)
-                
-                # Se for erro transitório (503 ou 429), tenta o próximo modelo da lista
+
                 last_error = f"Erro no modelo {current_model} ({resp.status_code}): {resp.text[:180]}"
+                if resp.status_code == 429:
+                    logger.warning(f"Cota da chave do Gemini atingida (429). Encerrando tentativas para comutação imediata ao Ollama.")
+                    break
                 logger.warning(f"{last_error}. Tentando fallback se disponível...")
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+                last_error = f"Erro de comunicação/timeout com Gemini: {exc}"
+                logger.warning(f"{last_error}. Encerrando tentativas para comutação imediata ao Ollama.")
+                break
             except Exception as exc:
                 last_error = f"Erro de comunicação com {current_model}: {exc}"
                 logger.warning(last_error)
@@ -333,11 +375,17 @@ class GeminiProvider(BaseLLMProvider):
 
 
 class OllamaProvider(BaseLLMProvider):
-    """Provedor Ollama para modelos locais e 100% offline."""
+    """Provedor Ollama para modelos locais e 100% offline (Texto & Visão Multimodal)."""
 
-    def __init__(self, host_url: str = "http://localhost:11434", model: str = "llama3.2:latest"):
+    def __init__(
+        self,
+        host_url: str = "http://127.0.0.1:11434",
+        model: str = "qwen2.5:7b",
+        vision_model: str = "minicpm-v",
+    ):
         self.host_url = host_url.rstrip("/")
-        self.model = model.strip() or "llama3.2:latest"
+        self.model = model.strip() or "qwen2.5:7b"
+        self.vision_model = vision_model.strip() or "minicpm-v"
 
     def is_configured(self) -> bool:
         return bool(self.host_url)
@@ -346,12 +394,19 @@ class OllamaProvider(BaseLLMProvider):
         try:
             resp = requests.get(f"{self.host_url}/api/tags", timeout=4)
             if resp.status_code == 200:
-                models = [m.get("name") for m in resp.json().get("models", [])]
-                if self.model in models:
-                    return True, f"Ollama conectado! Modelo '{self.model}' disponível."
+                models = [m.get("name", "") for m in resp.json().get("models", [])]
+                model_base = self.model.split(":")[0]
+                has_text = self.model in models or any(m.startswith(model_base) for m in models)
+                vision_base = self.vision_model.split(":")[0]
+                has_vision = self.vision_model in models or any(m.startswith(vision_base) for m in models)
+
+                if has_text and has_vision:
+                    return True, f"Ollama conectado! '{self.model}' (Texto) e '{self.vision_model}' (Visão) prontos na GPU."
+                if has_text:
+                    return True, f"Ollama conectado! Modelo '{self.model}' pronto na GPU."
                 if models:
                     return True, f"Ollama ativo! Modelos disponíveis: {', '.join(models[:4])}"
-                return True, "Ollama conectado, mas nenhum modelo instalado (execute: ollama pull llama3.2)."
+                return True, f"Ollama conectado, mas modelo '{self.model}' não instalado (execute: ollama pull {self.model})."
             return False, f"Ollama retornou status {resp.status_code}."
         except Exception as exc:
             return False, f"Não foi possível conectar ao Ollama em {self.host_url}: {exc}"
@@ -382,22 +437,39 @@ class OllamaProvider(BaseLLMProvider):
             user_msg["images"] = [base64.b64encode(image_bytes).decode("utf-8")]
         messages.append(user_msg)
 
+        # Seleciona dinamicamente o modelo adequado (Visão multimodal vs Texto puro)
+        selected_model = self.vision_model if (image_bytes and self.vision_model) else self.model
+        timeout_sec = 90 if image_bytes else 45
+
         payload = {
-            "model": self.model,
+            "model": selected_model,
             "messages": messages,
-            "format": "json",
             "stream": False,
+            "options": {
+                "temperature": 0.2 if image_bytes else 0.3,
+                "num_predict": 2048,
+            },
+            "keep_alive": "15m",
         }
+        if not image_bytes:
+            payload["format"] = "json"
 
         try:
-            resp = requests.post(url, json=payload, timeout=30)
+            resp = requests.post(url, json=payload, timeout=timeout_sec)
             if resp.status_code != 200:
-                return f"Erro no Ollama ({resp.status_code}): {resp.text[:200]}", []
+                err_text = resp.text
+                if "does not support images" in err_text.lower():
+                    return (
+                        f"O modelo local '{selected_model}' não possui suporte a visão de imagens. "
+                        "Ele responde comandos e perguntas em texto de forma nativa.",
+                        [],
+                    )
+                return f"Erro no Ollama ({resp.status_code}): {err_text[:200]}", []
             data = resp.json()
             raw_text = data.get("message", {}).get("content", "")
             return self.parse_response_payload(raw_text)
         except Exception as exc:
-            return f"Erro ao consultar Ollama local: {exc}", []
+            return f"Erro ao consultar Ollama local ({selected_model}): {exc}", []
 
 
 class OpenAICompatProvider(BaseLLMProvider):
@@ -486,15 +558,144 @@ class OpenAICompatProvider(BaseLLMProvider):
             return f"Erro na requisição: {exc}", []
 
 
+class HybridProvider(BaseLLMProvider):
+    """Provedor híbrido inteligente: Google Gemini primário com auto-failover instantâneo para Ollama local."""
+
+    def __init__(
+        self,
+        gemini_provider: GeminiProvider,
+        ollama_provider: OllamaProvider,
+        mode: str = "hybrid",
+        fallback_enabled: bool = True,
+    ):
+        self.gemini = gemini_provider
+        self.ollama = ollama_provider
+        self.mode = mode
+        self.fallback_enabled = fallback_enabled
+
+    def is_configured(self) -> bool:
+        if self.mode == "hybrid":
+            return self.gemini.is_configured() or self.ollama.is_configured()
+        return self.gemini.is_configured()
+
+    def test_connection(self) -> tuple[bool, str]:
+        results = []
+        gemini_ok = False
+        if self.gemini.is_configured():
+            ok, msg = self.gemini.test_connection()
+            gemini_ok = ok
+            results.append(f"Gemini: {'✓ Conectado' if ok else f'✗ {msg}'}")
+        else:
+            results.append("Gemini: ⚠️ Chave de API não informada")
+
+        ollama_ok, o_msg = self.ollama.test_connection()
+        results.append(f"Ollama: {'✓ ' + o_msg if ollama_ok else '✗ ' + o_msg}")
+
+        is_healthy = gemini_ok or ollama_ok
+        return is_healthy, " | ".join(results)
+
+    @staticmethod
+    def _is_gemini_error(text: str) -> bool:
+        if not text:
+            return True
+        if (
+            text.startswith("Não foi possível obter resposta do Gemini:")
+            or text.startswith("Chave de API do Google Gemini não configurada")
+        ):
+            return True
+        return False
+
+    def chat(
+        self,
+        prompt: str,
+        app_list: list[str] | None = None,
+        context_summary: str | None = None,
+        history: list[dict[str, str]] | None = None,
+        image_bytes: bytes | None = None,
+        image_mime: str = "image/jpeg",
+    ) -> tuple[str, list[DesktopAction]]:
+        use_gemini = self.gemini.is_configured()
+        if use_gemini:
+            try:
+                explanation, actions = self.gemini.chat(
+                    prompt=prompt,
+                    app_list=app_list,
+                    context_summary=context_summary,
+                    history=history,
+                    image_bytes=image_bytes,
+                    image_mime=image_mime,
+                )
+                if not self._is_gemini_error(explanation):
+                    return explanation, actions
+
+                logger.warning(
+                    f"Gemini indisponível ou com cota excedida ({explanation[:100]}...). "
+                    f"Ativando failover para Ollama local ({self.ollama.model})."
+                )
+            except Exception as exc:
+                logger.warning(f"Exceção no GeminiProvider: {exc}. Ativando failover para Ollama...")
+
+        # Executa failover para Ollama local (Texto com Qwen ou Visão com MiniCPM-V)
+        if self.fallback_enabled and self.ollama.is_configured():
+            local_expl, local_actions = self.ollama.chat(
+                prompt=prompt,
+                app_list=app_list,
+                context_summary=context_summary,
+                history=history,
+                image_bytes=image_bytes,
+                image_mime=image_mime,
+            )
+
+            if local_expl and not local_expl.startswith("Erro ao consultar Ollama"):
+                if use_gemini:
+                    badge = (
+                        f"⚡ *[Visão Computacional Local - {self.ollama.vision_model} (GPU Offline)]*\n\n"
+                        if image_bytes
+                        else f"⚡ *[Modo Local Offline - {self.ollama.model}]*\n\n"
+                    )
+                    if badge not in local_expl:
+                        local_expl = f"{badge}{local_expl}"
+                return local_expl, local_actions
+
+        return (
+            "Não foi possível processar sua solicitação: o Gemini está indisponível/sem cota "
+            f"e o modelo local Ollama não pôde ser alcançado em {self.ollama.host_url}.",
+            [],
+        )
+
+
 def get_llm_provider(config: CopilotConfig) -> BaseLLMProvider:
     """Retorna a instância do provedor ativo com base na configuração."""
+    ollama_prov = OllamaProvider(
+        host_url=config.ollama_url,
+        model=config.ollama_model,
+        vision_model=getattr(config, "ollama_vision_model", "minicpm-v"),
+    )
+    gemini_prov = GeminiProvider(api_key=config.gemini_api_key, model=config.gemini_model)
+
     if config.provider == "ollama":
-        return OllamaProvider(host_url=config.ollama_url, model=config.ollama_model)
+        return ollama_prov
     if config.provider == "openai":
         return OpenAICompatProvider(
             api_url=config.openai_url,
             api_key=config.openai_api_key,
             model=config.openai_model,
         )
-    # Padrão: Gemini
-    return GeminiProvider(api_key=config.gemini_api_key, model=config.gemini_model)
+    if config.provider == "hybrid":
+        return HybridProvider(
+            gemini_provider=gemini_prov,
+            ollama_provider=ollama_prov,
+            mode="hybrid",
+            fallback_enabled=True,
+        )
+
+    # Padrão: Gemini com fallback para Ollama se fallback_to_ollama estiver ativo
+    if getattr(config, "fallback_to_ollama", True):
+        return HybridProvider(
+            gemini_provider=gemini_prov,
+            ollama_provider=ollama_prov,
+            mode="gemini_with_fallback",
+            fallback_enabled=True,
+        )
+
+    return gemini_prov

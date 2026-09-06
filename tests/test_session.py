@@ -95,5 +95,13 @@ class TopicSessionTest(unittest.TestCase):
         self.assertEqual(s._derive_title("pesquise sobre inteligência artificial"), "Inteligência artificial")
 
 
+    def test_record_turn_returns_chat_turn(self):
+        """Garante que record_turn retorna a instância de ChatTurn criada, evitando NoneType no app UI."""
+        turn = self.session.record_turn("Como verificar memória?", "Use `free -h`.")
+        self.assertIsNotNone(turn)
+        self.assertEqual(turn.prompt, "Como verificar memória?")
+        self.assertEqual(turn.answer, "Use `free -h`.")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -54,6 +54,10 @@ class ActionExecutor:
                 break
         return reports
 
+    def execute(self, action: DesktopAction) -> ExecutionReport:
+        """Executa uma ação individual do catálogo do assistente."""
+        return self._execute_single(action)
+
     def _execute_single(self, action: DesktopAction) -> ExecutionReport:
         if action.action_type == ActionType.LAUNCH_APP:
             return self._launch_app(action.target)
@@ -70,6 +74,9 @@ class ActionExecutor:
 
         if action.action_type == ActionType.CLICK:
             return self._click_element(action.target)
+
+        if action.action_type == ActionType.TYPE_TEXT:
+            return self._type_text(action)
 
         if action.action_type == ActionType.CAPTURE_SCREEN:
             return ExecutionReport(action=action, success=True, message=action.describe())
@@ -95,10 +102,53 @@ class ActionExecutor:
         if action.action_type == ActionType.OPEN_DOCUMENT:
             return self._open_document(action)
 
+        if action.action_type == ActionType.READ_PAGE:
+            return self._read_web_page(action)
+
+        if action.action_type == ActionType.DEEP_RESEARCH:
+            return self._deep_research(action)
+
         return ExecutionReport(
             action=action,
             success=False,
             message=f"Tipo de ação não implementado: {action.action_type}",
+        )
+
+    def _read_web_page(self, action: DesktopAction) -> ExecutionReport:
+        from ..core.browser import BrowserManager
+        url = action.params.get("url") or action.target
+        target_url = url if url.startswith(("http://", "https://")) else None
+        res = BrowserManager.read_page(target_url)
+        if res.get("success"):
+            title = res.get("title") or "Página Web"
+            txt_len = res.get("length", 0)
+            return ExecutionReport(
+                action=action,
+                success=True,
+                message=f"Página lida com sucesso: '{title}' ({txt_len} caracteres).",
+            )
+        return ExecutionReport(
+            action=action,
+            success=False,
+            message=res.get("text") or "Falha ao ler a página web.",
+        )
+
+    def _deep_research(self, action: DesktopAction) -> ExecutionReport:
+        from ..core.web_search import DeepWebResearcher
+        researcher = DeepWebResearcher()
+        q = action.target
+        res = researcher.deep_search(q)
+        if res.get("success"):
+            src_count = len(res.get("sources", []))
+            return ExecutionReport(
+                action=action,
+                success=True,
+                message=f"Pesquisa profunda sobre '{q}' concluída com {src_count} fontes analisadas.",
+            )
+        return ExecutionReport(
+            action=action,
+            success=False,
+            message=res.get("summary") or "Falha na pesquisa profunda.",
         )
 
     def _open_document(self, action: DesktopAction) -> ExecutionReport:
@@ -285,9 +335,52 @@ class ActionExecutor:
             message=f"Layout de janelas '{layout_name}' aplicado.",
         )
 
+    def _type_text(self, action: DesktopAction) -> ExecutionReport:
+        text = action.params.get("text") or action.target
+        if not text:
+            return ExecutionReport(action=action, success=False, message="Nenhum texto informado para digitação.")
+
+        # Tentativa via wtype (Wayland) ou xdotool (X11 / XWayland)
+        wtype_bin = shutil.which("wtype")
+        xdotool_bin = shutil.which("xdotool")
+        if wtype_bin:
+            try:
+                subprocess.run([wtype_bin, text], check=False, timeout=3)
+                return ExecutionReport(action=action, success=True, message=f"Texto digitado via wtype: '{text[:30]}'")
+            except Exception:
+                pass
+        if xdotool_bin:
+            try:
+                subprocess.run([xdotool_bin, "type", "--", text], check=False, timeout=3)
+                return ExecutionReport(action=action, success=True, message=f"Texto digitado via xdotool: '{text[:30]}'")
+            except Exception:
+                pass
+
+        # Fallback confiável: copia para o clipboard
+        ok = ClipboardService.set_text(text)
+        if ok:
+            return ExecutionReport(
+                action=action,
+                success=True,
+                message=f"Texto copiado para a área de transferência: '{text[:30]}'",
+            )
+        return ExecutionReport(action=action, success=False, message="Não foi possível simular digitação.")
+
     def _control_media(self, action: DesktopAction) -> ExecutionReport:
         act = action.params.get("action", action.target)
         player = action.params.get("player")
+        uri = action.params.get("uri")
+        query = action.params.get("query") or action.params.get("search")
+
+        if uri:
+            ok, msg = MediaPlayerManager.open_uri(uri, player_name=player)
+            return ExecutionReport(action=action, success=ok, message=msg)
+
+        if query or act in ("search", "play_search", "tocar_busca"):
+            search_term = query or action.target
+            ok, msg = MediaPlayerManager.play_search(search_term, player_name=player or "spotify")
+            return ExecutionReport(action=action, success=ok, message=msg)
+
         ok, msg = MediaPlayerManager.control(act, player_name=player)
         return ExecutionReport(action=action, success=ok, message=msg)
 

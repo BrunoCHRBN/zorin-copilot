@@ -112,6 +112,30 @@ class ShortcutManagerTest(unittest.TestCase):
         self.assertTrue(ok_unreg)
         mock_main_settings.set_strv.assert_called_with("custom-keybindings", [])
 
+    def test_autostart_enable_disable(self):
+        """Testa habilitação e desabilitação do autostart de inicialização."""
+        import tempfile
+        from pathlib import Path
+        from zorin_copilot.core.shortcuts import AutostartManager
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            with patch.object(AutostartManager, "get_autostart_dir", return_value=tmp_path):
+                with patch.object(AutostartManager, "get_autostart_file", return_value=tmp_path / "zorin-test.desktop"):
+                    self.assertFalse(AutostartManager.is_enabled())
+
+                    ok = AutostartManager.enable("/usr/local/bin/zorin-copilot")
+                    self.assertTrue(ok)
+                    self.assertTrue(AutostartManager.is_enabled())
+
+                    content = (tmp_path / "zorin-test.desktop").read_text()
+                    self.assertIn("Exec=/usr/local/bin/zorin-copilot --background", content)
+                    self.assertIn("X-GNOME-Autostart-enabled=true", content)
+
+                    ok_dis = AutostartManager.disable()
+                    self.assertTrue(ok_dis)
+                    self.assertFalse(AutostartManager.is_enabled())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -257,3 +257,83 @@ class MediaPlayerManager:
             return (False, f"Falha ao controlar mídia: {res.stderr.strip() or 'Erro desconhecido'}")
         except Exception as exc:
             return (False, f"Erro ao controlar mídia: {exc}")
+
+    @classmethod
+    def open_uri(cls, uri: str, player_name: str | None = None) -> tuple[bool, str]:
+        """Abre uma URI de mídia ou busca (ex: 'spotify:search:queen') no player via MPRIS2 ou desktop."""
+        target_bus = cls.resolve_player(player_name)
+
+        # 1. Se houver player ativo com suporte a D-Bus MPRIS2 OpenUri
+        if target_bus:
+            try:
+                import gi
+                gi.require_version("Gio", "2.0")
+                from gi.repository import Gio, GLib
+
+                conn = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+                conn.call_sync(
+                    target_bus,
+                    "/org/mpris/MediaPlayer2",
+                    "org.mpris.MediaPlayer2.Player",
+                    "OpenUri",
+                    GLib.Variant("(s)", (uri,)),
+                    None,
+                    Gio.DBusCallFlags.NONE,
+                    2000,
+                    None,
+                )
+                clean_player = target_bus.replace("org.mpris.MediaPlayer2.", "").capitalize()
+                return (True, f"Mídia aberta com sucesso no {clean_player}.")
+            except Exception as exc:
+                logger.debug(f"Gio D-Bus OpenUri falhou em {target_bus}: {exc}")
+
+        # 2. Se for URI do Spotify
+        if uri.startswith("spotify:"):
+            # Tenta via Gio launcher de esquema nativo do sistema
+            try:
+                from gi.repository import Gio
+                ok = Gio.AppInfo.launch_default_for_uri(uri, None)
+                if ok:
+                    return (True, "Spotify aberto com a reprodução solicitada.")
+            except Exception:
+                pass
+
+            # Tenta via binário executável spotify (--uri=...)
+            spot_bin = shutil.which("spotify")
+            if spot_bin:
+                try:
+                    subprocess.Popen([spot_bin, f"--uri={uri}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    return (True, "Spotify iniciado com a busca solicitada.")
+                except Exception as exc:
+                    logger.debug(f"Falha ao iniciar spotify com --uri: {exc}")
+
+            # Fallback xdg-open
+            try:
+                subprocess.Popen(["xdg-open", uri], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return (True, "Comando enviado para o Spotify.")
+            except Exception:
+                pass
+
+            # Fallback Web se nativo falhar
+            if uri.startswith("spotify:search:"):
+                search_query = uri.replace("spotify:search:", "")
+                web_url = f"https://open.spotify.com/search/{search_query}"
+                try:
+                    subprocess.Popen(["xdg-open", web_url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    return (True, "Aberto no Spotify Web.")
+                except Exception:
+                    pass
+
+        return (False, f"Não foi possível abrir a mídia '{uri}'.")
+
+    @classmethod
+    def play_search(cls, query: str, player_name: str = "spotify") -> tuple[bool, str]:
+        """Inicia reprodução de busca de música/artista no Spotify ou reprodutor configurado."""
+        import urllib.parse
+        clean_q = query.strip()
+        encoded = urllib.parse.quote(clean_q)
+        uri = f"spotify:search:{encoded}"
+        ok, msg = cls.open_uri(uri, player_name=player_name)
+        if ok:
+            return (True, f"Buscando e reproduzindo '{clean_q}' no Spotify.")
+        return (False, msg)

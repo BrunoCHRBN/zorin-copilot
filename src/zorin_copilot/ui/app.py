@@ -28,6 +28,7 @@ from ..core.shortcuts import ShortcutManager
 from ..core.vision import ScreenCaptureService
 from ..shell.executor import ActionExecutor
 from ..ai.live import GeminiLiveClient
+from ..ai.local_voice import LocalLiveVoiceClient
 from ..core.fence import ScreenFenceManager, FenceMode
 from ..core.rag import LocalDocumentRAG
 from .live_view import LiveVoiceWidget
@@ -128,6 +129,12 @@ def get_action_icon(action: DesktopAction) -> str:
         return "document-save-symbolic"
     if action.action_type == ActionType.ORGANIZE_FILES:
         return "folder-symbolic"
+    if action.action_type == ActionType.OPEN_DOCUMENT:
+        return "x-office-document-symbolic"
+    if action.action_type == ActionType.READ_PAGE:
+        return "web-browser-symbolic"
+    if action.action_type == ActionType.DEEP_RESEARCH:
+        return "system-search-symbolic"
     return "system-run-symbolic"
 
 
@@ -177,8 +184,8 @@ class CopilotWindow(Adw.ApplicationWindow):
         # Widget pendente durante raciocínio do modelo
         self._pending_turn_box: Gtk.Widget | None = None
 
-        # Voz ao Vivo (Gemini Multimodal Live)
-        self.live_client: GeminiLiveClient | None = None
+        # Voz ao Vivo (Local Soberana com Piper/Whisper ou Gemini Multimodal Live)
+        self.live_client: GeminiLiveClient | LocalLiveVoiceClient | None = None
         self.live_voice_widget: LiveVoiceWidget | None = None
 
         # Cerca de Proteção Espacial (Isolamento de Monitores no Wayland)
@@ -306,21 +313,40 @@ class CopilotWindow(Adw.ApplicationWindow):
             self.start_live_voice()
 
     def start_live_voice(self) -> None:
-        """Inicia o chat de voz ao vivo com o Gemini Live."""
-        if not self.config.gemini_api_key.strip():
-            self.show_toast("Chave de API do Google Gemini necessária para voz ao vivo. Configure em ⚙️.")
+        """Inicia o chat de voz contínua (Local Soberana com Piper/Whisper ou Nuvem com Gemini Live)."""
+        use_local = (
+            self.config.provider in ("local", "ollama", "hybrid")
+            or not self.config.gemini_api_key.strip()
+        )
+
+        if not use_local and not self.config.gemini_api_key.strip():
+            self.show_toast("Chave de API do Google Gemini necessária para voz em nuvem. Configure em ⚙️.")
             self._open_settings(self.voice_call_btn)
             return
 
         if not self.live_client:
-            self.live_client = GeminiLiveClient(
-                config=self.config,
-                executor=self.executor,
-                memory=self.engine.memory,
-            )
+            if use_local:
+                self.live_client = LocalLiveVoiceClient(
+                    config=self.config,
+                    executor=self.executor,
+                    memory=self.engine.memory,
+                    engine=self.engine,
+                )
+                toast_msg = "🎙️ Voz Local Soberana iniciada! Pode falar..."
+            else:
+                self.live_client = GeminiLiveClient(
+                    config=self.config,
+                    executor=self.executor,
+                    memory=self.engine.memory,
+                )
+                toast_msg = "🎙️ Conversa ao vivo iniciada! Pode falar..."
+        else:
+            toast_msg = "🎙️ Conversa por voz iniciada! Pode falar..."
+
         self.live_client.rag = self.rag
         self.live_client.fence = self.fence
-        self.live_client.input_driver.fence = self.fence
+        if hasattr(self.live_client, "input_driver") and self.live_client.input_driver:
+            self.live_client.input_driver.fence = self.fence
 
         self.live_voice_widget = LiveVoiceWidget(
             live_client=self.live_client,
@@ -332,7 +358,7 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.bottom_voice_btn.add_css_class("suggested-action")
         self.welcome_box.set_visible(False)
         self.live_client.start()
-        self.show_toast("🎙️ Conversa ao vivo iniciada! Pode falar...")
+        self.show_toast(toast_msg)
 
     def stop_live_voice(self) -> None:
         """Encerra a chamada de voz ao vivo e consolida a interação no chat ativo."""
@@ -560,6 +586,12 @@ class CopilotWindow(Adw.ApplicationWindow):
                 self._on_toggle_pin()
                 return True
             if keyval == Gdk.KEY_Escape:
+                if self.live_client and getattr(self.live_client, "video_streaming", False):
+                    self.live_client.panic_stop_video()
+                    if self.live_voice_widget:
+                        self.live_voice_widget._update_video_ui(False)
+                        self.live_voice_widget.subtitle_lbl.set_text("🛑 Transmissão de vídeo interrompida (Modo Pânico - Esc).")
+                    return True
                 if self.live_client and self.live_client.is_active():
                     self.stop_live_voice()
                     return True
@@ -1273,13 +1305,20 @@ class CopilotWindow(Adw.ApplicationWindow):
         self._scroll_to_bottom()
 
         def parse_thread():
-            history = self.session.get_history_for_llm()
-            plan = self.engine.parse(
-                text,
-                history=history,
-                image_bytes=active_img,
-                is_area_capture=active_is_area,
-            )
+            try:
+                history = self.session.get_history_for_llm()
+                plan = self.engine.parse(
+                    text,
+                    history=history,
+                    image_bytes=active_img,
+                    is_area_capture=active_is_area,
+                )
+            except Exception as exc:
+                logger.error(f"Erro durante execução da IA em segundo plano: {exc}", exc_info=True)
+                plan = ActionPlan(
+                    thought=f"Ocorreu um erro ao processar sua solicitação: {exc}",
+                    actions=[],
+                )
             GLib.idle_add(self._on_plan_ready, plan, text, active_img)
 
         threading.Thread(target=parse_thread, daemon=True).start()
@@ -1296,30 +1335,56 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.current_plan = plan
         self.welcome_box.set_visible(False)
 
-        # Remove o widget pendente
-        if self._pending_turn_box and self._pending_turn_box.get_parent() == self.chat_stream_box:
-            self.chat_stream_box.remove(self._pending_turn_box)
-            self._pending_turn_box = None
+        try:
+            explanation_text = (plan.thought or "").strip() if plan else ""
+            if not explanation_text and plan and plan.actions:
+                explanation_text = "Executei a ação solicitada no desktop."
+            elif not explanation_text:
+                explanation_text = "Não foi possível obter uma resposta do assistente. Por favor, tente novamente."
 
-        explanation_text = plan.thought.strip()
-        if not explanation_text and plan.actions:
-            explanation_text = "Executei a ação solicitada no desktop."
+            # Registra no histórico do tópico e auto-salva no SQLite
+            turn = self.session.record_turn(prompt=prompt_text, answer=explanation_text)
+            if not turn:
+                turn = ChatTurn(prompt=prompt_text, answer=explanation_text)
 
-        # Registra no histórico do tópico e auto-salva no SQLite
-        turn = self.session.record_turn(prompt=prompt_text, answer=explanation_text)
-        self._save_current_session()
-        self._update_pin_ui()
+            # Renderiza o turno consolidado no fluxo de mensagens ANTES de remover o pendente
+            turn_widget = self._create_turn_widget(turn, plan=plan, image_bytes=attached_image)
+            self.chat_stream_box.append(turn_widget)
 
-        # Renderiza o turno consolidado no fluxo de mensagens
-        turn_widget = self._create_turn_widget(turn, plan=plan, image_bytes=attached_image)
-        self.chat_stream_box.append(turn_widget)
+            # Remove com segurança o widget pendente SOMENTE após o novo estar na tela
+            if self._pending_turn_box and self._pending_turn_box.get_parent() == self.chat_stream_box:
+                self.chat_stream_box.remove(self._pending_turn_box)
+                self._pending_turn_box = None
 
-        # Atualiza o subtítulo da janela com o título da conversa
-        if self.session.title:
-            self.window_title.set_subtitle(self.session.title)
+            # Auto-save e pin UI protegidos
+            try:
+                self._save_current_session()
+                self._update_pin_ui()
+            except Exception as exc_save:
+                logger.error(f"Erro ao salvar sessão: {exc_save}")
 
-        # Atualiza a lista lateral para colocar a conversa no topo
-        self._populate_sidebar_history(filter_query=self.sidebar_search.get_text().strip())
+            # Atualiza o subtítulo da janela com o título da conversa
+            if self.session.title:
+                self.window_title.set_subtitle(self.session.title)
+
+            # Atualiza a lista lateral para colocar a conversa no topo
+            try:
+                self._populate_sidebar_history(filter_query=self.sidebar_search.get_text().strip())
+            except Exception as exc_side:
+                logger.error(f"Erro ao atualizar barra lateral: {exc_side}")
+
+        except Exception as exc:
+            logger.error(f"Erro crítico ao processar resposta da IA: {exc}", exc_info=True)
+            if self._pending_turn_box and self._pending_turn_box.get_parent() == self.chat_stream_box:
+                self.chat_stream_box.remove(self._pending_turn_box)
+                self._pending_turn_box = None
+
+            err_turn = ChatTurn(
+                prompt=prompt_text or "...",
+                answer=f"⚠️ Ocorreu um erro ao processar a resposta: {exc}",
+            )
+            err_widget = self._create_turn_widget(err_turn, plan=plan, image_bytes=attached_image)
+            self.chat_stream_box.append(err_widget)
 
         # Rola suavemente até o final
         self._scroll_to_bottom()
@@ -1367,7 +1432,8 @@ class CopilotWindow(Adw.ApplicationWindow):
             except Exception:
                 pass
 
-        prompt_lbl = Gtk.Label(label=turn.prompt or "...", xalign=0)
+        prompt_txt = (turn.prompt if turn else "...") or "..."
+        prompt_lbl = Gtk.Label(label=prompt_txt, xalign=0)
         prompt_lbl.set_wrap(True)
         prompt_lbl.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
         prompt_lbl.set_selectable(True)
@@ -1399,13 +1465,15 @@ class CopilotWindow(Adw.ApplicationWindow):
         a_badge.set_hexpand(True)
         a_hdr.append(a_badge)
 
+        ans_txt = (turn.answer if turn else "") or ""
+
         if not is_pending:
             copy_b = Gtk.Button.new_from_icon_name("edit-copy-symbolic")
             copy_b.set_tooltip_text("Copiar Resposta")
             copy_b.add_css_class("flat")
             copy_b.add_css_class("circular")
             copy_b.add_css_class("glass-icon-btn")
-            txt_to_copy = turn.answer
+            txt_to_copy = ans_txt
 
             def on_copy(_b, t=txt_to_copy, btn=copy_b):
                 disp = Gdk.Display.get_default()
@@ -1432,19 +1500,23 @@ class CopilotWindow(Adw.ApplicationWindow):
             spin_box.append(spin_lbl)
             assistant_card.append(spin_box)
         else:
-            markup = format_markdown_to_markup(turn.answer)
+            markup = format_markdown_to_markup(ans_txt)
             ans_lbl = Gtk.Label(xalign=0, yalign=0)
             ans_lbl.set_wrap(True)
             ans_lbl.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
             ans_lbl.set_selectable(True)
-            ans_lbl.set_use_markup(True)
-            ans_lbl.set_markup(markup)
+            try:
+                ans_lbl.set_use_markup(True)
+                ans_lbl.set_markup(markup)
+            except Exception:
+                ans_lbl.set_use_markup(False)
+                ans_lbl.set_text(ans_txt)
             ans_lbl.set_margin_top(2)
             ans_lbl.set_margin_bottom(4)
             assistant_card.append(ans_lbl)
 
             self.answer_label = ans_lbl
-            self._raw_answer_text = turn.answer
+            self._raw_answer_text = ans_txt
 
             # Renderiza ações executáveis se presentes no plano
             if plan and plan.actions:
@@ -1537,6 +1609,9 @@ class CopilotWindow(Adw.ApplicationWindow):
             ActionType.MEDIA_CONTROL: "controle de mídia",
             ActionType.WRITE_FILE: "salvar documento",
             ActionType.ORGANIZE_FILES: "organização de arquivos",
+            ActionType.OPEN_DOCUMENT: "abrir documento",
+            ActionType.READ_PAGE: "leitura web",
+            ActionType.DEEP_RESEARCH: "pesquisa web",
         }.get(action.action_type, action.action_type.value)
 
         if action.action_type == ActionType.FIX_COMMAND:
@@ -1578,10 +1653,32 @@ class CopilotWindow(Adw.ApplicationWindow):
             )
             row.set_use_markup(True)
             exec_label = "Controlar"
+        elif action.action_type == ActionType.OPEN_DOCUMENT:
+            p_num = action.params.get("page_number", 1)
+            row = Adw.ActionRow(
+                title=f"<b>📄 Abrir: {html.escape(action.describe())}</b>",
+                subtitle=f"Arquivo: <tt>{html.escape(action.target)}</tt> (Pág. {p_num})",
+            )
+            row.set_use_markup(True)
+            exec_label = "Abrir Documento"
+        elif action.action_type == ActionType.READ_PAGE:
+            row = Adw.ActionRow(
+                title=f"<b>🌐 Ler Página: {html.escape(action.describe())}</b>",
+                subtitle=f"URL: <tt>{html.escape(action.target)}</tt>",
+            )
+            row.set_use_markup(True)
+            exec_label = "Ler Conteúdo"
+        elif action.action_type == ActionType.DEEP_RESEARCH:
+            row = Adw.ActionRow(
+                title=f"<b>🔍 Pesquisa Web: {html.escape(action.describe())}</b>",
+                subtitle=f"Tema: <tt>{html.escape(action.target)}</tt>",
+            )
+            row.set_use_markup(True)
+            exec_label = "Pesquisar"
         else:
             row = Adw.ActionRow(
-                title=action.describe(),
-                subtitle=f"Tipo: {badge_desc}",
+                title=html.escape(action.describe()),
+                subtitle=f"Tipo: {html.escape(badge_desc)}",
             )
             exec_label = "Recortar Agora" if (action.action_type == ActionType.CAPTURE_SCREEN and action.target == "area") else "Executar"
 
@@ -1916,6 +2013,14 @@ class ZorinCopilotApp(Adw.Application):
             "Inicia imediatamente a conversa de voz ao vivo (Gemini Live)",
             None,
         )
+        self.add_main_option(
+            "background",
+            ord("b"),
+            GLib.OptionFlags.NONE,
+            GLib.OptionArg.NONE,
+            "Inicia o assistente em segundo plano para inicialização no boot/login",
+            None,
+        )
 
     def do_startup(self):
         Adw.Application.do_startup(self)
@@ -1926,6 +2031,8 @@ class ZorinCopilotApp(Adw.Application):
                 ShortcutManager.register(cfg.global_shortcut_key)
             if getattr(cfg, "crop_shortcut_enabled", True):
                 ShortcutManager.register_crop(getattr(cfg, "crop_shortcut_key", "<Super><Shift>s"))
+            if getattr(cfg, "voice_shortcut_enabled", True):
+                ShortcutManager.register_voice(getattr(cfg, "voice_shortcut_key", "<Super><Shift>v"))
         except Exception:
             pass
 
@@ -1944,6 +2051,7 @@ class ZorinCopilotApp(Adw.Application):
         is_toggle = options.contains("toggle")
         is_crop = options.contains("crop")
         is_voice = options.contains("voice")
+        is_bg = options.contains("background")
         args = command_line.get_arguments()
         if "--toggle" in args or "-t" in args:
             is_toggle = True
@@ -1951,9 +2059,14 @@ class ZorinCopilotApp(Adw.Application):
             is_crop = True
         if "--voice" in args or "-v" in args:
             is_voice = True
+        if "--background" in args or "-b" in args or "--daemon" in args or "--hidden" in args:
+            is_bg = True
 
         win = self._get_or_create_window()
-        if is_voice:
+        if is_bg:
+            # Inicialização em segundo plano (boot/login): mantém janela oculta
+            return 0
+        elif is_voice:
             win.summon_hud()
             win.start_live_voice()
         elif is_crop:

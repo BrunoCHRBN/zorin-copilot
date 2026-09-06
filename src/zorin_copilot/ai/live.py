@@ -25,6 +25,7 @@ try:
 except ImportError:
     websockets = None
 
+from ..core.a11y import DesktopInspector
 from ..core.apps import AppManager
 from ..core.browser import BrowserManager
 from ..core.calendar import CalendarManager
@@ -34,12 +35,20 @@ from ..core.fence import ScreenFenceManager
 from ..core.memory import MemoryManager
 from ..core.rag import LocalDocumentRAG
 from ..core.vision import ScreenCaptureService
-from ..core.web_search import WebSearchClient
+from ..core.web_search import DeepWebResearcher, WebSearchClient
 from ..shell.executor import ActionExecutor
 from ..shell.input_driver import VirtualInputDriver
 from .actions import ActionPlan, ActionType, DesktopAction
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_SENSITIVE_KEYWORDS = {
+    "1password", "bitwarden", "keepass", "keepassxc", "seahorse", "authenticator",
+    "banco", "bank", "itau", "itaú", "bradesco", "santander", "nubank", "caixa",
+    "inter", "c6", "bb", "extrato", "cartao", "cartão", "cvv",
+    "anônima", "anonima", "incognito", "private browsing", "inprivate",
+    "irpf", "declaracao", "declaração", "senha", "password", "credenciais", "credentials"
+}
 
 
 class LiveVoiceState(Enum):
@@ -454,6 +463,33 @@ LIVE_TOOLS_DECLARATION = [
                     "required": ["file_path"],
                 },
             },
+            {
+                "name": "read_open_webpage",
+                "description": "Lê e higieniza o conteúdo da página ou artigo atualmente aberto no navegador do usuário (Chrome, Firefox, Brave) ou de uma URL informada.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "url": {
+                            "type": "STRING",
+                            "description": "URL específica para ler (opcional; se omitido, lê a aba ativa no navegador)",
+                        },
+                    },
+                },
+            },
+            {
+                "name": "deep_web_search",
+                "description": "Realiza uma pesquisa aprofundada na web, navegando e lendo múltiplos artigos completos para gerar uma análise detalhada com fontes.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "query": {
+                            "type": "STRING",
+                            "description": "Tema, assunto ou pergunta aprofundada a ser investigada na web",
+                        },
+                    },
+                    "required": ["query"],
+                },
+            },
         ]
     }
 ]
@@ -482,6 +518,7 @@ class GeminiLiveClient:
         self.email_mgr = EmailManager(memory=self.memory)
         self.cal_mgr = CalendarManager(memory=self.memory)
         self.rag = LocalDocumentRAG(memory=self.memory)
+        self.inspector = getattr(self.executor, "inspector", None) or DesktopInspector()
         self.state: LiveVoiceState = LiveVoiceState.DISCONNECTED
 
         # Callbacks para interface gráfica (GTK4)
@@ -491,10 +528,19 @@ class GeminiLiveClient:
         self.on_transcript: Callable[[str, str], None] | None = None
         self.on_error: Callable[[str], None] | None = None
         self.on_video_state_change: Callable[[bool], None] | None = None
+        self.on_video_frame_preview: Callable[[bytes], None] | None = None
+        self.on_privacy_state_change: Callable[[bool, str], None] | None = None
+        self.on_window_focus_change: Callable[[str, str], None] | None = None
 
         self._is_running = False
         self._is_muted = False
         self._is_video_streaming = False
+        self.video_mode: str = "active_window"  # "active_window" (padrão) ou "fullscreen"
+        self.sensitive_keywords: set[str] = set(DEFAULT_SENSITIVE_KEYWORDS)
+        self._last_sent_frame_bytes: bytes | None = None
+        self._unchanged_frames_count: int = 0
+        self._is_privacy_shielded: bool = False
+        self._last_focused_window_title: str = ""
         self._video_thread: threading.Thread | None = None
         self._video_frames_count: int = 0
         self._thread: threading.Thread | None = None
@@ -677,17 +723,24 @@ class GeminiLiveClient:
                 monitors_desc = ", ".join([f"Monitor {m.index}: {m.name}" for m in self.fence.monitors])
 
                 system_prompt_text = (
-                    "Você é o Zorin Copilot, assistente nativo de voz e visão multimodal do sistema operacional Zorin OS 18 (Linux / GNOME / Wayland). "
-                    "Você conversa por áudio em tempo real com o usuário em português brasileiro de forma concisa, simpática e prestativa. "
-                    "Você tem controle e visão do desktop em tempo real quando o usuário compartilha a tela (Live Video a 1 FPS). "
-                    f"Telas conectadas no desktop do usuário: [{monitors_desc}]. A tela ativa autorizada para ações no momento é '{active_mon_name}'. "
-                    "Para alternar a tela autorizada de trabalho, use a ferramenta 'screen_fence_control'. "
-                    "Para clicar ou digitar no desktop, use 'mouse_click', 'keyboard_type' e 'keyboard_hotkey'. Suas coordenadas serão validadas pela cerca espacial. "
-                    "Ao redigir ou iniciar e-mails, use 'email_compose'. NUNCA invente ou adivinhe endereços de e-mail; se não souber, use 'contact_lookup' ou pergunte ao usuário. "
-                    "Para marcar compromissos ou consultar a agenda, use 'calendar_event'. "
-                    "Para pesquisas na web, use 'browser_search' ou 'web_search'. "
+                    "Você é o Zorin Copilot, assistente e parceiro nativo de voz e visão do Zorin OS 18 (Linux / GNOME / Wayland). "
+                    "Você conversa por áudio em tempo real com o usuário em português brasileiro como um colega de trabalho próximo, prestativo e ágil. "
+                    "\n\nDIRETRIZES DE FALA NATURAL E CADÊNCIA ORAL:\n"
+                    "1. Use linguagem falada brasileira autêntica e marcadores naturais ('Opa, beleza!', 'Deixa comigo!', 'Prontinho!', 'Vou dar uma olhada nisso...'). "
+                    "2. NUNCA fale sintaxe de texto como asteriscos, markdown, listas de marcadores ou URLs longas. Converta dados para fala fluida e agradável de ouvir. "
+                    "3. Em ações operacionais no desktop (abrir apps, ajustar som, etc.), responda com UMA ou DUAS frases curtas e execute a ferramenta imediatamente. Deixe explicações detalhadas apenas se o usuário pedir para explicar algo. "
+                    "4. Ao disparar ferramentas que demandam busca externa ou leitura, dê um retorno oral rápido prévio ('Buscando rapidinho...', 'Lendo o arquivo...') para preencher a espera de forma natural. "
+                    "5. Se o usuário estiver transmitindo a tela (Live Video a 1 FPS), você enxerga a janela em foco ou a tela em tempo real. Comente e interaja diretamente sobre o que vê sem pedir para o usuário descrever. "
+                    "\n\nCONTROLE DO DESKTOP E FERRAMENTAS:\n"
+                    f"- Monitores conectados: [{monitors_desc}]. Monitor autorizado ativo: '{active_mon_name}'. "
+                    "- Para alternar a tela autorizada de trabalho, use 'screen_fence_control'. "
+                    "- Para interagir no desktop, use 'mouse_click', 'keyboard_type' e 'keyboard_hotkey' (validadas pela cerca espacial). "
+                    "- Ao redigir ou iniciar e-mails, use 'email_compose'. Não adivinhe e-mails; se não souber, use 'contact_lookup'. "
+                    "- Para compromissos e agenda, use 'calendar_event'. "
+                    "- Para pesquisas na web, use 'browser_search', 'web_search' ou 'deep_web_search'. "
+                    "- Para documentos locais (PDFs, relatórios), use 'search_documents', 'read_document_page' e 'open_document_file'. "
                     f"\n\n{context_summary}\n\n"
-                    "Sempre que o usuário pedir para fazer algo no computador, use imediatamente as ferramentas apropriadas e comente o resultado brevemente por voz."
+                    "Trate o usuário com carinho, eficiência e naturalidade. Sempre que ele pedir algo, use imediatamente a ferramenta certa e confirme com um toque leve de voz!"
                 )
 
                 setup_payload = {
@@ -779,7 +832,10 @@ class GeminiLiveClient:
                     if num_samples > 0:
                         samples = struct.unpack(f"<{num_samples}h", pcm_bytes)
                         rms = math.sqrt(sum(s * s for s in samples) / num_samples)
-                        norm_level = min(1.0, rms / 15000.0)
+                        if rms > 70.0:
+                            norm_level = min(1.0, ((rms - 70.0) / 1800.0) ** 0.7)
+                        else:
+                            norm_level = 0.0
                         self.on_audio_level(norm_level)
                 except Exception:
                     pass
@@ -1139,6 +1195,40 @@ class GeminiLiveClient:
                 ok, msg = self.rag.open_document(fpath, page_number=pnum)
                 return {"success": ok, "message": msg}
 
+            elif name == "read_open_webpage":
+                url_param = args.get("url", "").strip() or None
+                res = BrowserManager.read_page(url_param)
+                if res.get("success"):
+                    return {
+                        "success": True,
+                        "title": res.get("title", ""),
+                        "url": res.get("url", ""),
+                        "content": res.get("text", "")[:4000],
+                        "message": f"Conteúdo da página '{res.get('title', '')}' lido com sucesso.",
+                    }
+                return {
+                    "success": False,
+                    "message": res.get("text", "Falha ao ler página web."),
+                }
+
+            elif name == "deep_web_search":
+                q = args.get("query", "").strip()
+                researcher = DeepWebResearcher(self.search_client)
+                res = researcher.deep_search(q)
+                if res.get("success"):
+                    return {
+                        "success": True,
+                        "query": q,
+                        "summary": res.get("summary", ""),
+                        "sources": res.get("sources", []),
+                        "report": res.get("report", ""),
+                        "message": f"Pesquisa profunda sobre '{q}' concluída.",
+                    }
+                return {
+                    "success": False,
+                    "message": res.get("summary", "Falha na pesquisa profunda."),
+                }
+
             return {"success": False, "message": f"Ferramenta desconhecida: {name}"}
 
         except Exception as exc:
@@ -1175,6 +1265,18 @@ class GeminiLiveClient:
         """Verifica se o streaming contínuo da tela está ativo."""
         return self._is_video_streaming
 
+    def set_video_mode(self, mode: str) -> None:
+        """Define o modo de captura visual ('active_window' ou 'fullscreen')."""
+        if mode in ("active_window", "fullscreen"):
+            self.video_mode = mode
+            logger.info(f"Modo de captura de vídeo alterado para: {mode}")
+
+    def panic_stop_video(self) -> bool:
+        """Interrompe imediatamente o streaming de vídeo da tela (Panic Button)."""
+        logger.warning("Panic Button acionado: Interrompendo transmissão de tela imediatamente.")
+        self.stop_video_stream()
+        return True
+
     def start_video_stream(self, fps: float = 1.0) -> bool:
         """Inicia streaming contínuo da tela para o Gemini Live com consentimento explícito."""
         if not self._is_running:
@@ -1183,6 +1285,11 @@ class GeminiLiveClient:
             return True
 
         self._is_video_streaming = True
+        self._last_sent_frame_bytes = None
+        self._unchanged_frames_count = 0
+        self._is_privacy_shielded = False
+        self._last_focused_window_title = ""
+
         if self.on_video_state_change:
             try:
                 self.on_video_state_change(True)
@@ -1203,6 +1310,7 @@ class GeminiLiveClient:
         if not self._is_video_streaming:
             return
         self._is_video_streaming = False
+        self._last_sent_frame_bytes = None
         if self.on_video_state_change:
             try:
                 self.on_video_state_change(False)
@@ -1218,32 +1326,140 @@ class GeminiLiveClient:
             return self.start_video_stream(fps=fps)
 
     def _video_stream_worker(self, fps: float = 1.0) -> None:
-        """Loop em background que captura e transmite frames de tela para o WebSocket da Live API."""
-        delay = max(0.5, 1.0 / max(0.2, fps))
+        """Loop em background com Frame Diffing adaptativo, Crop na janela ativa e Privacy Shield."""
+        delay = max(0.4, 1.0 / max(0.2, fps))
+        self._last_sent_frame_bytes = None
+        self._unchanged_frames_count = 0
+        self._is_privacy_shielded = False
+        self._last_focused_window_title = ""
+
         while self._is_video_streaming and self._is_running:
             if self._ws and self._loop and self._loop.is_running():
                 try:
-                    ok, img_bytes, _ = ScreenCaptureService.capture(
-                        interactive=False, max_size=1024, quality=70
-                    )
-                    if ok and img_bytes and self._is_video_streaming and self._is_running:
-                        b64_img = base64.b64encode(img_bytes).decode("utf-8")
-                        frame_msg = {
-                            "realtimeInput": {
-                                "mediaChunks": [
-                                    {
-                                        "mimeType": "image/jpeg",
-                                        "data": b64_img,
-                                    }
-                                ]
+                    # 1. Identifica janela ativa e seus limites na tela
+                    app_name, win_title, rect = self.inspector.get_active_window_info()
+                    title_low = f"{app_name} {win_title}".lower()
+
+                    # 2. Avaliação de Privacidade (Privacy Shield)
+                    is_sensitive = any(kw in title_low for kw in self.sensitive_keywords)
+
+                    if is_sensitive:
+                        if not self._is_privacy_shielded:
+                            self._is_privacy_shielded = True
+                            if self.on_privacy_state_change:
+                                try:
+                                    self.on_privacy_state_change(True, f"{app_name} ({win_title[:30]})")
+                                except Exception:
+                                    pass
+
+                            # Notifica o Gemini de que o usuário entrou em área protegida
+                            shield_ctx = {
+                                "clientContent": {
+                                    "turns": [{
+                                        "role": "user",
+                                        "parts": [{
+                                            "text": "[Sistema: Janela sensível detectada. O Privacy Shield ocultou a visão da tela para proteção do usuário.]"
+                                        }]
+                                    }]
+                                }
+                            }
+                            asyncio.run_coroutine_threadsafe(
+                                self._ws.send(json.dumps(shield_ctx)), self._loop
+                            )
+
+                        # Gera imagem segura com selo de proteção
+                        shield_bytes = ScreenCaptureService.get_privacy_shield_image()
+                        if shield_bytes and self._is_video_streaming and self._is_running:
+                            b64_img = base64.b64encode(shield_bytes).decode("utf-8")
+                            frame_msg = {
+                                "realtimeInput": {
+                                    "mediaChunks": [{"mimeType": "image/jpeg", "data": b64_img}]
+                                }
+                            }
+                            asyncio.run_coroutine_threadsafe(
+                                self._ws.send(json.dumps(frame_msg)), self._loop
+                            )
+                            if self.on_video_frame_preview:
+                                try:
+                                    self.on_video_frame_preview(shield_bytes)
+                                except Exception:
+                                    pass
+
+                        time.sleep(delay * 1.5)
+                        continue
+
+                    # 3. Restaura visão se usuário retornou para janela não-sensível
+                    if self._is_privacy_shielded:
+                        self._is_privacy_shielded = False
+                        if self.on_privacy_state_change:
+                            try:
+                                self.on_privacy_state_change(False, "")
+                            except Exception:
+                                pass
+                        restore_ctx = {
+                            "clientContent": {
+                                "turns": [{
+                                    "role": "user",
+                                    "parts": [{
+                                        "text": "[Sistema: O usuário retornou para uma janela segura. A visão da tela foi restabelecida.]"
+                                    }]
+                                }]
                             }
                         }
                         asyncio.run_coroutine_threadsafe(
-                            self._ws.send(json.dumps(frame_msg)), self._loop
+                            self._ws.send(json.dumps(restore_ctx)), self._loop
                         )
-                        self._video_frames_count += 1
+
+                    # 4. Captura com enquadramento (Crop na janela ativa ou tela inteira)
+                    crop_rect = rect if (self.video_mode == "active_window" and rect) else None
+                    ok, img_bytes, _ = ScreenCaptureService.capture(
+                        interactive=False, max_size=1024, quality=75, crop_rect=crop_rect
+                    )
+
+                    if ok and img_bytes and self._is_video_streaming and self._is_running:
+                        # 5. Notificação de mudança de foco da janela ativa (Context Injection)
+                        current_focus_id = f"{app_name} - {win_title}" if win_title else app_name
+                        if current_focus_id and current_focus_id != self._last_focused_window_title:
+                            self._last_focused_window_title = current_focus_id
+                            if self.on_window_focus_change:
+                                try:
+                                    self.on_window_focus_change(app_name, win_title)
+                                except Exception:
+                                    pass
+
+                        # 6. Frame Diffing (detecção de tela estática para economizar tokens)
+                        diff = ScreenCaptureService.compute_frame_diff(
+                            img_bytes, self._last_sent_frame_bytes
+                        )
+
+                        # Se a diferença for insignificante (< 1.5%) e ainda não expirou o keep-alive (5 quadros)
+                        is_static = (diff < 0.015) and (self._last_sent_frame_bytes is not None)
+                        if is_static and self._unchanged_frames_count < 5:
+                            self._unchanged_frames_count += 1
+                        else:
+                            # Envia para a Gemini Live API
+                            self._unchanged_frames_count = 0
+                            self._last_sent_frame_bytes = img_bytes
+                            b64_img = base64.b64encode(img_bytes).decode("utf-8")
+                            frame_msg = {
+                                "realtimeInput": {
+                                    "mediaChunks": [{"mimeType": "image/jpeg", "data": b64_img}]
+                                }
+                            }
+                            asyncio.run_coroutine_threadsafe(
+                                self._ws.send(json.dumps(frame_msg)), self._loop
+                            )
+                            self._video_frames_count += 1
+
+                        # 7. Sempre despacha para a miniatura PiP para feedback visual fluido do usuário
+                        if self.on_video_frame_preview:
+                            try:
+                                self.on_video_frame_preview(img_bytes)
+                            except Exception:
+                                pass
+
                 except Exception as exc:
-                    logger.debug(f"Erro no envio de frame de vídeo contínuo: {exc}")
+                    logger.debug(f"Erro no pipeline de streaming de vídeo: {exc}")
 
             time.sleep(delay)
 

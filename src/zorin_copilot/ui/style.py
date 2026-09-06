@@ -582,6 +582,21 @@ window.dark-glass .prompt-bar-card:focus-within {
     margin-top: 4px;
     margin-bottom: 6px;
 }
+
+.pip-preview-card {
+    border-radius: 12px;
+    border: 1px solid rgba(21, 166, 240, 0.35);
+    background-color: rgba(10, 14, 20, 0.85);
+    padding: 6px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+}
+
+.privacy-shield-banner {
+    border-radius: 10px;
+    background-color: rgba(229, 165, 10, 0.15);
+    border: 1px solid rgba(229, 165, 10, 0.45);
+    padding: 6px 12px;
+}
 """
 
 _provider_installed = False

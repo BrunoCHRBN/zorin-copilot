@@ -13,10 +13,10 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
-from ..ai.providers import GeminiProvider, OllamaProvider, OpenAICompatProvider
+from ..ai.providers import GeminiProvider, HybridProvider, OllamaProvider, OpenAICompatProvider
 from ..core.config import CopilotConfig
 from ..core.memory import MemoryManager
-from ..core.shortcuts import ShortcutManager
+from ..core.shortcuts import AutostartManager, ShortcutManager
 
 
 class PreferencesDialog(Adw.PreferencesDialog):
@@ -42,13 +42,14 @@ class PreferencesDialog(Adw.PreferencesDialog):
         provider_group = Adw.PreferencesGroup(title="Provedor Ativo")
         
         self.provider_model = Gtk.StringList.new([
-            "Google Gemini (Recomendado / Nuvem)",
-            "Ollama (Local / Offline)",
+            "Híbrido Inteligente (Gemini + Auto-Failover Local GPU)",
+            "Google Gemini (Nuvem / AI Studio)",
+            "Ollama (100% Local Offline / RX 7600 GPU)",
             "OpenAI / Compatível (Groq, OpenRouter)",
         ])
         self.provider_row = Adw.ComboRow(
             title="Motor de IA",
-            subtitle="Escolha onde suas perguntas serão processadas",
+            subtitle="Híbrido prioriza Gemini e comuta para Ollama local se a cota esgotar",
             model=self.provider_model,
         )
         self.provider_row.connect("notify::selected", self._on_provider_changed)
@@ -101,14 +102,17 @@ class PreferencesDialog(Adw.PreferencesDialog):
         # Grupo: Ollama (Local)
         # ---------------------------------------------------------------------
         self.ollama_group = Adw.PreferencesGroup(
-            title="Configuração do Ollama (Local)",
-            description="Processamento 100% privado e offline no seu computador.",
+            title="Configuração do Ollama (Local na GPU)",
+            description="Processamento privado acelerado na GPU AMD Radeon RX 7600 (Vulkan/ROCm).",
         )
         self.ollama_url_row = Adw.EntryRow(title="Endereço do Servidor")
         self.ollama_group.add(self.ollama_url_row)
 
-        self.ollama_model_row = Adw.EntryRow(title="Nome do Modelo (ex: llama3.2, mistral)")
+        self.ollama_model_row = Adw.EntryRow(title="Modelo de Texto (ex: qwen2.5:7b, mistral)")
         self.ollama_group.add(self.ollama_model_row)
+
+        self.ollama_vision_model_row = Adw.EntryRow(title="Modelo de Visão / Recortes (ex: minicpm-v, llava)")
+        self.ollama_group.add(self.ollama_vision_model_row)
         page.add(self.ollama_group)
 
         # ---------------------------------------------------------------------
@@ -164,9 +168,9 @@ class PreferencesDialog(Adw.PreferencesDialog):
 
         action_group.add(test_row)
         page.add(action_group)
-
         self._build_memory_page()
         self._build_shortcuts_page()
+        self._build_documents_privacy_page()
 
     def _build_shortcuts_page(self) -> None:
         page = Adw.PreferencesPage(title="Atalho & HUD", icon_name="input-keyboard-symbolic")
@@ -236,6 +240,115 @@ class PreferencesDialog(Adw.PreferencesDialog):
         )
         crop_group.add(crop_info_row)
         page.add(crop_group)
+
+        # ---------------------------------------------------------------------
+        # Grupo: Atalho Global de Conversa por Voz (Live Voice)
+        # ---------------------------------------------------------------------
+        voice_group = Adw.PreferencesGroup(
+            title="Atalho Global de Conversa por Voz",
+            description="Permite iniciar instantaneamente a chamada de voz contínua de qualquer aplicativo ou tela.",
+        )
+
+        self.voice_shortcut_switch_row = Adw.SwitchRow(
+            title="Ativar Atalho de Conversa por Voz",
+            subtitle="Registra a combinação global no GNOME para iniciar conversa por voz",
+        )
+        voice_group.add(self.voice_shortcut_switch_row)
+
+        self.voice_shortcut_options = [
+            ("<Super><Shift>v", "Super + Shift + V (Padrão - Conversa por Voz)"),
+            ("<Primary><Alt>m", "Ctrl + Alt + M (Microfone)"),
+            ("<Primary><Alt>v", "Ctrl + Alt + V (Voz)"),
+            ("<Super>v", "Super + V"),
+        ]
+        self.voice_shortcut_combo_row = Adw.ComboRow(
+            title="Combinação de Teclas de Voz",
+            subtitle="Selecione a tecla para acionar a chamada de voz",
+            model=Gtk.StringList.new([label for _, label in self.voice_shortcut_options]),
+        )
+        voice_group.add(self.voice_shortcut_combo_row)
+
+        self.visualizer_style_options = [
+            ("waves", "Ondas Fluidas Multicamadas (Estilo Fitas / Siri)"),
+            ("bars", "Barras de Equalizador (Espectro com Cantos Arredondados)"),
+            ("matrix", "Matriz de Pontos (LED Grid Futurista)"),
+            ("orb", "Orbe Pulsante (Esferas Concêntricas Clássicas)"),
+        ]
+        self.visualizer_style_combo_row = Adw.ComboRow(
+            title="Estilo do Visualizador de Áudio",
+            subtitle="Animação interativa exibida durante a conversa por voz",
+            model=Gtk.StringList.new([label for _, label in self.visualizer_style_options]),
+        )
+        voice_group.add(self.visualizer_style_combo_row)
+
+        voice_info_row = Adw.ActionRow(
+            title="Voz Local Contínua & Soberana",
+            subtitle="Usa Piper TTS (voz masculina brasileira pt_BR-faber-medium) e faster-whisper na CPU. 0 MB de VRAM gastos.",
+        )
+        voice_group.add(voice_info_row)
+        page.add(voice_group)
+
+        # ---------------------------------------------------------------------
+        # Grupo: Inicialização com o Sistema (Autostart)
+        # ---------------------------------------------------------------------
+        autostart_group = Adw.PreferencesGroup(
+            title="Inicialização com o Zorin OS",
+            description="Permite que o assistente esteja ativo na memória no login sem abrir janelas intrusivas.",
+        )
+        self.autostart_switch_row = Adw.SwitchRow(
+            title="Iniciar com o Sistema",
+            subtitle="Inicia o Zorin Copilot em segundo plano para resposta instantânea ao atalho global",
+        )
+        autostart_group.add(self.autostart_switch_row)
+        page.add(autostart_group)
+
+    def _build_documents_privacy_page(self) -> None:
+        page = Adw.PreferencesPage(title="Documentos & Privacidade", icon_name="security-high-symbolic")
+        self.add(page)
+
+        # 1. Zonas de Confiança
+        zones_group = Adw.PreferencesGroup(
+            title="Zonas de Confiança de Documentos",
+            description="Diretórios locais monitorados para busca e respostas RAG.",
+        )
+
+        self.trusted_dirs_row = Adw.ActionRow(
+            title="Pastas Confiáveis (Leitura e Síntese)",
+            subtitle=", ".join(self.config.trusted_directories) if self.config.trusted_directories else "~/Documentos",
+        )
+        zones_group.add(self.trusted_dirs_row)
+
+        self.quarantine_dirs_row = Adw.ActionRow(
+            title="Zona de Cautela (Downloads)",
+            subtitle=", ".join(self.config.quarantine_directories) if self.config.quarantine_directories else "~/Downloads",
+        )
+        zones_group.add(self.quarantine_dirs_row)
+        page.add(zones_group)
+
+        # 2. Blindagem e PII
+        privacy_group = Adw.PreferencesGroup(
+            title="Blindagem e Proteção de Dados",
+            description="Políticas de segurança contra vazamento de dados confidenciais e injeções indiretas.",
+        )
+
+        self.mask_pii_switch_row = Adw.SwitchRow(
+            title="Mascarar Dados Sensíveis (PII)",
+            subtitle="Substitui automaticamente CPFs, cartões e chaves de API por marcadores anônimos antes do envio à nuvem",
+        )
+        privacy_group.add(self.mask_pii_switch_row)
+
+        self.rag_local_only_switch_row = Adw.SwitchRow(
+            title="RAG Local Estrito (Ollama Offline)",
+            subtitle="Responde sobre documentos locais exclusivamente via modelo local offline (nenhum dado sai do computador)",
+        )
+        privacy_group.add(self.rag_local_only_switch_row)
+
+        self.ignored_patterns_entry_row = Adw.EntryRow(
+            title="Padrões Ignorados (.copilotignore)",
+        )
+        privacy_group.add(self.ignored_patterns_entry_row)
+
+        page.add(privacy_group)
 
     def _build_memory_page(self) -> None:
         page = Adw.PreferencesPage(title="Base de Conhecimento", icon_name="document-properties-symbolic")
@@ -328,7 +441,7 @@ class PreferencesDialog(Adw.PreferencesDialog):
 
     def _load_values(self) -> None:
         # Define provedor ativo no ComboRow
-        prov_map = {"gemini": 0, "ollama": 1, "openai": 2}
+        prov_map = {"hybrid": 0, "gemini": 1, "ollama": 2, "openai": 3}
         self.provider_row.set_selected(prov_map.get(self.config.provider, 0))
 
         # Gemini
@@ -346,6 +459,7 @@ class PreferencesDialog(Adw.PreferencesDialog):
         # Ollama
         self.ollama_url_row.set_text(self.config.ollama_url)
         self.ollama_model_row.set_text(self.config.ollama_model)
+        self.ollama_vision_model_row.set_text(getattr(self.config, "ollama_vision_model", "minicpm-v"))
 
         # OpenAI
         self.openai_url_row.set_text(self.config.openai_url)
@@ -373,6 +487,35 @@ class PreferencesDialog(Adw.PreferencesDialog):
                 break
         self.crop_shortcut_combo_row.set_selected(matching_crop_idx)
 
+        # Atalho Global de Conversa por Voz
+        self.voice_shortcut_switch_row.set_active(getattr(self.config, "voice_shortcut_enabled", True))
+        matching_voice_idx = 0
+        current_voice_key = getattr(self.config, "voice_shortcut_key", "<Super><Shift>v")
+        for idx, (b_code, _) in enumerate(self.voice_shortcut_options):
+            if b_code == current_voice_key:
+                matching_voice_idx = idx
+                break
+        self.voice_shortcut_combo_row.set_selected(matching_voice_idx)
+
+        # Estilo do visualizador de áudio
+        current_style = getattr(self.config, "voice_visualizer_style", "waves")
+        matching_style_idx = 0
+        for idx, (s_code, _) in enumerate(self.visualizer_style_options):
+            if s_code == current_style:
+                matching_style_idx = idx
+                break
+        self.visualizer_style_combo_row.set_selected(matching_style_idx)
+
+        # Autostart com o Sistema
+        is_auto = AutostartManager.is_enabled() or getattr(self.config, "autostart_enabled", False)
+        self.autostart_switch_row.set_active(is_auto)
+
+        # Documentos e Privacidade
+        self.mask_pii_switch_row.set_active(getattr(self.config, "mask_pii", True))
+        self.rag_local_only_switch_row.set_active(getattr(self.config, "rag_local_only", False))
+        pats = getattr(self.config, "ignored_patterns", [])
+        self.ignored_patterns_entry_row.set_text(", ".join(pats))
+
         self._update_visibility()
 
     def _on_gemini_model_changed(self, *_args) -> None:
@@ -384,14 +527,19 @@ class PreferencesDialog(Adw.PreferencesDialog):
 
     def _update_visibility(self) -> None:
         sel = self.provider_row.get_selected()
-        self.gemini_group.set_visible(sel == 0)
-        self.ollama_group.set_visible(sel == 1)
-        self.openai_group.set_visible(sel == 2)
+        # 0: Híbrido (exibe Gemini + Ollama para que o usuário veja ambas configurações)
+        # 1: Gemini (apenas Gemini)
+        # 2: Ollama (apenas Ollama)
+        # 3: OpenAI (apenas OpenAI)
+        self.gemini_group.set_visible(sel in (0, 1))
+        self.ollama_group.set_visible(sel in (0, 2))
+        self.openai_group.set_visible(sel == 3)
 
     def _collect_current_config(self) -> CopilotConfig:
         cfg = CopilotConfig()
         sel = self.provider_row.get_selected()
-        cfg.provider = ["gemini", "ollama", "openai"][sel]
+        prov_rev = {0: "hybrid", 1: "gemini", 2: "ollama", 3: "openai"}
+        cfg.provider = prov_rev.get(sel, "hybrid")
 
         # Gemini
         cfg.gemini_api_key = self.gemini_key_row.get_text().strip()
@@ -404,8 +552,9 @@ class PreferencesDialog(Adw.PreferencesDialog):
             cfg.gemini_model = "gemini-3.8-flash"
 
         # Ollama
-        cfg.ollama_url = self.ollama_url_row.get_text().strip() or "http://localhost:11434"
-        cfg.ollama_model = self.ollama_model_row.get_text().strip() or "llama3.2:latest"
+        cfg.ollama_url = self.ollama_url_row.get_text().strip() or "http://127.0.0.1:11434"
+        cfg.ollama_model = self.ollama_model_row.get_text().strip() or "qwen2.5:7b"
+        cfg.ollama_vision_model = self.ollama_vision_model_row.get_text().strip() or "minicpm-v"
 
         # OpenAI
         cfg.openai_url = self.openai_url_row.get_text().strip() or "https://api.openai.com/v1"
@@ -431,6 +580,33 @@ class PreferencesDialog(Adw.PreferencesDialog):
         else:
             cfg.crop_shortcut_key = "<Super><Shift>s"
 
+        # Atalho Global de Conversa por Voz
+        cfg.voice_shortcut_enabled = self.voice_shortcut_switch_row.get_active()
+        sel_voice = self.voice_shortcut_combo_row.get_selected()
+        if 0 <= sel_voice < len(self.voice_shortcut_options):
+            cfg.voice_shortcut_key = self.voice_shortcut_options[sel_voice][0]
+        else:
+            cfg.voice_shortcut_key = "<Super><Shift>v"
+
+        # Estilo do Visualizador de Áudio
+        sel_style = self.visualizer_style_combo_row.get_selected()
+        if 0 <= sel_style < len(self.visualizer_style_options):
+            cfg.voice_visualizer_style = self.visualizer_style_options[sel_style][0]
+        else:
+            cfg.voice_visualizer_style = "waves"
+
+        # Autostart
+        cfg.autostart_enabled = self.autostart_switch_row.get_active()
+
+        # Documentos e Privacidade
+        cfg.mask_pii = self.mask_pii_switch_row.get_active()
+        cfg.rag_local_only = self.rag_local_only_switch_row.get_active()
+        raw_pats = self.ignored_patterns_entry_row.get_text()
+        cfg.ignored_patterns = [p.strip() for p in raw_pats.split(",") if p.strip()]
+        cfg.trusted_directories = list(self.config.trusted_directories)
+        cfg.quarantine_directories = list(self.config.quarantine_directories)
+        cfg.max_file_size_mb = self.config.max_file_size_mb
+
         return cfg
 
     def _on_test_connection(self, _btn: Gtk.Button) -> None:
@@ -438,10 +614,16 @@ class PreferencesDialog(Adw.PreferencesDialog):
         self.test_spinner.start()
 
         def run_test():
-            if cfg.provider == "gemini":
+            if cfg.provider == "hybrid":
+                prov = HybridProvider(
+                    gemini_provider=GeminiProvider(cfg.gemini_api_key, cfg.gemini_model),
+                    ollama_provider=OllamaProvider(cfg.ollama_url, cfg.ollama_model, cfg.ollama_vision_model),
+                    mode="hybrid",
+                )
+            elif cfg.provider == "gemini":
                 prov = GeminiProvider(cfg.gemini_api_key, cfg.gemini_model)
             elif cfg.provider == "ollama":
-                prov = OllamaProvider(cfg.ollama_url, cfg.ollama_model)
+                prov = OllamaProvider(cfg.ollama_url, cfg.ollama_model, cfg.ollama_vision_model)
             else:
                 prov = OpenAICompatProvider(cfg.openai_url, cfg.openai_api_key, cfg.openai_model)
 
@@ -473,6 +655,18 @@ class PreferencesDialog(Adw.PreferencesDialog):
             ShortcutManager.register_crop(cfg.crop_shortcut_key)
         else:
             ShortcutManager.unregister_crop()
+
+        # Sincroniza Atalho de Conversa por Voz
+        if getattr(cfg, "voice_shortcut_enabled", True):
+            ShortcutManager.register_voice(getattr(cfg, "voice_shortcut_key", "<Super><Shift>v"))
+        else:
+            ShortcutManager.unregister_voice()
+
+        # Sincroniza Inicialização com o Sistema (Autostart)
+        if cfg.autostart_enabled:
+            AutostartManager.enable()
+        else:
+            AutostartManager.disable()
 
         if self.on_saved:
             self.on_saved(cfg)

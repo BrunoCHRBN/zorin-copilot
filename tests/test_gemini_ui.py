@@ -148,5 +148,38 @@ class GeminiUILayoutTest(unittest.TestCase):
         self.assertFalse(self.win.fence.is_emergency_stopped)
 
 
+    def test_on_plan_ready_renders_and_persists_turn(self):
+        """Garante que _on_plan_ready adiciona o turno ao chat_stream_box e persiste no histórico sem sumir."""
+        plan = ActionPlan(thought="Olá! Como posso ajudar você hoje no Zorin OS?")
+        self.win._on_plan_ready(plan, prompt_text="oi", attached_image=None)
+
+        # 1. Turno registrado na sessão
+        self.assertEqual(len(self.win.session.turns), 1)
+        self.assertEqual(self.win.session.turns[0].prompt, "oi")
+        self.assertEqual(self.win.session.turns[0].answer, "Olá! Como posso ajudar você hoje no Zorin OS?")
+
+        # 2. Widget consolidado no fluxo de chat
+        self.assertFalse(self.win.welcome_box.get_visible())
+        self.assertIsNotNone(self.win.chat_stream_box.get_first_child())
+        self.assertIsNone(self.win._pending_turn_box)
+
+        # 3. Histórico lateral populado
+        topics = self.win.engine.memory.list_chat_topics()
+        self.assertGreaterEqual(len(topics), 1)
+        self.assertEqual(topics[0]["id"], self.win.session.id)
+
+    def test_action_rows_for_new_action_types(self):
+        """Verifica se _create_action_row renderiza sem erros OPEN_DOCUMENT, READ_PAGE e DEEP_RESEARCH."""
+        actions = [
+            DesktopAction(ActionType.OPEN_DOCUMENT, "/home/user/doc.pdf", {"page_number": 2}),
+            DesktopAction(ActionType.READ_PAGE, "https://zorin.com"),
+            DesktopAction(ActionType.DEEP_RESEARCH, "IA no Linux"),
+        ]
+        for act in actions:
+            row = self.win._create_action_row(act)
+            self.assertIsNotNone(row)
+            self.assertIsInstance(row, Adw.ActionRow)
+
+
 if __name__ == "__main__":
     unittest.main()

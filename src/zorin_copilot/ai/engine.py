@@ -4,10 +4,13 @@
 
 from __future__ import annotations
 
+import ast
 import logging
+import math
+import operator
 import re
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from .actions import ActionPlan, ActionType, DesktopAction
@@ -23,6 +26,62 @@ from ..core.rag import LocalDocumentRAG
 from ..core.web_search import WebSearchClient
 
 logger = logging.getLogger(__name__)
+
+
+def get_easter_date(year: int) -> date:
+    """Calcula a data do Domingo de Páscoa usando o algoritmo de Meeus/Jones/Butcher."""
+    a = year % 19
+    b = year // 100
+    c = year % 100
+    d = b // 4
+    e = b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i = c // 4
+    k = c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    month = (h + l - 7 * m + 114) // 31
+    day = ((h + l - 7 * m + 114) % 31) + 1
+    return date(year, month, day)
+
+
+def get_holiday_calendar(year: int) -> list[tuple[str, list[str], date, str]]:
+    """Gera o calendário completo de feriados nacionais e datas comemorativas brasileiras para um ano."""
+    easter = get_easter_date(year)
+    carnaval = easter - timedelta(days=47)
+    sexta_santa = easter - timedelta(days=2)
+    corpus_christi = easter + timedelta(days=60)
+
+    # Segundo domingo de maio (Dia das Mães)
+    may1 = date(year, 5, 1)
+    mothers_day = date(year, 5, 1 + (6 - may1.weekday()) % 7 + 7)
+
+    # Segundo domingo de agosto (Dia dos Pais)
+    aug1 = date(year, 8, 1)
+    fathers_day = date(year, 8, 1 + (6 - aug1.weekday()) % 7 + 7)
+
+    return [
+        ("Ano Novo", ["ano novo", "reveillon", "réveillon", "confraternizacao universal", "confraternização universal", "1 de janeiro", "primeiro de janeiro"], date(year, 1, 1), "Feriado Nacional"),
+        ("Carnaval", ["carnaval"], carnaval, "Ponto Facultativo"),
+        ("Sexta-feira Santa", ["sexta feira santa", "sexta-feira santa", "paixao de cristo", "paixão de cristo"], sexta_santa, "Feriado Nacional"),
+        ("Páscoa", ["pascoa", "páscoa"], easter, "Data Comemorativa"),
+        ("Tiradentes", ["tiradentes"], date(year, 4, 21), "Feriado Nacional"),
+        ("Dia do Trabalhador", ["dia do trabalhador", "dia do trabalho", "1 de maio", "primeiro de maio"], date(year, 5, 1), "Feriado Nacional"),
+        ("Dia das Mães", ["dia das maes", "dia das mães"], mothers_day, "Data Comemorativa"),
+        ("Dia dos Namorados", ["dia dos namorados"], date(year, 6, 12), "Data Comemorativa"),
+        ("Corpus Christi", ["corpus christi"], corpus_christi, "Ponto Facultativo"),
+        ("Dia dos Pais", ["dia dos pais"], fathers_day, "Data Comemorativa"),
+        ("Independência do Brasil", ["independencia", "independência", "7 de setembro", "sete de setembro"], date(year, 9, 7), "Feriado Nacional"),
+        ("Nossa Senhora Aparecida / Dia das Crianças", ["nossa senhora aparecida", "aparecida", "dia das criancas", "dia das crianças", "12 de outubro"], date(year, 10, 12), "Feriado Nacional"),
+        ("Dia de Finados", ["finados", "dia de finados", "2 de novembro"], date(year, 11, 2), "Feriado Nacional"),
+        ("Proclamação da República", ["proclamacao da republica", "proclamação da república", "15 de novembro"], date(year, 11, 15), "Feriado Nacional"),
+        ("Dia da Consciência Negra", ["consciencia negra", "consciência negra", "20 de novembro"], date(year, 11, 20), "Feriado Nacional"),
+        ("Véspera de Natal", ["vespera de natal", "véspera de natal", "24 de dezembro"], date(year, 12, 24), "Data Comemorativa"),
+        ("Natal", ["natal", "25 de dezembro"], date(year, 12, 25), "Feriado Nacional"),
+        ("Véspera de Ano Novo / Fim de Ano", ["vespera de ano novo", "véspera de ano novo", "fim de ano", "fim do ano", "31 de dezembro"], date(year, 12, 31), "Data Comemorativa"),
+    ]
 
 
 class IntentEngine:
@@ -47,6 +106,262 @@ class IntentEngine:
         """Recarrega a configuração e reinicializa o provedor de LLM."""
         self.config = config or CopilotConfig.load()
         self.llm_provider = get_llm_provider(self.config)
+
+    def _get_situational_context(self) -> str:
+        """Coleta contexto situacional silencioso do desktop (janela ativa, horário, mídia tocando)."""
+        details = []
+        try:
+            active_app, active_win, _ = self.inspector.get_active_window_info()
+            if active_app:
+                title_info = f" ('{active_win[:60]}')" if active_win else ""
+                details.append(f"Janela em foco: {active_app}{title_info}")
+        except Exception as exc:
+            logger.debug(f"Erro ao obter janela em foco para contexto: {exc}")
+
+        try:
+            now = datetime.now()
+            today = now.date()
+            dias_semana_full = ["Segunda-feira", "Terça-feira", "Quarta-feira", "Quinta-feira", "Sexta-feira", "Sábado", "Domingo"]
+            meses_full = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
+            dia_extenso = f"{dias_semana_full[today.weekday()]}, {today.day:02d} de {meses_full[today.month - 1]} de {today.year}"
+
+            hour = now.hour
+            if 5 <= hour < 12:
+                periodo = "Manhã"
+            elif 12 <= hour < 18:
+                periodo = "Tarde"
+            elif 18 <= hour < 24:
+                periodo = "Noite"
+            else:
+                periodo = "Madrugada"
+            details.append(f"Data e Horário: {dia_extenso} às {now.strftime('%H:%M')} ({periodo})")
+
+            upcoming = [h for h in get_holiday_calendar(today.year) if h[2] >= today]
+            if not upcoming:
+                upcoming = [h for h in get_holiday_calendar(today.year + 1) if h[2] >= today]
+            if upcoming:
+                h_name, _, h_date, _ = upcoming[0]
+                diff = (h_date - today).days
+                when = "hoje" if diff == 0 else ("amanhã" if diff == 1 else f"em {diff} dias")
+                details.append(f"Próximo Feriado de Referência: {h_name} em {h_date.day:02d}/{h_date.month:02d}/{h_date.year} ({when})")
+        except Exception:
+            pass
+
+        try:
+            track = MediaPlayerManager.get_track_info()
+            if track.playback_status == "Playing" and track.title:
+                player = track.player_name.replace("org.mpris.MediaPlayer2.", "").capitalize() if track.player_name else "Player"
+                artist_info = f" por '{track.artist}'" if track.artist else ""
+                details.append(f"Mídia tocando: '{track.title}'{artist_info} ({player})")
+        except Exception:
+            pass
+
+        if not details:
+            return ""
+        return "[Contexto Situacional do Desktop]:\n" + "\n".join(f"- {d}" for d in details)
+
+    def _resolve_calendar_or_math(self, prompt: str) -> ActionPlan | None:
+        """Resolve perguntas sobre calendário, feriados, contagem de datas e expressões matemáticas com precisão determinística (0ms)."""
+        low = prompt.strip().lower()
+
+        # -------------------------------------------------------------
+        # 1. Matemática determinística segura (AST)
+        # -------------------------------------------------------------
+        # Percentual: ex: "quanto é 15% de 800", "calcule 20% de 250"
+        m_pct = re.search(r'(\d+(?:[.,]\d+)?)\s*%\s*(?:de|das|dos)?\s*(\d+(?:[.,]\d+)?)', low)
+        if m_pct and any(w in low for w in ["quanto", "calcule", "calcular", "%", "por cento", "porcento"]):
+            try:
+                pct = float(m_pct.group(1).replace(",", "."))
+                base = float(m_pct.group(2).replace(",", "."))
+                res = (pct / 100.0) * base
+                res_str = f"{res:g}"
+                resp = f"**{m_pct.group(1)}% de {m_pct.group(2)}** é igual a **{res_str}**."
+                return ActionPlan(
+                    thought=resp,
+                    actions=[DesktopAction(ActionType.ANSWER, resp, description="Cálculo de porcentagem")]
+                )
+            except Exception:
+                pass
+
+        # Raiz quadrada: ex: "raiz quadrada de 144", "calcule a raiz de 81"
+        m_sqrt = re.search(r'raiz\s*(?:quadrada)?\s*(?:de)?\s*(\d+(?:[.,]\d+)?)', low)
+        if m_sqrt:
+            try:
+                val = float(m_sqrt.group(1).replace(",", "."))
+                if val >= 0:
+                    res = math.isqrt(int(val)) if val.is_integer() and math.isqrt(int(val))**2 == int(val) else math.sqrt(val)
+                    resp = f"A raiz quadrada de **{m_sqrt.group(1)}** é **{res:g}**."
+                    return ActionPlan(
+                        thought=resp,
+                        actions=[DesktopAction(ActionType.ANSWER, resp, description="Cálculo de raiz quadrada")]
+                    )
+            except Exception:
+                pass
+
+        # Expressões aritméticas simples: ex: "quanto é 25 * 4", "calcule 1500 / 12", "quanto dá (10 + 5) * 3"
+        m_calc = re.search(r'(?:quanto (?:é|e|dá|da)|calcule|calcular|resultado de)\s*(.+)', low)
+        if m_calc:
+            raw_expr = m_calc.group(1).strip().rstrip("?!. ")
+            expr = (
+                raw_expr.replace(" vezes ", " * ")
+                .replace(" x ", " * ")
+                .replace(" dividido por ", " / ")
+                .replace(" divido por ", " / ")
+                .replace(" mais ", " + ")
+                .replace(" menos ", " - ")
+                .replace("^", "**")
+            )
+            if re.fullmatch(r'[\d\s\+\-\*\/\(\)\.\,]+', expr) and any(op in expr for op in "+-*/"):
+                clean_expr = expr.replace(",", ".")
+                safe_ops = {
+                    ast.Add: operator.add,
+                    ast.Sub: operator.sub,
+                    ast.Mult: operator.mul,
+                    ast.Div: operator.truediv,
+                    ast.FloorDiv: operator.floordiv,
+                    ast.Mod: operator.mod,
+                    ast.Pow: operator.pow,
+                    ast.USub: operator.neg,
+                    ast.UAdd: operator.pos,
+                }
+                def eval_ast(node: Any) -> float | int:
+                    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+                        return node.value
+                    if isinstance(node, ast.BinOp) and type(node.op) in safe_ops:
+                        left = eval_ast(node.left)
+                        right = eval_ast(node.right)
+                        return safe_ops[type(node.op)](left, right)
+                    if isinstance(node, ast.UnaryOp) and type(node.op) in safe_ops:
+                        return safe_ops[type(node.op)](eval_ast(node.operand))
+                    raise ValueError("Operação não permitida")
+
+                try:
+                    tree = ast.parse(clean_expr, mode="eval")
+                    res = eval_ast(tree.body)
+                    res_str = f"{res:g}"
+                    resp = f"O resultado de **{raw_expr}** é **{res_str}**."
+                    return ActionPlan(
+                        thought=resp,
+                        actions=[DesktopAction(ActionType.ANSWER, resp, description="Cálculo matemático determinístico")]
+                    )
+                except Exception:
+                    pass
+
+        # -------------------------------------------------------------
+        # 2. Calendário, Feriados e Contagem de Dias/Semanas/Dias da Semana
+        # -------------------------------------------------------------
+        today = date.today()
+        dias_semana_pt = ["segunda-feira", "terça-feira", "quarta-feira", "quinta-feira", "sexta-feira", "sábado", "domingo"]
+        meses_pt = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"]
+        weekday_map = {
+            "domingo": 6, "domingos": 6,
+            "sabado": 5, "sabados": 5, "sábado": 5, "sábados": 5,
+            "sexta": 4, "sextas": 4, "sexta-feira": 4, "sextas-feiras": 4,
+            "quinta": 3, "quintas": 3, "quinta-feira": 3, "quintas-feiras": 3,
+            "quarta": 2, "quartas": 2, "quarta-feira": 2, "quartas-feiras": 2,
+            "terca": 1, "tercas": 1, "terça": 1, "terças": 1, "terça-feira": 1, "terças-feiras": 1,
+            "segunda": 0, "segundas": 0, "segunda-feira": 0, "segundas-feiras": 0,
+        }
+
+        # A) Próximo(s) feriado(s)
+        if any(q in low for q in ["proximo feriado", "próximo feriado", "proximos feriados", "próximos feriados", "qual o feriado", "qual é o feriado"]):
+            upcoming = [h for h in get_holiday_calendar(today.year) if h[2] >= today]
+            if not upcoming:
+                upcoming = [h for h in get_holiday_calendar(today.year + 1) if h[2] >= today]
+            if upcoming:
+                name, _, h_date, cat = upcoming[0]
+                diff = (h_date - today).days
+                dia_sem = dias_semana_pt[h_date.weekday()]
+                mes_str = meses_pt[h_date.month - 1]
+                when_str = "hoje" if diff == 0 else ("amanhã" if diff == 1 else f"daqui a **{diff} dias**")
+                resp = f"O próximo feriado é **{name}**, no dia **{h_date.day:02d} de {mes_str} de {h_date.year}** ({dia_sem}), {when_str}."
+                if len(upcoming) > 1:
+                    resp += "\n\n**Próximos feriados seguintes:**\n"
+                    for h_name, _, d, _ in upcoming[1:5]:
+                        resp += f"• **{h_name}**: {d.day:02d} de {meses_pt[d.month - 1]} ({dias_semana_pt[d.weekday()]})\n"
+                return ActionPlan(
+                    thought=resp,
+                    actions=[DesktopAction(ActionType.ANSWER, resp, description="Próximo feriado nacional")]
+                )
+
+        # B) Busca de evento ou feriado específico (Natal, Páscoa, Ano Novo, etc.)
+        year_match = re.search(r'\b(20\d\d)\b', low)
+        req_year = int(year_match.group(1)) if year_match else None
+        search_years = [req_year] if req_year else [today.year, today.year + 1]
+
+        matched_event = None
+        for y in search_years:
+            for h_name, aliases, h_date, cat in get_holiday_calendar(y):
+                if any(alias in low for alias in aliases):
+                    if req_year or h_date >= today:
+                        matched_event = (h_name, h_date, cat)
+                        break
+            if matched_event:
+                break
+
+        if not matched_event:
+            return None
+
+        event_name, event_date, cat = matched_event
+        diff_days = (event_date - today).days
+        event_weekday = dias_semana_pt[event_date.weekday()]
+        today_weekday = dias_semana_pt[today.weekday()]
+        mes_str = meses_pt[event_date.month - 1]
+
+        # 1. Contagem de um dia da semana específico (ex: "quantos domingos faltam para o natal")
+        found_weekday = None
+        for w_name, w_idx in weekday_map.items():
+            if re.search(rf'\bquant[oa]s?\s+{w_name}\b', low) or re.search(rf'\b{w_name}\s+(?:faltam|restam|ate|até)\b', low):
+                found_weekday = (w_name, w_idx)
+                break
+
+        if found_weekday:
+            w_name, w_idx = found_weekday
+            future_count = sum(1 for d in range(1, diff_days + 1) if (today + timedelta(days=d)).weekday() == w_idx)
+            today_is_target = (today.weekday() == w_idx)
+            count_detail = f"**{future_count} {w_name}** restantes até lá"
+            if today_is_target:
+                count_detail += f" (ou **{future_count + 1}** considerando o dia de hoje)"
+
+            weeks = diff_days // 7
+            week_text = f" (cerca de {weeks} semanas)" if weeks > 0 else ""
+            resp = (
+                f"Hoje é {today_weekday}, {today.day:02d} de {meses_pt[today.month - 1]} de {today.year}.\n\n"
+                f"O **{event_name}** ({event_date.day:02d} de {mes_str} de {event_date.year}) cairá em uma **{event_weekday}**.\n"
+                f"Faltam **{diff_days} dias**{week_text}, com {count_detail}."
+            )
+            return ActionPlan(
+                thought=resp,
+                actions=[DesktopAction(ActionType.ANSWER, resp, description=f"Contagem de {w_name} até {event_name}")]
+            )
+
+        # 2. Contagem geral de dias ou semanas ("quantos dias faltam para o natal", "quanto tempo falta para...")
+        if any(q in low for q in ["quantos dias faltam", "quantos dias até", "quantos dias ate", "quanto tempo falta", "quantas semanas faltam", "dias faltam"]):
+            weeks = diff_days // 7
+            week_str = f" (cerca de **{weeks} semanas**)" if weeks > 0 else ""
+            resp = (
+                f"Hoje é {today_weekday}, {today.day:02d} de {meses_pt[today.month - 1]} de {today.year}.\n\n"
+                f"Faltam exatamente **{diff_days} dias**{week_str} para o **{event_name}** "
+                f"({event_date.day:02d} de {mes_str} de {event_date.year}, {event_weekday})."
+            )
+            return ActionPlan(
+                thought=resp,
+                actions=[DesktopAction(ActionType.ANSWER, resp, description=f"Dias restantes até {event_name}")]
+            )
+
+        # 3. Dia da semana ou data ("que dia cai o natal", "quando é o natal", "que dia da semana é o natal")
+        if any(q in low for q in ["que dia cai", "que dia sera", "que dia será", "quando é", "quando e", "qual o dia do", "qual é o dia do", "que dia da semana"]):
+            when_str = "hoje" if diff_days == 0 else ("amanhã" if diff_days == 1 else f"faltando **{diff_days} dias**")
+            resp = (
+                f"O **{event_name}** em {event_date.year} será no dia **{event_date.day:02d} de {mes_str}** "
+                f"(uma **{event_weekday}**), {when_str}."
+            )
+            return ActionPlan(
+                thought=resp,
+                actions=[DesktopAction(ActionType.ANSWER, resp, description=f"Data de {event_name}")]
+            )
+
+        return None
 
     def parse(
         self,
@@ -85,7 +400,11 @@ class IntentEngine:
             if self.llm_provider.is_configured():
                 try:
                     app_names = [a.get_name() for a in AppManager.get_all_apps() if a.get_name()]
-                    context_summary = self.memory.get_context_summary()
+                    context_parts = [self.memory.get_context_summary()]
+                    situational = self._get_situational_context()
+                    if situational:
+                        context_parts.append(situational)
+                    context_summary = "\n\n".join(p for p in context_parts if p)
                     explanation, actions = self.llm_provider.chat(
                         prompt_clean,
                         app_list=app_names,
@@ -152,15 +471,14 @@ class IntentEngine:
             self.memory.save_fact(fact_key, fact_content, category="usuario", source="usuario")
             return ActionPlan(
                 thought=(
-                    f"Entendido! Guardei na minha base de conhecimento:\n\n"
-                    f"• \"{fact_content}\"\n\n"
-                    "Eu levarei essa informação em conta em todas as próximas respostas e ações."
+                    f"Anotado! Lembro disso nas próximas vezes:\n\n"
+                    f"• \"{fact_content}\""
                 ),
                 actions=[
                     DesktopAction(
                         ActionType.ANSWER,
                         f"Conhecimento memorizado: '{fact_content}'",
-                        description="Salvo na base de conhecimento permanente",
+                        description="Salvo na base de conhecimento",
                     )
                 ],
             )
@@ -377,6 +695,11 @@ class IntentEngine:
         # 1. CAMADA RÁPIDA LOCAL: Relógio do Sistema e Configurações (0ms)
         # =========================================================================
 
+        # Resolução Instantânea e Determinística: Calendário, Feriados e Cálculos Matemáticos (0ms)
+        calc_or_calendar_plan = self._resolve_calendar_or_math(prompt_clean)
+        if calc_or_calendar_plan:
+            return calc_or_calendar_plan
+
         # Relógio, Data e Calendário Local Instantâneo (0ms)
         dias_sem = ["Segunda-feira", "Terça-feira", "Quarta-feira", "Quinta-feira", "Sexta-feira", "Sábado", "Domingo"]
         meses_pt = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
@@ -404,11 +727,66 @@ class IntentEngine:
             )
 
         # Horário
-        if any(q in low for q in ["que horas são", "que horas sao", "qual a hora atual", "horario atual", "horário atual"]):
+        if any(q in low for q in [
+            "que horas são", "que horas sao", "qual a hora atual", "horario atual", "horário atual",
+            "que horas", "diga as horas", "fale as horas", "quantas horas", "que hora é", "que hora e",
+        ]) or low.rstrip("?!. ") in ["horas", "hora"]:
             resp = f"Agora são exatamente **{now.strftime('%H:%M')}**."
             return ActionPlan(
                 thought=resp,
                 actions=[DesktopAction(ActionType.ANSWER, resp, description="Hora atual do sistema")],
+            )
+
+        # Cortesia e Agradecimento Rápido (0ms)
+        clean_courtesy = low.rstrip("!., ")
+        if clean_courtesy in [
+            "muito obrigado", "muito obrigada", "obrigado", "obrigada",
+            "valeu", "valeu mesmo", "agradeço", "obrigado copilot", "muito obrigado copilot", "obrigadão",
+        ]:
+            resp = "Por nada! Estou sempre aqui no seu desktop para o que precisar."
+            return ActionPlan(
+                thought=resp,
+                actions=[DesktopAction(ActionType.ANSWER, resp, description="Resposta de cortesia")],
+            )
+
+        # Saudações Rápidas (0ms)
+        if clean_courtesy in [
+            "olá", "ola", "oi", "opa", "e aí", "e ai", "bom dia", "boa tarde", "boa noite",
+            "olá copilot", "ola copilot", "oi copilot"
+        ]:
+            hour = now.hour
+            periodo = "Bom dia" if 5 <= hour < 12 else ("Boa tarde" if 12 <= hour < 18 else "Boa noite")
+            user_name = self.memory.get_user_name() if hasattr(self.memory, "get_user_name") else ""
+            saudacao = f"{periodo}, {user_name}!" if user_name else f"{periodo}!"
+            resp = f"{saudacao} Como posso ajudar você agora no Zorin OS?"
+            return ActionPlan(
+                thought=resp,
+                actions=[DesktopAction(ActionType.ANSWER, resp, description="Saudação rápida")],
+            )
+
+        # Apresentação e Capacidades do Copilot ("o que você pode fazer", "quem é você")
+        if any(w in low for w in [
+            "o que você pode fazer", "o que voce pode fazer",
+            "o que você faz", "o que voce faz",
+            "o que vc pode fazer", "o que vc faz",
+            "quais são suas funções", "quais sao suas funcoes", "quais suas funções", "quais suas funcoes",
+            "quais suas habilidades", "quais são suas habilidades",
+            "quem é você", "quem e você", "quem e voce", "quem e vc", "quem é vc",
+            "como você pode me ajudar", "como voce pode me ajudar",
+        ]):
+            resp = (
+                "Eu sou o Zorin Copilot, seu assistente inteligente integrado ao Zorin OS!\n\n"
+                "Aqui estão as minhas principais capacidades:\n"
+                "• **Abrir e controlar aplicativos:** Iniciar navegadores, terminais, reprodutores e outros programas.\n"
+                "• **Ajustes de sistema:** Controlar volume, tema visual e janelas.\n"
+                "• **Visão computacional local:** Analisar sua tela inteira ou recortes de erros com IA offline.\n"
+                "• **Conversa por voz contínua:** Bater papo, tirar dúvidas e executar tarefas diretamente por áudio.\n"
+                "• **Inteligência e produtividade:** Fazer pesquisas na web, ler páginas e gerenciar arquivos."
+            )
+            return ActionPlan(
+                thought=resp,
+                actions=[DesktopAction(ActionType.ANSWER, resp, description="Apresentação das capacidades do Zorin Copilot")],
+                raw_response=resp,
             )
 
         # Esquema de Cores (Modo Escuro / Claro)
@@ -557,6 +935,15 @@ class IntentEngine:
         # 1.5 CONTROLE DE MÍDIA E ORGANIZAÇÃO RÁPIDA (0ms)
         # =========================================================================
 
+        # Integrações Profundas de Aplicações e Serviços (Spotify, Gmail, Google Drive/Docs, YouTube, Maps)
+        try:
+            from ..core.app_integrations import AppIntentRouter
+            app_plan = AppIntentRouter.resolve_intent(prompt_clean)
+            if app_plan:
+                return app_plan
+        except Exception as exc:
+            logger.debug(f"Erro no AppIntentRouter: {exc}")
+
         # Controle de Mídia / Spotify (Pausar)
         if any(w in low for w in [
             "pausar musica", "pausar música", "pausa a musica", "pausa a música",
@@ -668,16 +1055,123 @@ class IntentEngine:
                 ],
             )
 
-        # Busca semântica e localização em documentos pessoais (RAG Local)
-        if any(w in low for w in [
+        # =========================================================================
+        # 1.2 NAVEGAÇÃO WEB APROFUNDADA (Pesquisas Detalhadas e Leitura de Páginas)
+        # =========================================================================
+
+        # Pesquisa Aprofundada / Deep Research
+        if any(t in low for t in [
+            "pesquisa aprofundada", "pesquisa detalhada", "pesquise aprofundado",
+            "pesquise em detalhes", "deep search", "investigue sobre",
+            "relatório detalhado sobre", "relatorio detalhado sobre"
+        ]):
+            from ..core.web_search import DeepWebResearcher
+            deep_q = re.sub(
+                r"^(?:faça uma pesquisa aprofundada sobre|faça uma pesquisa detalhada sobre|pesquisa aprofundada sobre|pesquisa detalhada sobre|pesquise em detalhes sobre|pesquise aprofundadamente sobre|deep search|investigue sobre)\s+",
+                "",
+                prompt_clean,
+                flags=re.I,
+            ).strip() or prompt_clean
+
+            researcher = DeepWebResearcher(search_client=self.search_client)
+            res = researcher.deep_search(
+                deep_q,
+                llm_provider=self.llm_provider if self.llm_provider.is_configured() else None,
+            )
+            actions = [
+                DesktopAction(
+                    ActionType.DEEP_RESEARCH,
+                    deep_q,
+                    {"sources": res.get("sources", [])},
+                    description=f"Pesquisa aprofundada sobre '{deep_q}'",
+                )
+            ]
+            if res.get("sources"):
+                first_src = res["sources"][0]
+                actions.append(
+                    DesktopAction(
+                        ActionType.OPEN_URL,
+                        first_src["url"],
+                        description=f"Abrir fonte: {first_src['title'][:40]}...",
+                    )
+                )
+            return ActionPlan(thought=res.get("report") or res.get("summary", ""), actions=actions)
+
+        # Leitura de Páginas Abertas ou URLs
+        url_match = re.search(r"https?://[^\s]+", prompt_clean)
+        is_read_page = (
+            any(t in low for t in [
+                "leia a página aberta", "leia a pagina aberta", "leia o site aberto",
+                "resuma a página aberta", "resuma a pagina aberta", "o que diz a página aberta",
+                "o que tem na página do navegador", "o que tem na pagina do navegador",
+                "leia a url", "leia o link", "resuma a url", "resuma o link",
+                "leia a página", "leia a pagina"
+            ])
+            or (bool(url_match) and any(w in low for w in ["leia", "resuma", "analise", "o que diz", "conteúdo", "conteudo"]))
+        )
+        if is_read_page:
+            from ..core.browser import BrowserManager
+            target_url = url_match.group(0) if url_match else None
+            page_data = BrowserManager.read_page(url=target_url)
+
+            if page_data.get("success"):
+                title = page_data.get("title") or target_url or "Página aberta"
+                content_text = page_data.get("text", "")
+                url_found = page_data.get("url") or target_url or ""
+
+                actions = [
+                    DesktopAction(
+                        ActionType.READ_PAGE,
+                        url_found or title,
+                        {"url": url_found, "title": title},
+                        description=f"Leitura de página web: '{title[:45]}'",
+                    )
+                ]
+                if url_found:
+                    actions.append(DesktopAction(ActionType.OPEN_URL, url_found, description=f"Abrir no navegador: {title[:40]}..."))
+
+                # Se houver LLM configurado, sintetiza análise sob medida
+                if self.llm_provider.is_configured() and content_text:
+                    try:
+                        read_prompt = (
+                            f"Você é o Zorin Copilot. Abaixo está o conteúdo extraído da página web "
+                            f"'{title}' ({url_found}). Analise e responda à dúvida do usuário com clareza e precisão em português:\n\n"
+                            f"[CONTEÚDO DA PÁGINA]:\n{content_text[:7000]}\n\n"
+                            f"[SOLICITAÇÃO DO USUÁRIO]:\n{prompt_clean}"
+                        )
+                        explanation, _ = self.llm_provider.chat(read_prompt)
+                        return ActionPlan(thought=explanation, actions=actions)
+                    except Exception as exc:
+                        logger.warning(f"Erro ao processar conteúdo da página com LLM: {exc}")
+
+                thought = (
+                    f"### 🌐 Leitura da Página: **{title}**\n\n"
+                    f"{page_data.get('description', '')}\n\n"
+                    f"{content_text[:1200]}...\n\n"
+                    f"*(Conteúdo completo extraído com {page_data.get('length', 0)} caracteres)*"
+                )
+                return ActionPlan(thought=thought, actions=actions)
+            else:
+                return ActionPlan(
+                    thought=page_data.get("text", "Não foi possível ler o conteúdo da página."),
+                    actions=[],
+                )
+
+        # Busca semântica e localização em documentos pessoais (RAG Local: PDFs, contratos, planilhas)
+        is_rag_query = any(w in low for w in [
             "buscar documento", "buscar documentos", "busque nos meus documentos", "busque no meu documento",
             "buscar nos meus documentos", "buscar em documentos", "pesquisar documento", "pesquisar documentos",
             "pesquise nos meus documentos", "procurar documento", "procure nos meus documentos",
             "procurar nos meus documentos", "onde está o documento", "onde esta o documento",
             "encontre o documento", "encontre nos documentos", "procurar arquivo", "procure o arquivo",
-            "busque o arquivo", "buscar arquivo", "pesquise o arquivo", "pesquisar arquivo"
-        ]):
-            # Extrai termo de busca removendo o prefixo
+            "busque o arquivo", "buscar arquivo", "pesquise o arquivo", "pesquisar arquivo",
+            "no meu contrato", "no contrato", "na minha planilha", "na planilha",
+            "o que diz o contrato", "o que diz a planilha", "qual o valor no contrato",
+            "qual o valor na planilha", "dúvida sobre o pdf", "duvida sobre o pdf",
+            "leia o contrato", "leia a planilha", "resumo do contrato", "resuma o contrato",
+        ])
+        if is_rag_query:
+            # Extrai termo de busca removendo o prefixo se for comando de busca
             search_term = re.sub(
                 r"^(buscar|busque|pesquisar|pesquise|procurar|procure|encontrar|encontre|onde está|onde esta)\s+(nos\s+meus\s+documentos|no\s+meu\s+documento|em\s+documentos|documentos|o\s+documento|documento|o\s+arquivo|arquivo)?\s*(sobre|de|com)?\s*",
                 "",
@@ -688,6 +1182,26 @@ class IntentEngine:
                 search_term = prompt_clean
 
             if getattr(self, "rag", None):
+                # Se for pergunta elaborada, utiliza ask() com síntese
+                is_question = any(q in low for q in ["qual", "o que", "quanto", "como", "resumo", "resuma", "dúvida", "duvida"])
+                if is_question:
+                    rag_ans = self.rag.ask(prompt_clean, llm_provider=self.llm_provider)
+                    if rag_ans["found"]:
+                        actions = []
+                        for cit in rag_ans["results"]:
+                            actions.append(
+                                DesktopAction(
+                                    ActionType.OPEN_DOCUMENT,
+                                    cit.file_path,
+                                    {"page_number": cit.page_number},
+                                    description=f"Abrir {cit.file_name} (Pág. {cit.page_number})",
+                                )
+                            )
+                        return ActionPlan(
+                            thought=rag_ans["answer"],
+                            actions=actions,
+                        )
+
                 results = self.rag.search(search_term, limit=4)
                 if results:
                     thought_lines = [f"Encontrei {len(results)} trecho(s) relevante(s) nos seus documentos para '{search_term}':\n"]
@@ -752,9 +1266,28 @@ class IntentEngine:
                 # Obtém nomes de alguns apps instalados para dar contexto ao LLM
                 app_names = [a.get_name() for a in AppManager.get_all_apps() if a.get_name()]
                 context_parts = [self.memory.get_context_summary()]
+                situational = self._get_situational_context()
+                if situational:
+                    context_parts.append(situational)
 
                 doc_matches = []
-                if getattr(self, "rag", None):
+                greeting_words = {
+                    "oi", "ola", "olá", "alo", "alô", "hey", "hello", "hi", "opa", "eae",
+                    "bom", "boa", "dia", "tarde", "noite", "obrigado", "obrigada", "valeu",
+                    "tchau", "adeus"
+                }
+                doc_keywords = {
+                    "documento", "documentos", "arquivo", "arquivos", "pasta", "pastas",
+                    "pdf", "docx", "planilha", "relatorio", "relatório", "contrato",
+                    "extrato", "tabela", "artigo", "anexo", "nota", "comprovante",
+                    "leia", "ler", "leitura", "procure", "encontre", "buscar", "busque",
+                    "ache", "onde"
+                }
+                words_list = [w.lower() for w in re.findall(r"\w+", prompt_clean)]
+                is_pure_greeting = bool(words_list) and all(w in greeting_words for w in words_list)
+                is_doc_intent = bool(set(words_list) & doc_keywords) or any(ext in prompt_clean.lower() for ext in [".pdf", ".docx", ".xlsx", ".csv", ".txt", ".md"])
+
+                if getattr(self, "rag", None) and not is_pure_greeting:
                     try:
                         doc_matches = self.rag.search(prompt_clean, limit=3)
                         if doc_matches:
@@ -767,7 +1300,7 @@ class IntentEngine:
                         logger.debug(f"Erro ao consultar RAG no chat: {exc}")
 
                 search_results = []
-                if self.config.web_search_enabled and self.search_client.is_search_needed(prompt_clean):
+                if self.config.web_search_enabled and not is_pure_greeting and self.search_client.is_search_needed(prompt_clean):
                     clean_q = self.search_client.clean_search_query(prompt_clean)
                     search_results = self.search_client.search(clean_q, max_results=3)
                     if search_results:
@@ -782,8 +1315,8 @@ class IntentEngine:
                     history=history,
                 )
 
-                # Se foram encontrados documentos locais relevantes e a IA não gerou ação de abrir documento
-                if doc_matches and not any(a.action_type == ActionType.OPEN_DOCUMENT for a in actions):
+                # Se foram encontrados documentos locais relevantes com intenção documental e a IA não gerou ação de abrir documento
+                if doc_matches and not is_pure_greeting and is_doc_intent and not any(a.action_type == ActionType.OPEN_DOCUMENT for a in actions):
                     top_doc = doc_matches[0]
                     actions.append(
                         DesktopAction(
@@ -804,6 +1337,17 @@ class IntentEngine:
                             description=f"Abrir fonte: {primary.title[:45]}...",
                         )
                     )
+
+                # Higienização de resposta com abertura de URL: evita poluir o chat com trechos crus de busca web
+                if any(a.action_type == ActionType.OPEN_URL for a in actions):
+                    if re.search(r":\s*\[|\b\[\d+\]", explanation):
+                        first_chunk = re.split(r":\s*\[|\b\[\d+\]|\n", explanation)[0].strip()
+                        first_chunk = re.sub(r"[:\-–—\s]+$", "", first_chunk).strip()
+                        if len(first_chunk) >= 8:
+                            if not re.search(r"\b(abrir?|aberto|abriu|acessei|acessar|abrindo)\b", first_chunk, re.I):
+                                explanation = f"{first_chunk}. Abri a página no seu navegador para você conferir as opções."
+                            else:
+                                explanation = f"{first_chunk}."
 
                 # Se o usuário pediu para salvar/gerar relatório em arquivo e a IA não gerou a ação diretamente
                 if any(w in low for w in [

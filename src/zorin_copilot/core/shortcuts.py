@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+from pathlib import Path
 from typing import Final
 
 import gi
@@ -25,6 +26,9 @@ COPILOT_BINDING_NAME: Final = "Zorin Copilot"
 
 CROP_BINDING_PATH: Final = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/zorin-copilot-crop/"
 CROP_BINDING_NAME: Final = "Zorin Copilot - Recorte Inteligente"
+
+VOICE_BINDING_PATH: Final = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/zorin-copilot-voice/"
+VOICE_BINDING_NAME: Final = "Zorin Copilot - Conversa por Voz"
 
 
 class ShortcutManager:
@@ -160,3 +164,106 @@ class ShortcutManager:
     def unregister_crop(cls) -> bool:
         """Remove o atalho global de recorte inteligente do sistema operacional."""
         return cls._unregister_binding(CROP_BINDING_PATH)
+
+    # -------------------------------------------------------------------------
+    # Atalho Global Direto de Conversa por Voz (Super+Shift+V)
+    # -------------------------------------------------------------------------
+    @classmethod
+    def is_voice_registered(cls) -> bool:
+        """Verifica se o atalho de conversa por voz está atualmente cadastrado."""
+        return cls._is_path_registered(VOICE_BINDING_PATH)
+
+    @classmethod
+    def get_voice_binding(cls) -> str:
+        """Retorna a combinação de teclas atualmente cadastrada para conversa por voz."""
+        return cls._get_binding_at_path(VOICE_BINDING_PATH)
+
+    @classmethod
+    def register_voice(cls, binding: str = "<Super><Shift>v") -> bool:
+        """Cadastra o atalho global de conversa por voz no sistema operacional."""
+        return cls._register_binding(
+            path=VOICE_BINDING_PATH,
+            name=VOICE_BINDING_NAME,
+            command=cls.get_binary_command("--voice"),
+            binding=binding,
+        )
+
+    @classmethod
+    def unregister_voice(cls) -> bool:
+        """Remove o atalho global de conversa por voz do sistema operacional."""
+        return cls._unregister_binding(VOICE_BINDING_PATH)
+
+
+class AutostartManager:
+    """Gerencia a inicialização automática do Zorin Copilot com o sistema operacional."""
+
+    APP_ID: Final = "io.github.bruno.ZorinCopilot"
+
+    @classmethod
+    def get_autostart_dir(cls) -> Path:
+        base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+        autostart_dir = Path(base) / "autostart"
+        autostart_dir.mkdir(parents=True, exist_ok=True)
+        return autostart_dir
+
+    @classmethod
+    def get_autostart_file(cls) -> Path:
+        return cls.get_autostart_dir() / f"{cls.APP_ID}.desktop"
+
+    @classmethod
+    def is_enabled(cls) -> bool:
+        """Verifica se o autostart está ativo no sistema."""
+        desktop_file = cls.get_autostart_file()
+        if not desktop_file.exists():
+            return False
+        try:
+            content = desktop_file.read_text(encoding="utf-8")
+            if "X-GNOME-Autostart-enabled=false" in content:
+                return False
+            return "Exec=" in content
+        except Exception:
+            return False
+
+    @classmethod
+    def enable(cls, binary_command: str | None = None) -> bool:
+        """Habilita o Zorin Copilot para iniciar com o sistema em segundo plano."""
+        try:
+            if not binary_command:
+                binary_command = ShortcutManager.get_binary_command("--background")
+            elif not binary_command.endswith("--background"):
+                binary_command = f"{binary_command} --background"
+
+            desktop_file = cls.get_autostart_file()
+            content = f"""[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Zorin Copilot
+GenericName=Assistente de IA
+Comment=Assistente de IA integrado ao desktop Zorin OS
+Exec={binary_command}
+Icon=system-help-symbolic
+Terminal=false
+Categories=Utility;GTK;GNOME;
+StartupNotify=false
+X-GNOME-Autostart-enabled=true
+"""
+            desktop_file.write_text(content, encoding="utf-8")
+            logger.info(f"Autostart do Zorin Copilot habilitado em: {desktop_file}")
+            return True
+        except Exception as exc:
+            logger.error(f"Erro ao habilitar autostart do Zorin Copilot: {exc}")
+            return False
+
+    @classmethod
+    def disable(cls) -> bool:
+        """Desabilita o autostart removendo o arquivo desktop de inicialização."""
+        try:
+            desktop_file = cls.get_autostart_file()
+            if desktop_file.exists():
+                desktop_file.unlink()
+            logger.info("Autostart do Zorin Copilot desabilitado.")
+            return True
+        except Exception as exc:
+            logger.error(f"Erro ao desabilitar autostart: {exc}")
+            return False
+

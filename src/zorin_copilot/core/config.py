@@ -7,14 +7,15 @@ from __future__ import annotations
 import json
 import os
 import stat
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 
 @dataclass
 class CopilotConfig:
-    provider: str = "gemini"  # "gemini", "ollama", "openai"
+    provider: str = "gemini"  # "gemini", "hybrid", "ollama", "openai"
+    fallback_to_ollama: bool = True
     
     # Configurações do Google Gemini
     gemini_api_key: str = ""
@@ -23,8 +24,9 @@ class CopilotConfig:
     gemini_live_voice: str = "Puck"  # "Puck", "Aoede", "Charon", "Fenrir", "Kore"
     
     # Configurações do Ollama (Local)
-    ollama_url: str = "http://localhost:11434"
-    ollama_model: str = "llama3.2:latest"
+    ollama_url: str = "http://127.0.0.1:11434"
+    ollama_model: str = "qwen2.5:7b"
+    ollama_vision_model: str = "minicpm-v"
     
     # Configurações de API compatível com OpenAI (OpenAI, Groq, DeepSeek, OpenRouter)
     openai_url: str = "https://api.openai.com/v1"
@@ -41,6 +43,37 @@ class CopilotConfig:
     # Atalho Global Direto de Recorte Inteligente (Pilar 3: Visão Instantânea)
     crop_shortcut_enabled: bool = True
     crop_shortcut_key: str = "<Super><Shift>s"
+
+    # Atalho Global Direto de Conversa por Voz (Fase 4: Live Voice Local)
+    voice_shortcut_enabled: bool = True
+    voice_shortcut_key: str = "<Super><Shift>v"
+
+    # Configurações de Voz Local (Piper TTS + faster-whisper)
+    piper_voice_model: str = "pt_BR-faber-medium"
+    whisper_model: str = "small"
+    voice_visualizer_style: str = "waves"  # "waves", "bars", "matrix", "orb"
+    
+    # Inicialização automática com o sistema (Autostart no boot/login)
+    autostart_enabled: bool = False
+
+    # Configurações de Confiança, Privacidade e RAG
+    trusted_directories: list[str] = field(default_factory=lambda: ["~/Documentos"])
+    quarantine_directories: list[str] = field(default_factory=lambda: ["~/Downloads"])
+    ignored_patterns: list[str] = field(
+        default_factory=lambda: [
+            "*.kdbx",
+            "*.key",
+            "*.pem",
+            "*.env",
+            "*IRPF*",
+            "*senha*",
+            "*extrato*",
+            "*credentials*",
+        ]
+    )
+    rag_local_only: bool = False
+    mask_pii: bool = True
+    max_file_size_mb: int = 40
     
     # Prompt de sistema customizável
     system_prompt: str = (
@@ -94,6 +127,8 @@ class CopilotConfig:
             pass
 
     def is_configured(self) -> bool:
+        if self.provider == "hybrid":
+            return bool(self.gemini_api_key.strip() or self.ollama_url.strip())
         if self.provider == "gemini":
             return bool(self.gemini_api_key.strip())
         if self.provider == "ollama":

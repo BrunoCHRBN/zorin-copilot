@@ -142,6 +142,124 @@ class LocalDocumentRAGTest(unittest.TestCase):
         self.assertTrue(report.success)
         self.assertIn("aberto", report.message.lower())
 
+    def test_index_and_search_docx(self):
+        """Testa extração e indexação de contrato em formato Word (.docx)."""
+        import zipfile
+        docx_file = self.docs_dir / "contrato_locacao.docx"
+        with zipfile.ZipFile(docx_file, "w") as z:
+            doc_xml = (
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                '<w:body>'
+                '<w:p><w:r><w:t>Contrato de Locação Residencial Urbana</w:t></w:r></w:p>'
+                '<w:p><w:r><w:t>Cláusula 5: O valor do aluguel mensal é R$ 2.850,00 com vencimento no dia 10.</w:t></w:r></w:p>'
+                '</w:body></w:document>'
+            )
+            z.writestr("word/document.xml", doc_xml)
+
+        self.assertTrue(self.rag.index_file(docx_file))
+        results = self.rag.search("aluguel mensal")
+        self.assertGreaterEqual(len(results), 1)
+        self.assertEqual(results[0].file_name, "contrato_locacao.docx")
+        self.assertIn("2.850", results[0].snippet)
+
+    def test_index_and_search_xlsx(self):
+        """Testa extração e indexação de planilha Excel (.xlsx)."""
+        import zipfile
+        xlsx_file = self.docs_dir / "demonstrativo_vendas.xlsx"
+        with zipfile.ZipFile(xlsx_file, "w") as z:
+            shared_strings = (
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+                '<si><t>Produto</t></si>'
+                '<si><t>Receita Total</t></si>'
+                '<si><t>Zorin Copilot Pro</t></si>'
+                '</sst>'
+            )
+            sheet_xml = (
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+                '<sheetData>'
+                '<row r="1">'
+                '<c r="A1" t="s"><v>0</v></c>'
+                '<c r="B1" t="s"><v>1</v></c>'
+                '</row>'
+                '<row r="2">'
+                '<c r="A2" t="s"><v>2</v></c>'
+                '<c r="B2"><v>98500</v></c>'
+                '</row>'
+                '</sheetData></worksheet>'
+            )
+            z.writestr("xl/sharedStrings.xml", shared_strings)
+            z.writestr("xl/worksheets/sheet1.xml", sheet_xml)
+
+        self.assertTrue(self.rag.index_file(xlsx_file))
+        results = self.rag.search("Zorin Copilot Pro 98500")
+        self.assertGreaterEqual(len(results), 1)
+        self.assertEqual(results[0].file_name, "demonstrativo_vendas.xlsx")
+        self.assertIn("98500", results[0].snippet)
+
+    def test_index_and_search_odt_and_tsv(self):
+        """Testa suporte a LibreOffice ODT e arquivos TSV."""
+        import zipfile
+        odt_file = self.docs_dir / "acordo.odt"
+        with zipfile.ZipFile(odt_file, "w") as z:
+            content_xml = (
+                '<?xml version="1.0" encoding="UTF-8"?>'
+                '<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" '
+                'xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0">'
+                '<office:body><office:text>'
+                '<text:p>Termo de Confidencialidade e Não Divulgação (NDA) Zorin OS</text:p>'
+                '</office:text></office:body></office:document-content>'
+            )
+            z.writestr("content.xml", content_xml)
+
+        self.assertTrue(self.rag.index_file(odt_file))
+        results = self.rag.search("Confidencialidade NDA")
+        self.assertGreaterEqual(len(results), 1)
+        self.assertEqual(results[0].file_name, "acordo.odt")
+
+        tsv_file = self.docs_dir / "inventario.tsv"
+        tsv_file.write_text("Codigo\tNome\tEstoque\nCPU-01\tProcessador AMD\t42\n", encoding="utf-8")
+        self.assertTrue(self.rag.index_file(tsv_file))
+        res_tsv = self.rag.search("Processador AMD")
+        self.assertGreaterEqual(len(res_tsv), 1)
+        self.assertEqual(res_tsv[0].file_name, "inventario.tsv")
+
+    def test_rag_ask_questions_about_documents(self):
+        """Testa método RAG ask para responder a dúvidas com citações e resposta direta."""
+        contract = self.docs_dir / "contrato_ti.txt"
+        contract.write_text(
+            "Contrato de Suporte Técnico.\n"
+            "Cláusula 12: O prazo máximo para atendimento de chamados críticos (SLA) é de 2 horas úteis.\n",
+            encoding="utf-8",
+        )
+        self.rag.index_file(contract)
+
+        ans = self.rag.ask("qual o prazo de atendimento no contrato?")
+        self.assertTrue(ans["found"])
+        self.assertIn("contrato_ti.txt", ans["answer"])
+        self.assertIn("2 horas", ans["answer"])
+        self.assertEqual(len(ans["citations"]), 1)
+
+        # Pergunta sobre assunto inexistente
+        ans_miss = self.rag.ask("qual o tempo de voo para marte?")
+        self.assertFalse(ans_miss["found"])
+        self.assertIn("Não encontrei", ans_miss["answer"])
+
+    def test_get_stats_by_type(self):
+        """Testa se get_stats inclui contagem detalhada por tipo de arquivo."""
+        (self.docs_dir / "d1.txt").write_text("doc 1", encoding="utf-8")
+        (self.docs_dir / "d2.csv").write_text("a,b\n1,2", encoding="utf-8")
+        self.rag.index_file(self.docs_dir / "d1.txt")
+        self.rag.index_file(self.docs_dir / "d2.csv")
+
+        stats = self.rag.get_stats()
+        self.assertIn("by_type", stats)
+        self.assertIn(".txt", stats["by_type"])
+        self.assertIn(".csv", stats["by_type"])
+
 
 if __name__ == "__main__":
     unittest.main()
+

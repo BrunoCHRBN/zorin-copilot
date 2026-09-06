@@ -5,7 +5,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 from typing import Any, Callable, Sequence
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -164,3 +167,47 @@ class DesktopInspector:
         except Exception:
             pass
         return False
+
+    def get_active_window_info(self) -> tuple[str, str, tuple[int, int, int, int] | None]:
+        """
+        Retorna informações da janela de aplicativo atualmente ativa e em foco.
+
+        Returns:
+            Tuple com (nome_do_app, titulo_da_janela, (x, y, largura, altura) ou None).
+        """
+        if not self._ensure_init() or not self._atspi:
+            return "", "", None
+
+        ignored_apps = {"zorin-copilot", "io.github.bruno.zorincopilot", "org.zorin.copilot"}
+        try:
+            desktop = self._atspi.get_desktop(0)
+            count = desktop.get_child_count()
+            for i in range(count):
+                app = desktop.get_child_at_index(i)
+                if not app:
+                    continue
+                app_name = (app.get_name() or "").strip()
+                if not app_name or any(ign in app_name.lower() for ign in ignored_apps):
+                    continue
+
+                for j in range(app.get_child_count()):
+                    win = app.get_child_at_index(j)
+                    if not win:
+                        continue
+                    try:
+                        states = win.get_state_set().get_states()
+                        is_active = (self._atspi.StateType.ACTIVE in states) or (self._atspi.StateType.FOCUSED in states)
+                        if is_active:
+                            comp = win.get_component_iface()
+                            if comp:
+                                rect = comp.get_extents(self._atspi.CoordType.SCREEN)
+                                # Filtra painéis/toolbars minúsculos para focar em janelas úteis
+                                if rect.width >= 160 and rect.height >= 120:
+                                    win_title = (win.get_name() or "").strip()
+                                    return app_name, win_title, (rect.x, rect.y, rect.width, rect.height)
+                    except Exception:
+                        continue
+        except Exception as exc:
+            logger.debug(f"Erro ao obter janela ativa via Atspi: {exc}")
+
+        return "", "", None

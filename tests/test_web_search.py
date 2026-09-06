@@ -127,6 +127,117 @@ class WebSearchTest(unittest.TestCase):
         url_action = next(a for a in plan.actions if a.action_type == ActionType.OPEN_URL)
         self.assertEqual(url_action.target, "https://globoesporte.globo.com/futebol/copa-2026")
 
+    @patch("requests.get")
+    def test_web_page_reader_fetch_and_clean(self, mock_get):
+        from zorin_copilot.core.browser import WebPageReader
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.headers = {"Content-Type": "text/html; charset=utf-8"}
+        mock_resp.text = """
+        <html>
+            <head><title>Zorin OS 18 Lançamento</title></head>
+            <body>
+                <nav><a href="/">Home</a><a href="/login">Login</a></nav>
+                <article>
+                    <h1>Novidades do Zorin OS 18</h1>
+                    <p>O Zorin OS 18 traz integração nativa com inteligência artificial e GNOME 46.</p>
+                    <p>O desempenho gráfico no Wayland aumentou significativamente em 40%.</p>
+                </article>
+                <footer>Todos os direitos reservados.</footer>
+                <script>console.log('tracker');</script>
+            </body>
+        </html>
+        """
+        mock_get.return_value = mock_resp
+
+        data = WebPageReader.fetch_and_clean("https://zorin.com/news/zorin-18")
+        self.assertTrue(data["success"])
+        self.assertEqual(data["title"], "Zorin OS 18 Lançamento")
+        self.assertIn("Novidades do Zorin OS 18", data["text"])
+        self.assertIn("GNOME 46", data["text"])
+        # Garante que nav, footer e scripts foram removidos
+        self.assertNotIn("Home", data["text"])
+        self.assertNotIn("tracker", data["text"])
+
+    @patch("zorin_copilot.core.browser.WebPageReader.fetch_and_clean")
+    @patch.object(WebSearchClient, "search")
+    def test_deep_web_researcher(self, mock_search, mock_fetch):
+        from zorin_copilot.core.web_search import DeepWebResearcher
+        mock_search.return_value = [
+            SearchResult(
+                title="Review Zorin OS 18",
+                url="https://reviewlinux.com/zorin18",
+                snippet="Análise detalhada do novo sistema Zorin.",
+            ),
+            SearchResult(
+                title="Benchmarks Linux 2026",
+                url="https://phoronix.com/benchmarks-2026",
+                snippet="Testes de velocidade e gráficos no Wayland.",
+            ),
+        ]
+        mock_fetch.side_effect = [
+            {
+                "success": True,
+                "title": "Review Zorin OS 18",
+                "url": "https://reviewlinux.com/zorin18",
+                "text": "O Zorin OS 18 alcançou nota máxima em usabilidade com a barra HUD do Copilot.",
+                "length": 85,
+            },
+            {
+                "success": True,
+                "title": "Benchmarks Linux 2026",
+                "url": "https://phoronix.com/benchmarks-2026",
+                "text": "Consumo de memória RAM reduzido para 750MB em idle.",
+                "length": 55,
+            },
+        ]
+
+        researcher = DeepWebResearcher(search_client=self.client)
+        report = researcher.deep_search("pesquisa aprofundada sobre o Zorin OS 18")
+        self.assertTrue(report["success"])
+        self.assertEqual(len(report["sources"]), 2)
+        self.assertIn("Zorin OS 18", report["report"])
+        self.assertIn("https://reviewlinux.com/zorin18", report["report"])
+
+    @patch.object(WebSearchClient, "search")
+    @patch("zorin_copilot.core.browser.WebPageReader.fetch_and_clean")
+    def test_intent_engine_deep_research_intent(self, mock_fetch, mock_search):
+        mock_search.return_value = [
+            SearchResult(title="Tech News", url="https://tech.com/news", snippet="Tech updates")
+        ]
+        mock_fetch.return_value = {
+            "success": True,
+            "title": "Tech News",
+            "url": "https://tech.com/news",
+            "text": "Detalhes sobre arquitetura de sistemas operacionais modernos.",
+            "length": 60,
+        }
+
+        cfg = CopilotConfig(provider="gemini", gemini_api_key="")
+        engine = IntentEngine(config=cfg, search_client=self.client)
+
+        plan = engine.parse("faça uma pesquisa aprofundada sobre computação quântica")
+        self.assertTrue(any(a.action_type == ActionType.DEEP_RESEARCH for a in plan.actions))
+        self.assertIn("computação quântica", plan.thought.lower())
+
+    @patch("zorin_copilot.core.browser.BrowserManager.read_page")
+    def test_intent_engine_read_open_page_intent(self, mock_read):
+        mock_read.return_value = {
+            "success": True,
+            "title": "Artigo Sobre IA",
+            "url": "https://ia.org/artigo",
+            "text": "O artigo discute a evolução de assistentes locais integrados ao desktop.",
+            "description": "Resumo do artigo de IA.",
+            "length": 75,
+        }
+
+        cfg = CopilotConfig(provider="gemini", gemini_api_key="")
+        engine = IntentEngine(config=cfg)
+
+        plan = engine.parse("leia a página aberta")
+        self.assertTrue(any(a.action_type == ActionType.READ_PAGE for a in plan.actions))
+        self.assertIn("Artigo Sobre IA", plan.thought)
+
 
 if __name__ == "__main__":
     unittest.main()
