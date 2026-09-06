@@ -593,3 +593,29 @@ window.dark-glass .prompt-bar-card:focus-within {
     margin-top: 4px;
     margin-bottom: 6px;
 }
+
+/* --- Painel de Comandos (Ctrl+K) --- */
+.palette-scrim {
+    background-color: rgba(0, 0, 0, 0.45);
+    min-height: 200px;
+    min-width: 200px;
+}
+
+.command-palette {
+    border-radius: 16px;
+    padding: 10px;
+    margin: 0 24px;
+}
+
+window.light-glass .command-palette,
+.command-palette {
+    background-color: rgba(252, 253, 255, 0.97);
+    border: 1px solid rgba(18, 51, 84, 0.12);
+    box-shadow: 0 18px 48px rgba(0, 0, 0, 0.28);
+}
+
+window.dark-glass .command-palette {
+    background-color: rgba(38, 44, 56, 0.97);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
+}

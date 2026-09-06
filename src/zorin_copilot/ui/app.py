@@ -35,6 +35,7 @@ from .widgets.chat_stream import (
     format_markdown_to_markup,  # noqa: F401 - reexportado por compatibilidade
     get_action_icon,  # noqa: F401 - reexportado por compatibilidade
 )
+from .widgets.command_palette import CommandPalette, PaletteCommand
 from .widgets.header import HeaderBarWidget
 from .widgets.prompt_bar import (
     PromptBar,
@@ -152,8 +153,15 @@ class CopilotWindow(Adw.ApplicationWindow):
 
         self.split_box.append(chat_main_box)
 
+        # O painel de comandos fica num overlay acima do conteúdo, mas abaixo dos
+        # toasts, para que avisos continuem visíveis enquanto ele está aberto.
+        self.main_overlay = Gtk.Overlay()
+        self.main_overlay.set_child(self.split_box)
+        self.command_palette = CommandPalette(self)
+        self.main_overlay.add_overlay(self.command_palette)
+
         self.toast_overlay = Adw.ToastOverlay()
-        self.toast_overlay.set_child(self.split_box)
+        self.toast_overlay.set_child(self.main_overlay)
         self.toolbar_view.set_content(self.toast_overlay)
         self.set_content(self.toolbar_view)
 
@@ -177,6 +185,7 @@ class CopilotWindow(Adw.ApplicationWindow):
             "app.toggle-sidebar": self.toggle_sidebar,
             "app.new-topic": self._on_new_topic,
             "app.toggle-pin": self._on_toggle_pin,
+            "app.command-palette": self._open_command_palette,
         }
 
         controller = Gtk.ShortcutController()
@@ -199,10 +208,15 @@ class CopilotWindow(Adw.ApplicationWindow):
 
     @staticmethod
     def _make_shortcut_callback(handler):
-        """Envolve o handler para que o CallbackAction sempre receba um booleano."""
+        """Envolve o handler para o CallbackAction.
+
+        Se o handler devolver ``False``, o atalho é considerado não tratado e o
+        evento segue para o widget focado — é o que permite ao Ctrl+K conviver com
+        o atalho de edição de texto do GTK.
+        """
         def invoke(_widget, _args):
-            handler()
-            return True
+            result = handler()
+            return True if result is None else bool(result)
         return invoke
 
     @staticmethod
@@ -223,6 +237,10 @@ class CopilotWindow(Adw.ApplicationWindow):
         A versão anterior fechava a janela mesmo com um popover aberto, descartando
         menus sem intenção do usuário.
         """
+        if self.command_palette.is_open:
+            self.command_palette.close()
+            return True
+
         if self.live_client and self.live_client.is_active():
             self.stop_live_voice()
             return True
@@ -255,6 +273,109 @@ class CopilotWindow(Adw.ApplicationWindow):
                 popover.popdown()
                 closed = True
         return closed
+
+    # ------------------------------------------------------------------
+    # Painel de comandos (Ctrl+K)
+    # ------------------------------------------------------------------
+    def _open_command_palette(self) -> bool:
+        """Abre (ou fecha) o painel de comandos.
+
+        Devolve ``False`` quando o foco está num campo de texto: o GTK usa Ctrl+K
+        para apagar até o fim da linha, e retornar False deixa o evento seguir
+        para o widget focado em vez de roubar a combinação.
+        """
+        if self.command_palette.is_open:
+            self.command_palette.close()
+            return True
+
+        focus = self.get_focus()
+        if isinstance(focus, (Gtk.Editable, Gtk.TextView)):
+            return False
+
+        self.command_palette.open()
+        return True
+
+    def palette_commands(self) -> list[PaletteCommand]:
+        """Comandos oferecidos no painel. Reconstruído a cada abertura."""
+        accels = {s.name: s.accelerator for s in APP_SHORTCUTS}
+
+        def acc(name: str) -> str:
+            return accels.get(name, "")
+
+        return [
+            PaletteCommand(
+                "app.new-topic", "Nova conversa", "Começar um tópico limpo",
+                "list-add-symbolic", acc("app.new-topic"), ("limpar", "novo", "chat"),
+            ),
+            PaletteCommand(
+                "app.toggle-sidebar", "Mostrar/ocultar conversas", "Alterna a barra lateral",
+                "sidebar-show-symbolic", acc("app.toggle-sidebar"), ("histórico", "lateral"),
+            ),
+            PaletteCommand(
+                "app.toggle-pin", "Fixar/desafixar conversa", "Mantém o tópico atual no topo",
+                "view-pin-symbolic", acc("app.toggle-pin"), ("pin", "fixar"),
+            ),
+            PaletteCommand(
+                "app.toggle-live-voice", "Conversa por voz ao vivo", "Inicia ou encerra o Gemini Live",
+                "audio-input-microphone-symbolic", acc("app.toggle-live-voice"), ("voz", "microfone", "live"),
+            ),
+            PaletteCommand(
+                "app.capture-area", "Recortar área da tela", "Analisa um recorte com a IA",
+                "edit-cut-symbolic", "", ("screenshot", "print", "captura", "recorte"),
+            ),
+            PaletteCommand(
+                "app.analyze-clipboard", "Analisar conteúdo copiado", "Usa o texto da área de transferência",
+                "edit-paste-symbolic", "", ("colar", "clipboard", "cópia"),
+            ),
+            PaletteCommand(
+                "app.toggle-dark-mode", "Alternar modo escuro", "Muda o tema do sistema",
+                "weather-clear-night-symbolic", "", ("tema", "escuro", "claro", "dark"),
+            ),
+            PaletteCommand(
+                "app.copy-answer", "Copiar última resposta", "Copia a resposta do assistente",
+                "edit-copy-symbolic", "", ("copiar", "clipboard"),
+            ),
+            PaletteCommand(
+                "app.open-settings", "Preferências", "Provedor de IA e chaves",
+                "preferences-system-symbolic", "", ("configurações", "chave", "api", "modelo"),
+            ),
+            PaletteCommand(
+                "app.clear-history", "Limpar todo o histórico", "Apaga as conversas salvas",
+                "user-trash-symbolic", "", ("apagar", "excluir", "lixeira"),
+            ),
+            PaletteCommand(
+                "app.quit", "Sair do Zorin Copilot", "",
+                "application-exit-symbolic", acc("app.quit"), ("fechar", "encerrar"),
+            ),
+        ]
+
+    def _palette_handlers(self) -> dict[str, object]:
+        """Mapa nome -> callable. Separado para poder ser verificado por testes."""
+        return {
+            "app.new-topic": self._on_new_topic,
+            "app.toggle-sidebar": self.toggle_sidebar,
+            "app.toggle-pin": self._on_toggle_pin,
+            "app.toggle-live-voice": self.toggle_live_voice,
+            "app.capture-area": lambda: self._start_screen_capture(interactive=True),
+            "app.analyze-clipboard": lambda: self._trigger_prompt("analisar_copiado"),
+            "app.toggle-dark-mode": lambda: self._trigger_prompt("ativar modo escuro"),
+            "app.copy-answer": self._on_copy_answer,
+            "app.open-settings": self._open_settings,
+            "app.clear-history": self.sidebar.clear_history,
+            "app.quit": self._quit_application,
+        }
+
+    def run_palette_command(self, command: PaletteCommand) -> None:
+        """Executa o comando escolhido no painel."""
+        handler = self._palette_handlers().get(command.name)
+        if handler is None:
+            logger.warning("Comando do painel sem handler: %s", command.name)
+            return
+        handler()
+
+    def palette_closed(self) -> None:
+        """Devolve o foco ao campo de prompt depois de fechar o painel."""
+        self.entry.grab_focus()
 
     # ------------------------------------------------------------------
     # Compatibilidade de API (usada por testes e código legado)

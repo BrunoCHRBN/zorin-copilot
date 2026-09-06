@@ -42,6 +42,7 @@ APP_SHORTCUTS: Final[tuple[AppShortcut, ...]] = (
     AppShortcut("app.toggle-sidebar", "<Control>h", "Mostrar/ocultar a barra de conversas"),
     AppShortcut("app.new-topic", "<Control>n", "Iniciar uma nova conversa"),
     AppShortcut("app.toggle-pin", "<Control>p", "Fixar a conversa atual no topo"),
+    AppShortcut("app.command-palette", "<Control>k", "Abrir o painel de comandos"),
 )
 
 MEDIA_KEYS_SCHEMA: Final = "org.gnome.settings-daemon.plugins.media-keys"

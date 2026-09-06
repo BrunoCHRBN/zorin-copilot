@@ -185,18 +185,18 @@ Economiza scroll e deixa óbvio que são mutuamente exclusivos. A flag `_update_
 
 ## 3. Ideias incrementais (nice-to-have)
 
-| # | Sugestão | Esforço | Impacto |
-|---|---|---|---|
-| 1 | **Command palette** (Ctrl+K) estilo VSCode, listando todos os comandos da app | 1 dia | Alto — descobribilidade |
-| 2 | **Indicador de tokens consumidos** no badge do modelo (estilo Raycast) | 2h | Médio — usuários Pro adoram |
-| 3 | **Drag-and-drop** de arquivos no chat (imagem, PDF, txt) → anexa como contexto | 1 dia | Alto |
-| 4 | **Markdown export** da conversa (`⌘+S` ou botão) → `.md` bem formatado com frontmatter | 2h | Médio |
-| 5 | **Split view** para comparar 2 respostas lado a lado | 3 dias | Médio — útil pra debug |
-| 6 | **Animação de "digitando..."** no user-bubble antes da resposta (estilo iMessage) | 4h | Baixo — cosmético |
-| 7 | **Suporte a temas customizados** carregados de `~/.config/zorin-copilot/themes/*.css` | 2 dias | Médio |
-| 8 | **Picture-in-picture** do orbe quando a janela é minimizada durante voz | 1 dia | Médio |
-| 9 | **Status bar inferior** com `system_load`, `quota Gemini`, `RAM do RAG indexer` (estilo Warp) | 1 dia | Médio |
-| 10 | **Histórico de undo** de ações do executor (rollback das últimas 5 ações) | 2 dias | Alto — confiança |
+| # | Sugestão | Esforço | Impacto | Status |
+|---|---|---|---|---|
+| 1 | **Command palette** (Ctrl+K) estilo VSCode, listando todos os comandos da app | 1 dia | Alto — descobribilidade | **FEITO** |
+| 2 | **Indicador de tokens consumidos** no badge do modelo (estilo Raycast) | 2h | Médio — usuários Pro adoram | |
+| 3 | **Drag-and-drop** de arquivos no chat (imagem, PDF, txt) → anexa como contexto | 1 dia | Alto | |
+| 4 | **Markdown export** da conversa (`⌘+S` ou botão) → `.md` bem formatado com frontmatter | 2h | Médio | |
+| 5 | **Split view** para comparar 2 respostas lado a lado | 3 dias | Médio — útil pra debug | |
+| 6 | **Animação de "digitando..."** no user-bubble antes da resposta (estilo iMessage) | 4h | Baixo — cosmético | |
+| 7 | **Suporte a temas customizados** carregados de `~/.config/zorin-copilot/themes/*.css` | 2 dias | Médio | **FEITO** (item 2.10) |
+| 8 | **Picture-in-picture** do orbe quando a janela é minimizada durante voz | 1 dia | Médio | |
+| 9 | **Status bar inferior** com `system_load`, `quota Gemini`, `RAM do RAG indexer` (estilo Warp) | 1 dia | Médio | |
+| 10 | **Histórico de undo** de ações do executor (rollback das últimas 5 ações) | 2 dias | Alto — confiança | |
 
 ---
 
