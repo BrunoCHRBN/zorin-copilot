@@ -590,6 +590,9 @@ class GeminiLiveClient:
         self.risk_policy = RiskPolicy()
         self._pending_actions: dict[str, dict[str, Any]] = {}
         self._bypass_risk_gate = False
+        # Comando de texto capturado junto à wake word (Fase 4A), enviado à
+        # sessão assim que o setup do Gemini Live completar.
+        self._queued_initial_text: str = ""
         self.email_mgr = EmailManager(memory=self.memory)
         self.cal_mgr = CalendarManager(memory=self.memory)
         self.rag = LocalDocumentRAG(memory=self.memory)
@@ -664,6 +667,9 @@ class GeminiLiveClient:
         self._session_start_time = time.time()
         self._executed_actions_log.clear()
         self._transcripts_log.clear()
+        # Fase 4B: descarta confirmações de risco pendentes da sessão anterior —
+        # um confirmation_id nunca deve sobreviver ao fim da chamada.
+        self._pending_actions.clear()
         self._thread = threading.Thread(target=self._run_loop, daemon=True, name="GeminiLiveWorker")
         self._thread.start()
 
@@ -672,6 +678,8 @@ class GeminiLiveClient:
         self.stop_video_stream()
         self._is_running = False
         self._terminate_audio_processes()
+        # Fase 4B: nenhuma ação de risco pode ficar armada após o encerramento.
+        self._pending_actions.clear()
 
         if self._loop and self._loop.is_running():
             self._loop.call_soon_threadsafe(self._loop.stop)
@@ -839,6 +847,24 @@ class GeminiLiveClient:
 
                 self._set_state(LiveVoiceState.LISTENING, "Conectado! Pode falar...")
                 logger.info("Sessão Gemini Live estabelecida com sucesso.")
+
+                # Fase 4A: se a wake word já trouxe o pedido ("ok copilot abre o
+                # navegador"), injeta o comando como primeiro turno de texto.
+                if self._queued_initial_text:
+                    initial_msg = {
+                        "clientContent": {
+                            "turns": [
+                                {
+                                    "role": "user",
+                                    "parts": [{"text": self._queued_initial_text}],
+                                }
+                            ],
+                            "turnComplete": True,
+                        }
+                    }
+                    logger.info("Enviando comando inicial da wake word: %r", self._queued_initial_text)
+                    self._queued_initial_text = ""
+                    await ws.send(json.dumps(initial_msg))
 
                 # Inicia tarefas concorrentes: Gravação do Mic e Leitura do Servidor
                 mic_task = asyncio.create_task(self._mic_recorder_loop(ws))
@@ -1292,11 +1318,15 @@ class GeminiLiveClient:
             elif name == "confirm_action":
                 cid = args.get("confirmation_id", "")
                 approve = bool(args.get("approve", False))
+                self._sweep_expired_pending()
                 pending = self._pending_actions.pop(cid, None)
                 if pending is None:
                     return {
                         "success": False,
-                        "message": f"Nenhuma ação pendente com id '{cid}'.",
+                        "message": (
+                            f"Nenhuma ação pendente com id '{cid}' "
+                            "(pode ter expirado). Se ainda fizer sentido, solicite a ação novamente."
+                        ),
                     }
                 if not approve:
                     return {"success": True, "message": "Ação cancelada pelo usuário."}
@@ -1413,13 +1443,35 @@ class GeminiLiveClient:
             logger.error(f"Erro ao despachar ferramenta {name}: {exc}")
             return {"success": False, "message": f"Erro de execução: {exc}"}
 
+    # Fase 4B: tempo máximo (segundos) que uma confirmação de risco fica
+    # aguardando decisão do usuário antes de expirar automaticamente.
+    PENDING_CONFIRMATION_TTL_SEC = 120
+
     def _store_pending(self, name: str, args: dict[str, Any]) -> str:
         """Armazena uma ação aguardando confirmação e devolve seu id."""
         import uuid
 
+        self._sweep_expired_pending()
         cid = uuid.uuid4().hex[:8]
-        self._pending_actions[cid] = {"name": name, "args": dict(args)}
+        self._pending_actions[cid] = {
+            "name": name,
+            "args": dict(args),
+            "created_at": time.time(),
+        }
         return cid
+
+    def _sweep_expired_pending(self) -> int:
+        """Remove confirmações pendentes mais antigas que o TTL. Retorna quantas expiraram."""
+        now = time.time()
+        expired = [
+            cid
+            for cid, p in self._pending_actions.items()
+            if now - p.get("created_at", now) > self.PENDING_CONFIRMATION_TTL_SEC
+        ]
+        for cid in expired:
+            self._pending_actions.pop(cid, None)
+            logger.info("Confirmação de risco %s expirou (TTL=%ds) e foi descartada.", cid, self.PENDING_CONFIRMATION_TTL_SEC)
+        return len(expired)
 
     def _require_confirmation(self, name: str, args: dict[str, Any], desc: str) -> dict[str, Any]:
         """Bloqueia a execução e devolve um id de confirmação para o modelo solicitar ao usuário."""
@@ -1434,6 +1486,43 @@ class GeminiLiveClient:
                 f"chame confirm_action(confirmation_id='{cid}', approve=true)."
             ),
         }
+
+    def queue_initial_text(self, text: str) -> None:
+        """Fase 4A: agenda um comando de texto para ser enviado logo após o setup da sessão.
+
+        Usado quando a wake word já traz o pedido embutido ("ok copilot abre o
+        navegador" -> "abre o navegador"). Deve ser chamado antes ou logo após
+        start(); o texto é consumido uma única vez no início da sessão.
+        """
+        self._queued_initial_text = (text or "").strip()
+
+    def send_text_input(self, text: str) -> bool:
+        """Fase 4A: injeta um turno de texto do usuário numa sessão Live ativa.
+
+        Envia um `clientContent` com turnComplete=true — a API trata como se o
+        usuário tivesse falado. Retorna False se a sessão não estiver ativa.
+        """
+        text = (text or "").strip()
+        if not text or not self._is_running or not self._ws or not self._loop:
+            return False
+        msg = {
+            "clientContent": {
+                "turns": [
+                    {
+                        "role": "user",
+                        "parts": [{"text": text}],
+                    }
+                ],
+                "turnComplete": True,
+            }
+        }
+        try:
+            asyncio.run_coroutine_threadsafe(self._ws.send(json.dumps(msg)), self._loop)
+            logger.info("Comando de texto injetado na sessão Live: %r", text)
+            return True
+        except Exception as exc:
+            logger.warning("Falha ao injetar texto na sessão Live: %s", exc)
+            return False
 
     def send_screen_frame(self) -> bool:
         """Captura um snapshot da tela e injeta no fluxo visual do Gemini Live."""

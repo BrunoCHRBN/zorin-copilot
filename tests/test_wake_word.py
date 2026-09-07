@@ -27,6 +27,7 @@ from zorin_copilot.shell.wake_word import (  # noqa: E402
     WakeWordEngine,
     contains_wake_phrase,
     default_backend,
+    extract_command,
     normalize_text,
 )
 
@@ -97,9 +98,81 @@ class ContainsWakePhraseTest(unittest.TestCase):
         self.assertIsNone(contains_wake_phrase("ok copilot", ["", "  "]))
 
 
+class ExtractCommandTest(unittest.TestCase):
+    """Fase 4A: o comando dito após a wake phrase é extraído do transcript."""
+
+    def test_command_after_phrase(self):
+        self.assertEqual(
+            extract_command("ok copilot abre o navegador", "ok copilot"),
+            "abre o navegador",
+        )
+
+    def test_phrase_alone_has_no_command(self):
+        self.assertEqual(extract_command("ok copilot", "ok copilot"), "")
+
+    def test_phrase_in_the_middle(self):
+        # Prefixo antes da frase não faz parte do comando.
+        self.assertEqual(
+            extract_command("por favor ok copilot abre o navegador", "ok copilot"),
+            "abre o navegador",
+        )
+
+    def test_case_and_punctuation_insensitive(self):
+        self.assertEqual(
+            extract_command("OK, Copilot! Abre o navegador.", "ok copilot"),
+            "abre o navegador",
+        )
+
+    def test_accented_phrase(self):
+        self.assertEqual(
+            extract_command("Olá Copilot, que horas são?", "olá copilot"),
+            "que horas são",
+        )
+
+    def test_phrase_not_found(self):
+        self.assertEqual(extract_command("abre o navegador", "ok copilot"), "")
+
+    def test_empty_inputs(self):
+        self.assertEqual(extract_command("", "ok copilot"), "")
+        self.assertEqual(extract_command("ok copilot abre", ""), "")
+        self.assertEqual(extract_command(None, "ok copilot"), "")
+
+    def test_uses_first_occurrence(self):
+        self.assertEqual(
+            extract_command("ok copilot repete ok copilot de novo", "ok copilot"),
+            "repete ok copilot de novo",
+        )
+
+
+class EngineCommandExtractionTest(unittest.TestCase):
+    """O engine entrega (frase, comando) ao callback — Fase 4A."""
+
+    def test_on_wake_receives_phrase_and_command(self):
+        events = []
+        engine = WakeWordEngine(
+            phrases=["ok copilot"],
+            backend=_FakeBackend(),
+            on_wake=lambda p, c: events.append((p, c)),
+        )
+        engine._running = True
+        self.assertTrue(engine.simulate_phrase("ok copilot abre o navegador"))
+        self.assertEqual(events, [("ok copilot", "abre o navegador")])
+
+    def test_on_wake_command_empty_when_phrase_alone(self):
+        events = []
+        engine = WakeWordEngine(
+            phrases=["ok copilot"],
+            backend=_FakeBackend(),
+            on_wake=lambda p, c: events.append((p, c)),
+        )
+        engine._running = True
+        engine.simulate_phrase("ok copilot")
+        self.assertEqual(events, [("ok copilot", "")])
+
+
 class EngineLifecycleTest(unittest.TestCase):
     def _make_engine(self, phrases=("ok copilot",), backend=None, hits=None):
-        on_wake = (lambda p: hits.append(p)) if hits is not None else None
+        on_wake = (lambda p, c="": hits.append(p)) if hits is not None else None
         return WakeWordEngine(
             phrases=phrases,
             backend=backend if backend is not None else _FakeBackend(),
@@ -151,7 +224,7 @@ class EngineLifecycleTest(unittest.TestCase):
         self.assertEqual(hits, [])
 
     def test_callback_exception_does_not_crash(self):
-        def bad_callback(_phrase):
+        def bad_callback(_phrase, _command=""):
             raise RuntimeError("boom")
 
         engine = WakeWordEngine(
@@ -176,7 +249,7 @@ class PhraseEditingTest(unittest.TestCase):
         engine = WakeWordEngine(
             phrases=["ok copilot"],
             backend=_FakeBackend(),
-            on_wake=lambda p: hits.append(p),
+            on_wake=lambda p, c="": hits.append(p),
         )
         engine._running = True
 
@@ -246,7 +319,7 @@ class EngineThreadSafetyTest(unittest.TestCase):
         # simulate_phrase pode ser chamado de qualquer thread (diagnóstico na UI).
         hits = []
         engine = WakeWordEngine(
-            phrases=["ok copilot"], backend=_FakeBackend(), on_wake=lambda p: hits.append(p)
+            phrases=["ok copilot"], backend=_FakeBackend(), on_wake=lambda p, c="": hits.append(p)
         )
         engine._running = True
         t = threading.Thread(target=lambda: engine.simulate_phrase("ok copilot"))

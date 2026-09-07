@@ -68,6 +68,26 @@ def contains_wake_phrase(transcript: str, phrases: Iterable[str]) -> Optional[st
     return None
 
 
+def extract_command(transcript: str, phrase: str) -> str:
+    """Extrai o comando dito APÓS a wake phrase (Fase 4A).
+
+    "ok copilot abre o navegador" com phrase "ok copilot" -> "abre o navegador".
+    Se só a frase foi dita ("ok copilot"), retorna "" — o chamador trata como
+    invocação simples (abrir a sessão e aguardar o pedido por voz).
+
+    A extração usa a primeira ocorrência da frase no texto normalizado
+    (lowercase, sem pontuação) — formato compatível com a saída típica do Vosk.
+    """
+    norm = normalize_text(transcript)
+    p = normalize_text(phrase)
+    if not norm or not p:
+        return ""
+    idx = norm.find(p)
+    if idx < 0:
+        return ""
+    return norm[idx + len(p):].strip()
+
+
 # ---------------------------------------------------------------------------
 # Backends de STT (injetáveis)
 # ---------------------------------------------------------------------------
@@ -205,11 +225,13 @@ class WakeWordEngine:
         self,
         phrases: Iterable[str],
         backend=None,
-        on_wake: Optional[Callable[[str], None]] = None,
+        on_wake: Optional[Callable[..., None]] = None,
     ):
         # normaliza e remove vazios
         self._phrases = [p for p in (phrases or []) if normalize_text(p)]
         self.backend = backend if backend is not None else NullWakeWordBackend()
+        # on_wake(phrase, command): command é o texto dito após a frase (Fase 4A),
+        # "" quando o usuário só disse a palavra de ativação.
         self.on_wake = on_wake
         self._running = False
         self._paused = False
@@ -280,9 +302,10 @@ class WakeWordEngine:
             return False
         hit = contains_wake_phrase(transcript, self._phrases)
         if hit and self.on_wake:
-            logger.info("Wake word detectada: %r", hit)
+            command = extract_command(transcript, hit)
+            logger.info("Wake word detectada: %r (comando: %r)", hit, command)
             try:
-                self.on_wake(hit)
+                self.on_wake(hit, command)
             except Exception as exc:  # callback não deve derrubar o loop
                 logger.warning("Wake word: erro no callback on_wake: %s", exc)
         return hit is not None
