@@ -34,6 +34,7 @@ from ..core.rag import LocalDocumentRAG
 from .live_view import LiveVoiceWidget
 from .preferences import PreferencesDialog
 from .style import setup_glass_window
+from .voice_pill import VoicePillWindow
 
 
 def get_dynamic_greeting() -> str:
@@ -199,6 +200,7 @@ class CopilotWindow(Adw.ApplicationWindow):
         # Voz ao Vivo (Local Soberana com Piper/Whisper ou Gemini Multimodal Live)
         self.live_client: GeminiLiveClient | LocalLiveVoiceClient | None = None
         self.live_voice_widget: LiveVoiceWidget | None = None
+        self.voice_pill_window: VoicePillWindow | None = None
 
         # Cerca de Proteção Espacial (Isolamento de Monitores no Wayland)
         self.fence = ScreenFenceManager()
@@ -317,15 +319,15 @@ class CopilotWindow(Adw.ApplicationWindow):
             self.fence_lbl.set_text("🛑 BLOQUEADO")
             self.show_toast("🛑 KILL SWITCH ATIVADO: Automações suspensas.")
 
-    def toggle_live_voice(self) -> None:
-        """Alterna a ativação do modo de conversa de voz ao vivo (Gemini Live)."""
+    def toggle_live_voice(self, as_pill: bool = False) -> None:
+        """Alterna a ativação do modo de conversa de voz ao vivo."""
         if self.live_client and self.live_client.is_active():
             self.stop_live_voice()
         else:
-            self.start_live_voice()
+            self.start_live_voice(as_pill=as_pill)
 
-    def start_live_voice(self) -> None:
-        """Inicia o chat de voz contínua (Local Soberana com Piper/Whisper ou Nuvem com Gemini Live)."""
+    def start_live_voice(self, as_pill: bool = False) -> None:
+        """Inicia o chat de voz contínua (Local Soberana ou Nuvem) em modo Pílula ou Janela Completa."""
         use_local = (
             self.config.provider in ("local", "ollama", "hybrid")
             or not self.config.gemini_api_key.strip()
@@ -360,11 +362,38 @@ class CopilotWindow(Adw.ApplicationWindow):
         if hasattr(self.live_client, "input_driver") and self.live_client.input_driver:
             self.live_client.input_driver.fence = self.fence
 
-        self.live_voice_widget = LiveVoiceWidget(
-            live_client=self.live_client,
-            on_close=self.stop_live_voice,
-        )
-        self.live_voice_revealer.set_child(self.live_voice_widget)
+        if as_pill:
+            # Modo Pílula Flutuante Minimalista (Dynamic Island)
+            if not self.voice_pill_window:
+                self.voice_pill_window = VoicePillWindow(
+                    application=self.get_application(),
+                    live_client=self.live_client,
+                    on_expand=self._expand_from_pill,
+                    on_close=self.stop_live_voice,
+                )
+            else:
+                self.voice_pill_window.live_client = self.live_client
+                self.voice_pill_window._connect_client_events()
+
+            self.voice_pill_window.present()
+            self.live_client.start()
+            self.show_toast(toast_msg)
+            return
+
+        # Modo Janela Completa (HUD)
+        if self.voice_pill_window:
+            self.voice_pill_window.set_visible(False)
+
+        if not self.live_voice_widget:
+            self.live_voice_widget = LiveVoiceWidget(
+                live_client=self.live_client,
+                on_close=self.stop_live_voice,
+            )
+            self.live_voice_revealer.set_child(self.live_voice_widget)
+        else:
+            self.live_voice_widget.live_client = self.live_client
+            self.live_voice_widget._connect_client_events()
+
         self.live_voice_revealer.set_reveal_child(True)
         self.voice_call_btn.add_css_class("suggested-action")
         self.bottom_voice_btn.add_css_class("suggested-action")
@@ -372,8 +401,30 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.live_client.start()
         self.show_toast(toast_msg)
 
+    def _expand_from_pill(self) -> None:
+        """Expande a conversa da pílula flutuante para a janela completa do Copilot."""
+        if self.voice_pill_window:
+            self.voice_pill_window.set_visible(False)
+        self.summon_hud()
+        if not self.live_voice_widget:
+            self.live_voice_widget = LiveVoiceWidget(
+                live_client=self.live_client,
+                on_close=self.stop_live_voice,
+            )
+            self.live_voice_revealer.set_child(self.live_voice_widget)
+        else:
+            self.live_voice_widget.live_client = self.live_client
+            self.live_voice_widget._connect_client_events()
+
+        self.live_voice_revealer.set_reveal_child(True)
+        self.voice_call_btn.add_css_class("suggested-action")
+        self.bottom_voice_btn.add_css_class("suggested-action")
+        self.welcome_box.set_visible(False)
+
     def stop_live_voice(self) -> None:
         """Encerra a chamada de voz ao vivo e consolida a interação no chat ativo."""
+        if self.voice_pill_window:
+            self.voice_pill_window.set_visible(False)
         summary = self.live_client.get_session_summary() if self.live_client else {}
         if self.live_client:
             self.live_client.stop()
@@ -2153,8 +2204,12 @@ class ZorinCopilotApp(Adw.Application):
             # Inicialização em segundo plano (boot/login): mantém janela oculta
             return 0
         elif is_voice:
-            win.summon_hud()
-            win.start_live_voice()
+            mode = getattr(win.config, "voice_overlay_mode", "pill")
+            if mode == "pill" and not win.get_visible():
+                win.toggle_live_voice(as_pill=True)
+            else:
+                win.summon_hud()
+                win.start_live_voice(as_pill=False)
         elif is_crop:
             win.trigger_direct_crop()
         elif is_toggle:

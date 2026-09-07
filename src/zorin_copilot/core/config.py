@@ -57,6 +57,7 @@ class CopilotConfig:
     piper_voice_model: str = "pt_BR-faber-medium"
     whisper_model: str = "small"
     voice_visualizer_style: str = "waves"  # "waves", "bars", "matrix", "orb"
+    voice_overlay_mode: str = "pill"  # "pill" (Pílula Compacta Flutuante) ou "full" (Janela Completa)
     
     # Inicialização automática com o sistema (Autostart no boot/login)
     autostart_enabled: bool = False

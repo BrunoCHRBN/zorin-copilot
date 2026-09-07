@@ -33,3 +33,4 @@ ENV/
 # Logs & runtime
 *.log
 .cache/
+.aider*

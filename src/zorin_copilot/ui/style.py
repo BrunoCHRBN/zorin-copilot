@@ -641,6 +641,60 @@ window.dark-glass .prompt-bar-card:focus-within {
     border: 1px solid rgba(229, 165, 10, 0.45);
     padding: 6px 12px;
 }
+
+/* --- Voice Pill Window & Dynamic Island Overlay --- */
+window.voice-pill-window,
+window.voice-pill-window.background,
+window.voice-pill-window > contents {
+    background-color: transparent;
+    background: none;
+    border: none;
+    box-shadow: none;
+}
+
+.voice-pill-container {
+    background-color: #141822;
+    border: 1.5px solid rgba(21, 166, 240, 0.55);
+    border-radius: 36px;
+    padding: 7px 16px;
+    box-shadow: 0 12px 36px rgba(0, 0, 0, 0.65), 0 0 24px rgba(21, 166, 240, 0.25);
+    transition: all 180ms ease-in-out;
+}
+
+window.light-glass .voice-pill-container {
+    background-color: #ffffff;
+    border: 1.5px solid rgba(21, 166, 240, 0.5);
+    box-shadow: 0 10px 32px rgba(0, 0, 0, 0.18), 0 0 16px rgba(21, 166, 240, 0.2);
+}
+
+.voice-pill-avatar {
+    border-radius: 9999px;
+    background: linear-gradient(135deg, #15a6f0, #3584e4);
+    min-width: 32px;
+    min-height: 32px;
+    padding: 4px;
+    box-shadow: 0 0 10px rgba(21, 166, 240, 0.4);
+}
+
+.voice-pill-avatar image {
+    color: #ffffff;
+}
+
+.voice-pill-btn {
+    border-radius: 9999px;
+    min-width: 32px;
+    min-height: 32px;
+    padding: 0;
+    margin: 0 2px;
+}
+
+.voice-pill-btn:hover {
+    background-color: rgba(21, 166, 240, 0.15);
+}
+
+window.light-glass .voice-pill-btn:hover {
+    background-color: rgba(21, 166, 240, 0.12);
+}
 """
 
 _provider_installed = False
@@ -683,3 +737,23 @@ def setup_glass_window(window: Adw.ApplicationWindow) -> None:
 
     style_manager.connect("notify::dark", sync_color_scheme)
     sync_color_scheme()
+
+
+def setup_glass_pill_window(window: Gtk.Window) -> None:
+    """Configura o efeito glassmorphism na janela flutuante da pílula de voz e sincroniza temas."""
+    apply_glass_theme(window.get_display())
+    window.add_css_class("voice-pill-window")
+
+    style_manager = Adw.StyleManager.get_default()
+
+    def sync_color_scheme(*_):
+        if style_manager.get_dark():
+            window.add_css_class("dark-glass")
+            window.remove_css_class("light-glass")
+        else:
+            window.add_css_class("light-glass")
+            window.remove_css_class("dark-glass")
+
+    style_manager.connect("notify::dark", sync_color_scheme)
+    sync_color_scheme()
+

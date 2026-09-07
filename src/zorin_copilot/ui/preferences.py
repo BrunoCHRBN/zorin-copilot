@@ -322,8 +322,19 @@ class PreferencesDialog(Adw.PreferencesDialog):
         )
         voice_group.add(self.visualizer_style_combo_row)
 
+        self.voice_overlay_options = [
+            ("pill", "Pílula Flutuante Compacta (Dynamic Island - Minimalista)"),
+            ("full", "Janela Completa (HUD Expandido)"),
+        ]
+        self.voice_overlay_combo_row = Adw.ComboRow(
+            title="Formato de Exibição da Voz",
+            subtitle="Interface exibida ao acionar o atalho global de conversa por voz",
+            model=Gtk.StringList.new([label for _, label in self.voice_overlay_options]),
+        )
+        voice_group.add(self.voice_overlay_combo_row)
+
         voice_info_row = Adw.ActionRow(
-            title="Voz Local Contínua & Soberana",
+            title="Voz Local Contínua &amp; Soberana",
             subtitle="Usa Piper TTS (voz masculina brasileira pt_BR-faber-medium) e faster-whisper na CPU. 0 MB de VRAM gastos.",
         )
         voice_group.add(voice_info_row)
@@ -561,6 +572,15 @@ class PreferencesDialog(Adw.PreferencesDialog):
                 break
         self.visualizer_style_combo_row.set_selected(matching_style_idx)
 
+        # Formato de Exibição da Voz (Pílula ou Completo)
+        current_overlay = getattr(self.config, "voice_overlay_mode", "pill")
+        matching_overlay_idx = 0
+        for idx, (o_code, _) in enumerate(self.voice_overlay_options):
+            if o_code == current_overlay:
+                matching_overlay_idx = idx
+                break
+        self.voice_overlay_combo_row.set_selected(matching_overlay_idx)
+
         # Autostart com o Sistema
         is_auto = AutostartManager.is_enabled() or getattr(self.config, "autostart_enabled", False)
         self.autostart_switch_row.set_active(is_auto)
@@ -666,6 +686,13 @@ class PreferencesDialog(Adw.PreferencesDialog):
             cfg.voice_visualizer_style = self.visualizer_style_options[sel_style][0]
         else:
             cfg.voice_visualizer_style = "waves"
+
+        # Formato de Exibição da Voz
+        sel_overlay = self.voice_overlay_combo_row.get_selected()
+        if 0 <= sel_overlay < len(self.voice_overlay_options):
+            cfg.voice_overlay_mode = self.voice_overlay_options[sel_overlay][0]
+        else:
+            cfg.voice_overlay_mode = "pill"
 
         # Autostart
         cfg.autostart_enabled = self.autostart_switch_row.get_active()
