@@ -10,6 +10,7 @@ import sys
 from . import __version__
 from .ai.actions import ActionPlan, ActionType, DesktopAction
 from .ai.engine import IntentEngine
+from .ai.providers import DEFAULT_GEMINI_MODEL, GEMINI_MODEL_CHOICES
 from .core.a11y import DesktopInspector
 from .core.config import CopilotConfig
 from .core.memory import MemoryManager
@@ -41,7 +42,10 @@ def build_parser() -> argparse.ArgumentParser:
     config_cmd = sub.add_parser("config", help="gerencia configurações de IA")
     config_cmd.add_argument("--show", action="store_true", help="exibe configuração atual")
     config_cmd.add_argument("--set-gemini-key", help="define a chave de API do Gemini")
-    config_cmd.add_argument("--set-gemini-model", help="define o modelo Gemini (ex: gemini-3.8-flash, gemini-3.6-flash)")
+    config_cmd.add_argument(
+        "--set-gemini-model",
+        help=f"define o modelo Gemini (padrão: {DEFAULT_GEMINI_MODEL}; opções: {', '.join(GEMINI_MODEL_CHOICES)})",
+    )
     config_cmd.add_argument("--set-provider", choices=["gemini", "ollama", "openai"], help="define o provedor ativo")
 
     # memory
