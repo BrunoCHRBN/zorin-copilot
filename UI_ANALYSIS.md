@@ -137,6 +137,13 @@ Em `_on_plan_ready` (L1287–1327) e em `_create_turn_widget` para o `exec_all`,
 
 **Sugestão:** marcar ações com `Adw.ActionRow` em vermelho (`@define-color error_bg_color #fce8e6`) quando `rep.success = False`, e adicionar botão "Tentar novamente" / "Diagnosticar".
 
+> **Status: RESOLVIDO (Sprint 3).** Além do sugerido, o diagnóstico revelou um bug pior:
+> `_build_execute_all_button` escrevia `"Todas Executadas ✓"` e disparava o toast
+> `"✓ N ações executadas com sucesso!"` **independentemente de falhas** — confirmado
+> por reprodução contra o commit anterior (1 ação falha, 2 ok → label `Todas Executadas ✓`).
+> O resultado agora fica registrado em `shell/action_status.py` e sobrevive à
+> reconstrução do fluxo, então trocar de tópico e voltar não apaga o rastro.
+
 ### 2.9 — `PreferencesDialog` empilha **3 grupos do mesmo provedor** sem agrupamento forte
 
 Em `preferences.py` (L60–129) Gemini, Ollama e OpenAI ficam em três `Adw.PreferencesGroup` separados dentro da mesma página "Inteligência Artificial". Visualmente isso vira uma parede de entradas.
@@ -204,8 +211,8 @@ Sprint 2 — CONCLUÍDO
   [x] Histórico rolável + cronômetro no live widget (item 2.5)
 
 Sprint 3 (2 semanas)
+  [x] Feedback de falha em ações (item 2.8) — com bug de "falso sucesso" corrigido
   → Markdown renderer real (item 2.6) OU WebView
-  → Feedback de falha em ações (item 2.8)
   → Temas customizáveis (item 2.10)
 
 Backlog
