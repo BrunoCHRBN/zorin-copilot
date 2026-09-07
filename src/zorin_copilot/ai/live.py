@@ -55,6 +55,17 @@ class LiveVoiceState(Enum):
     ERROR = "error"
 
 
+def build_realtime_text_msg(text: str) -> dict[str, Any]:
+    """Fase 4C: monta o payload `realtimeInput` de texto (contexto dinâmico).
+
+    Diferente do `clientContent` (turnComplete=true → provoca resposta do
+    modelo), o realtimeInput apenas ACRESCENTA informação ao contexto da
+    sessão sem exigir uma resposta imediata — ideal para deltas de contexto
+    (fato memorizado, monitor ativo alterado, contato salvo).
+    """
+    return {"realtimeInput": {"text": text}}
+
+
 LIVE_TOOLS_DECLARATION = [
     {
         "functionDeclarations": [
@@ -315,6 +326,24 @@ LIVE_TOOLS_DECLARATION = [
                         },
                     },
                     "required": ["name", "email"],
+                },
+            },
+            {
+                "name": "memory_remember",
+                "description": "Memoriza um fato ou preferência dita pelo usuário (ex: 'lembre-se que prefiro Vim'). O fato fica disponível imediatamente nesta sessão e em conversas futuras.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "fact": {
+                            "type": "STRING",
+                            "description": "O fato ou preferência a memorizar, em linguagem natural",
+                        },
+                        "category": {
+                            "type": "STRING",
+                            "description": "Categoria opcional (ex: 'preferencia', 'sistema', 'projeto')",
+                        },
+                    },
+                    "required": ["fact"],
                 },
             },
             {
@@ -804,6 +833,7 @@ class GeminiLiveClient:
                     "Para clicar ou digitar no desktop, use 'mouse_click', 'keyboard_type' e 'keyboard_hotkey'. Suas coordenadas serão validadas pela cerca espacial. "
                     "Para interagir com a interface de um aplicativo específico de forma precisa e semântica, prefira primeiro 'get_ui_tree' para obter os elementos com UIDs [n.n] e geometria (@x,y w×h). Para agir em algo que você VÊ no vídeo mas só conhece pela aparência, use 'locate_element(x, y)' para converter o ponto visto em um UID semântico, e então 'click_element(uid)' / 'type_element(uid, text)'. Use 'mouse_click'/'keyboard_type' apenas como fallback ou quando não houver UID. "
                     "Ao redigir ou iniciar e-mails, use 'email_compose'. NUNCA invente ou adivinhe endereços de e-mail; se não souber, use 'contact_lookup' ou pergunte ao usuário. "
+                    "Quando o usuário pedir para lembrar de algo ('lembre-se que...'), use 'memory_remember' — o fato fica disponível imediatamente nesta sessão e nas futuras. "
                     "Para marcar compromissos ou consultar a agenda, use 'calendar_event'. "
                     "Para pesquisas na web, use 'browser_search' ou 'web_search'. "
                     "Ações de risco (enviar e-mail, sobrescrever arquivo, atalho destrutivo como Alt+F4, ou digitar em campo de senha) NÃO são executadas de imediato: você receberá um 'confirmation_id' e deve pedir confirmação verbal ao usuário; se aprovada, chame 'confirm_action(confirmation_id, approve=true)'. Se o usuário recusar, chame com approve=false. "
@@ -1154,6 +1184,10 @@ class GeminiLiveClient:
                 ok = self.fence.set_active_monitor(target)
                 m = self.fence.get_active_monitor()
                 name_str = m.name if m else target
+                if ok:
+                    # Fase 4C: o novo monitor ativo entra no contexto da sessão,
+                    # pois o systemInstruction (estático) registrou o antigo.
+                    self._push_context_delta(f"o monitor ativo autorizado agora é '{name_str}'.")
                 return {
                     "success": ok,
                     "message": f"Cerca de tela definida para '{name_str}'." if ok else f"Monitor '{target}' não localizado.",
@@ -1358,7 +1392,26 @@ class GeminiLiveClient:
                 c_aliases = args.get("aliases", [])
                 c_notes = args.get("notes", "").strip()
                 saved = self.memory.save_contact(name=c_name, email=c_email, aliases=c_aliases, notes=c_notes)
+                # Fase 4C: o contato novo já entra no contexto desta sessão.
+                self._push_context_delta(f"contato salvo: {c_name} <{c_email}>.")
                 return {"success": True, "contact": saved, "message": f"Contato '{c_name}' <{c_email}> salvo com sucesso."}
+
+            elif name == "memory_remember":
+                fact = args.get("fact", "").strip()
+                if not fact:
+                    return {"success": False, "message": "Nenhum fato informado para memorizar."}
+                category = args.get("category", "").strip() or "preferencia"
+                # Chave determinística a partir do início do fato (atualiza se repetido).
+                key = " ".join(fact.lower().split())[:48]
+                self.memory.save_fact(key, fact, category=category, source="voz ao vivo")
+                # Fase 4C: injeta o fato no contexto IMEDIATAMENTE — o
+                # systemInstruction é estático, então sem isso o modelo só
+                # conheceria o fato na próxima sessão.
+                self._push_context_delta(f"memorizei agora: '{fact}'. Considere isso daqui em diante.")
+                return {
+                    "success": True,
+                    "message": f"Fato memorizado: '{fact}'. Já estou considerando isso.",
+                }
 
             elif name == "email_compose":
                 recip = args.get("recipient", "").strip()
@@ -1523,6 +1576,30 @@ class GeminiLiveClient:
         except Exception as exc:
             logger.warning("Falha ao injetar texto na sessão Live: %s", exc)
             return False
+
+    def send_context_update(self, text: str) -> bool:
+        """Fase 4C: injeta um delta de contexto na sessão ativa via realtimeInput.
+
+        O texto entra no contexto do modelo SEM provocar uma resposta imediata
+        (ao contrário de send_text_input). Uso: fatos memorizados, mudança de
+        monitor ativo, contatos salvos — informação que o modelo deve conhecer
+        dali em diante. No-op silencioso (False) se a sessão não estiver ativa.
+        """
+        text = (text or "").strip()
+        if not text or not self._is_running or not self._ws or not self._loop:
+            return False
+        msg = build_realtime_text_msg(text)
+        try:
+            asyncio.run_coroutine_threadsafe(self._ws.send(json.dumps(msg)), self._loop)
+            logger.info("Delta de contexto injetado na sessão Live: %r", text)
+            return True
+        except Exception as exc:
+            logger.warning("Falha ao injetar contexto na sessão Live: %s", exc)
+            return False
+
+    def _push_context_delta(self, delta: str) -> bool:
+        """Melhor esforço: rotula e injeta um delta de contexto na sessão ativa."""
+        return self.send_context_update(f"[Atualização de contexto] {delta}")
 
     def send_screen_frame(self) -> bool:
         """Captura um snapshot da tela e injeta no fluxo visual do Gemini Live."""
