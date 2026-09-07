@@ -266,9 +266,10 @@ class ActionFeedbackTest(unittest.TestCase):
         handle.button.emit("clicked")
 
         # Reconstrói o fluxo a partir do zero, como uma troca de tópico faria.
+        # O plano viaja no turno (não em `current_plan`), senão o rebuild o perde.
         self.win.session.turns.clear()
+        turn.plan = plan
         self.win.session.turns.append(turn)
-        self.win.current_plan = plan
         self.win._rebuild_chat_stream()
 
         rebuilt = self._find_action_rows()

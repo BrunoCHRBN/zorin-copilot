@@ -702,7 +702,10 @@ class CopilotWindow(Adw.ApplicationWindow):
         if not explanation_text and plan.actions:
             explanation_text = "Executei a ação solicitada no desktop."
 
-        turn = self.session.record_turn(prompt=prompt_text, answer=explanation_text)
+        # O plano é gravado no turno para que os botões de ação continuem
+        # disponíveis depois de um `rebuild()` (troca de tópico, undo) e após
+        # reabrir o app — não apenas enquanto for a última resposta.
+        turn = self.session.record_turn(prompt=prompt_text, answer=explanation_text, plan=plan)
         self._save_current_session()
         self._update_pin_ui()
 

@@ -148,5 +148,59 @@ class GeminiUILayoutTest(unittest.TestCase):
         self.assertFalse(self.win.fence.is_emergency_stopped)
 
 
+class TurnPlanRebuildTest(unittest.TestCase):
+    """Os botões de ação têm de sobreviver a uma reconstrução do fluxo.
+
+    Regressão: `rebuild()` passava `ctx.current_plan` só para o último turno,
+    então as respostas anteriores perdiam seus botões de ação.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = Adw.Application(application_id="org.zorin.copilot.test.turn_plan")
+
+    def setUp(self):
+        self.win = CopilotWindow(self.app)
+
+    @staticmethod
+    def _action_blocks(widget) -> list[str]:
+        found = []
+        stack = [widget]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, Gtk.Label) and node.get_text().startswith("Ações Propostas"):
+                found.append(node.get_text())
+            child = node.get_first_child()
+            while child:
+                stack.append(child)
+                child = child.get_next_sibling()
+        return found
+
+    def test_rebuild_keeps_actions_of_earlier_turns(self):
+        from zorin_copilot.ai.actions import ActionPlan, ActionType, DesktopAction
+
+        # A última resposta é puramente informativa: se o plano não estivesse
+        # gravado no turno, nenhum bloco apareceria e o teste pegaria o bug.
+        self.win.session.record_turn(
+            "abrir o firefox",
+            "certo",
+            plan=ActionPlan(thought="x", actions=[DesktopAction(ActionType.LAUNCH_APP, "Firefox")]),
+        )
+        self.win.session.record_turn(
+            "abrir o terminal",
+            "certo",
+            plan=ActionPlan(thought="y", actions=[DesktopAction(ActionType.LAUNCH_APP, "Terminal")]),
+        )
+        self.win.session.record_turn("obrigado", "de nada")  # sem plano
+
+        self.win._rebuild_chat_stream()
+        self.assertEqual(self._action_blocks(self.win.chat_stream.stream_box), ["Ações Propostas (1):"] * 2)
+
+    def test_rebuild_without_plans_renders_no_actions(self):
+        self.win.session.record_turn("oi", "olá")
+        self.win._rebuild_chat_stream()
+        self.assertEqual(self._action_blocks(self.win.chat_stream.stream_box), [])
+
+
 if __name__ == "__main__":
     unittest.main()
