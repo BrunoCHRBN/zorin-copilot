@@ -286,6 +286,27 @@ Fase 2 (fusão vídeo + AT-SPI) — CONCLUÍDO
   [x] `ai/live.py`: tool `locate_element(x, y)` converte coordenada vista no vídeo em UID semântico
   [x] `get_ui_tree` agora retorna geometria por padrão; system prompt orienta a fusão vídeo + árvore
   [x] Testes determinísticos (8 novos: bbox do parse, to_summary com bounds, element_at_point, get_ui_tree/locate_element) + suíte 507 verde
+
+Fase 3 (parte A — governança de risco ao vivo) — CONCLUÍDO
+  [x] `shell/risk.py`: `RiskPolicy.classify(name, args)` puro e determinístico (SAFE/CONFIRM)
+      cobre email_compose, write_document, organize_directory e keyboard_hotkey destrutivo (alt+f4/ctrl+q/...)
+  [x] `ai/live.py`: portão de confirmação em `_dispatch_tool` — ações de risco NÃO executam na hora;
+      devolvem `confirmation_id` e aguardam `confirm_action(id, approve)`
+  [x] Tool `confirm_action` reexecuta a ação pendente (com bypass do gate) ou a cancela
+  [x] Proteção de campo de senha: `type_element` em role `password_text`/`password` exige confirmação
+  [x] System prompt instrui o modelo a pedir confirmação verbal e usar `confirm_action`
+  [x] Testes (13 novos: classifier + gate via dispatch + 3 testes pré-existentes atualizados p/ confirmar) + suíte 520 verde
+
+Fase 3 (parte B — gatilho global / wake word) — PENDENTE (exige spike de ambiente)
+  [ ] Decidir backend de hotkey global no Wayland: `org.freedesktop.portal.GlobalShortcuts`
+      (consente; precisa xdg-desktop-portal >= 1.9 / GNOME 47+) vs GNOME Shell Extension vs daemon D-Bus.
+      Zorin 17 (Ubuntu 22.04 / GNOME 42-43) pode não ter suporte ao portal — validar primeiro.
+  [ ] `GlobalTrigger` abstrato (espelhando `VirtualInputDriver`): backend real + `NullBackend` p/ testes headless
+  [ ] Wake word: feature opcional/opt-in (mic always-on: privacidade, CPU, conflito com pw-record da sessão live)
+  [ ] Ligar hotkey ao toggle de `start_live_voice`; atalho configurável em `preferences.py`
+  [ ] Auto-refresh de contexto: `get_ui_tree(get_focused_app())` no início de turnos relevantes
+  [ ] App blocklist opcional p/ não agir em apps sensíveis (banco, gerenciador de senhas)
+  [ ] Preservar `ScreenFenceManager` + Kill Switch na frente de TODA ação disparada por gatilho global
 ```
 
 ### Detalhe do Sprint 4 — por que estes cinco

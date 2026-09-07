@@ -38,6 +38,7 @@ from ..core.vision import ScreenCaptureService
 from ..core.web_search import WebSearchClient
 from ..shell.executor import ActionExecutor
 from ..shell.input_driver import VirtualInputDriver
+from ..shell.risk import RiskLevel, RiskPolicy
 from .actions import ActionPlan, ActionType, DesktopAction
 
 logger = logging.getLogger(__name__)
@@ -542,6 +543,24 @@ LIVE_TOOLS_DECLARATION = [
                     "required": ["x", "y"],
                 },
             },
+            {
+                "name": "confirm_action",
+                "description": "Confirma ou cancela uma ação de risco previamente solicitada (ex: enviar e-mail, sobrescrever arquivo, atalho destrutivo, digitar em senha). Chamada apenas após o usuário aprovar verbalmente.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "confirmation_id": {
+                            "type": "STRING",
+                            "description": "ID retornado pela ferramenta de risco (campo confirmation_id).",
+                        },
+                        "approve": {
+                            "type": "BOOLEAN",
+                            "description": "true para executar a ação; false para cancelá-la.",
+                        },
+                    },
+                    "required": ["confirmation_id", "approve"],
+                },
+            },
         ]
     }
 ]
@@ -568,6 +587,9 @@ class GeminiLiveClient:
         self.fence = ScreenFenceManager()
         self.input_driver = VirtualInputDriver(fence=self.fence)
         self.inspector = DesktopInspector()
+        self.risk_policy = RiskPolicy()
+        self._pending_actions: dict[str, dict[str, Any]] = {}
+        self._bypass_risk_gate = False
         self.email_mgr = EmailManager(memory=self.memory)
         self.cal_mgr = CalendarManager(memory=self.memory)
         self.rag = LocalDocumentRAG(memory=self.memory)
@@ -776,6 +798,7 @@ class GeminiLiveClient:
                     "Ao redigir ou iniciar e-mails, use 'email_compose'. NUNCA invente ou adivinhe endereços de e-mail; se não souber, use 'contact_lookup' ou pergunte ao usuário. "
                     "Para marcar compromissos ou consultar a agenda, use 'calendar_event'. "
                     "Para pesquisas na web, use 'browser_search' ou 'web_search'. "
+                    "Ações de risco (enviar e-mail, sobrescrever arquivo, atalho destrutivo como Alt+F4, ou digitar em campo de senha) NÃO são executadas de imediato: você receberá um 'confirmation_id' e deve pedir confirmação verbal ao usuário; se aprovada, chame 'confirm_action(confirmation_id, approve=true)'. Se o usuário recusar, chame com approve=false. "
                     f"\n\n{context_summary}\n\n"
                     "Sempre que o usuário pedir para fazer algo no computador, use imediatamente as ferramentas apropriadas e comente o resultado brevemente por voz."
                 )
@@ -1004,6 +1027,12 @@ class GeminiLiveClient:
 
     def _dispatch_tool(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         """Despacha a execução concreta para os subsistemas do Zorin Copilot."""
+        # Portão de risco: ações perigosas não executam imediatamente — exigem
+        # confirmação explícita via tool `confirm_action` (voz/"sim" ou "não").
+        if not getattr(self, "_bypass_risk_gate", False) and getattr(self, "risk_policy", None) is not None:
+            level, desc = self.risk_policy.classify(name, args)
+            if level == RiskLevel.CONFIRM:
+                return self._require_confirmation(name, args, desc)
         try:
             if name == "launch_app":
                 app_name = args.get("app_name", "").strip()
@@ -1225,6 +1254,13 @@ class GeminiLiveClient:
                         "success": False,
                         "message": f"Elemento com UID '{uid}' não encontrado. Chame get_ui_tree novamente.",
                     }
+                # Campos de senha: nunca digitar sem confirmação explícita.
+                if element.role in ("password_text", "password") and not getattr(
+                    self, "_bypass_risk_gate", False
+                ):
+                    return self._require_confirmation(
+                        name, args, "digitação em campo de senha"
+                    )
                 ok, msg = self.inspector.text_insert(
                     element, text, append=bool(args.get("append", False))
                 )
@@ -1247,6 +1283,24 @@ class GeminiLiveClient:
                     "success": False,
                     "message": f"Falha ao digitar: semântico=[{msg}] virtual=[{msg2}]",
                 }
+
+            elif name == "confirm_action":
+                cid = args.get("confirmation_id", "")
+                approve = bool(args.get("approve", False))
+                pending = self._pending_actions.pop(cid, None)
+                if pending is None:
+                    return {
+                        "success": False,
+                        "message": f"Nenhuma ação pendente com id '{cid}'.",
+                    }
+                if not approve:
+                    return {"success": True, "message": "Ação cancelada pelo usuário."}
+                # Reexecuta a ação original ignorando o portão de risco.
+                self._bypass_risk_gate = True
+                try:
+                    return self._dispatch_tool(pending["name"], dict(pending["args"]))
+                finally:
+                    self._bypass_risk_gate = False
 
             elif name == "contact_lookup":
                 q = args.get("query", "").strip()
@@ -1353,6 +1407,28 @@ class GeminiLiveClient:
         except Exception as exc:
             logger.error(f"Erro ao despachar ferramenta {name}: {exc}")
             return {"success": False, "message": f"Erro de execução: {exc}"}
+
+    def _store_pending(self, name: str, args: dict[str, Any]) -> str:
+        """Armazena uma ação aguardando confirmação e devolve seu id."""
+        import uuid
+
+        cid = uuid.uuid4().hex[:8]
+        self._pending_actions[cid] = {"name": name, "args": dict(args)}
+        return cid
+
+    def _require_confirmation(self, name: str, args: dict[str, Any], desc: str) -> dict[str, Any]:
+        """Bloqueia a execução e devolve um id de confirmação para o modelo solicitar ao usuário."""
+        cid = self._store_pending(name, args)
+        return {
+            "success": False,
+            "requires_confirmation": True,
+            "confirmation_id": cid,
+            "risk": desc,
+            "message": (
+                f"Ação de risco: {desc}. Confirme com o usuário e, se aprovada, "
+                f"chame confirm_action(confirmation_id='{cid}', approve=true)."
+            ),
+        }
 
     def send_screen_frame(self) -> bool:
         """Captura um snapshot da tela e injeta no fluxo visual do Gemini Live."""
