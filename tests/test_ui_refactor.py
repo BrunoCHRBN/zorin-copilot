@@ -8,6 +8,7 @@ Cobrem os bugs descobertos durante a extração de `ui/app.py` para `ui/widgets/
 
 import os
 import sys
+import time
 import unittest
 
 import gi
@@ -31,21 +32,30 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def run_loop_until(predicate, timeout_ms=2000):
-    """Executa o main loop até que `predicate` seja verdadeiro ou o timeout estoure."""
-    loop = GLib.MainLoop()
-    result = {"ok": False}
+    """Bombeia o contexto principal até `predicate` ser verdadeiro ou estourar o prazo.
 
-    def check():
+    Antes isto criava um `GLib.MainLoop` aninhado com dois timers — um para checar
+    e outro para encerrar. Em runner de CI carregado isso deu falso negativo: o
+    prazo vencia antes de o timer de debounce (80 ms) ser despachado, e o teste
+    falhava mesmo estando tudo certo. Bomber o contexto direto evita o loop
+    aninhado e devolve o controle assim que a condição aparece.
+    """
+    deadline = time.monotonic() + timeout_ms / 1000.0
+    context = GLib.MainContext.default()
+
+    while time.monotonic() < deadline:
+        # iteration(False) não bloqueia: só despacha o que já está pronto.
+        while context.pending():
+            context.iteration(False)
         if predicate():
-            result["ok"] = True
-            loop.quit()
-            return GLib.SOURCE_REMOVE
-        return GLib.SOURCE_CONTINUE
+            return True
+        time.sleep(0.005)
 
-    GLib.timeout_add(50, check)
-    GLib.timeout_add(timeout_ms, loop.quit)
-    loop.run()
-    return result["ok"]
+    # Última chance: o prazo pode ter vencido no mesmo instante em que a
+    # condição ficou pronta.
+    while context.pending():
+        context.iteration(False)
+    return bool(predicate())
 
 
 class SessionTurnRegressionTest(unittest.TestCase):
@@ -151,7 +161,12 @@ class WindowCompositionTest(unittest.TestCase):
         # Imediatamente após digitar nenhuma reconstrução deve ter ocorrido
         self.assertEqual(len(populated), 0)
 
-        self.assertTrue(run_loop_until(lambda: len(populated) > 0))
+        # Espera o debounce (80 ms) disparar. O prazo é bem maior que o
+        # necessário de propósito: runner de CI compartilhado atrasa timers.
+        self.assertTrue(
+            run_loop_until(lambda: len(populated) > 0, timeout_ms=10_000),
+            "a busca com debounce não reconstruiu a lista dentro do prazo",
+        )
         self.assertGreaterEqual(len(populated), 1)
 
         self.win.sidebar.populate = original
