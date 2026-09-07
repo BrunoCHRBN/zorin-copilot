@@ -11,12 +11,22 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
 
 from ..ai.providers import GeminiProvider, OllamaProvider, OpenAICompatProvider
 from ..core.config import CopilotConfig
 from ..core.memory import MemoryManager
 from ..core.shortcuts import ShortcutManager
+
+# Ícones das abas de provedor. O fallback existe porque o Zorin OS pode usar um
+# tema de ícones diferente do Adwaita padrão.
+PROVIDER_ICONS: dict[str, str] = {
+    "gemini": "network-server-symbolic",
+    "ollama": "computer-symbolic",
+    "openai": "preferences-system-network-symbolic",
+}
+FALLBACK_ICON = "application-x-executable-symbolic"
+VALID_PROVIDERS = ("gemini", "ollama", "openai")
 
 
 class PreferencesDialog(Adw.PreferencesDialog):
@@ -37,22 +47,31 @@ class PreferencesDialog(Adw.PreferencesDialog):
         self.add(page)
 
         # ---------------------------------------------------------------------
-        # Grupo: Seleção de Provedor
+        # Seleção de provedor: abas (ViewSwitcher) em vez de um dropdown, para que
+        # as três opções fiquem visíveis de imediato — antes era preciso abrir o
+        # combo para descobrir que Ollama/OpenAI eram suportados.
         # ---------------------------------------------------------------------
-        provider_group = Adw.PreferencesGroup(title="Provedor Ativo")
-        
-        self.provider_model = Gtk.StringList.new([
-            "Google Gemini (Recomendado / Nuvem)",
-            "Ollama (Local / Offline)",
-            "OpenAI / Compatível (Groq, OpenRouter)",
-        ])
-        self.provider_row = Adw.ComboRow(
-            title="Motor de IA",
-            subtitle="Escolha onde suas perguntas serão processadas",
-            model=self.provider_model,
+        self.provider_buttons: dict[str, Gtk.ToggleButton] = {}
+        provider_group = Adw.PreferencesGroup(
+            title="Provedor Ativo",
+            description="Escolha onde suas perguntas serão processadas.",
         )
-        self.provider_row.connect("notify::selected", self._on_provider_changed)
-        provider_group.add(self.provider_row)
+        segmented = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        segmented.add_css_class("linked")
+        segmented.set_halign(Gtk.Align.CENTER)
+        segmented.set_margin_top(6)
+        segmented.set_margin_bottom(6)
+
+        for key, label in (
+            ("gemini", "Gemini"),
+            ("ollama", "Ollama"),
+            ("openai", "OpenAI"),
+        ):
+            btn = self._make_provider_button(key, label)
+            self.provider_buttons[key] = btn
+            segmented.append(btn)
+
+        provider_group.add(segmented)
         page.add(provider_group)
 
         # ---------------------------------------------------------------------
@@ -95,7 +114,6 @@ class PreferencesDialog(Adw.PreferencesDialog):
         )
         link_row.add_suffix(link_btn)
         self.gemini_group.add(link_row)
-        page.add(self.gemini_group)
 
         # ---------------------------------------------------------------------
         # Grupo: Ollama (Local)
@@ -109,7 +127,6 @@ class PreferencesDialog(Adw.PreferencesDialog):
 
         self.ollama_model_row = Adw.EntryRow(title="Nome do Modelo (ex: llama3.2, mistral)")
         self.ollama_group.add(self.ollama_model_row)
-        page.add(self.ollama_group)
 
         # ---------------------------------------------------------------------
         # Grupo: OpenAI / Compatível
@@ -126,6 +143,10 @@ class PreferencesDialog(Adw.PreferencesDialog):
 
         self.openai_model_row = Adw.EntryRow(title="Nome do Modelo")
         self.openai_group.add(self.openai_model_row)
+
+        # Cada provedor é um grupo independente; somente o ativo fica visível
+        page.add(self.gemini_group)
+        page.add(self.ollama_group)
         page.add(self.openai_group)
 
         # ---------------------------------------------------------------------
@@ -237,6 +258,54 @@ class PreferencesDialog(Adw.PreferencesDialog):
         crop_group.add(crop_info_row)
         page.add(crop_group)
 
+    def _make_provider_button(self, key: str, label: str) -> Gtk.ToggleButton:
+        """Cria um botão do controle segmentado de provedores."""
+        btn = Gtk.ToggleButton()
+        btn.set_hexpand(True)
+        btn.set_child(Adw.ButtonContent(icon_name=self._resolve_icon(key), label=label))
+        btn.connect("toggled", self._on_provider_toggled, key)
+        return btn
+
+    def _on_provider_toggled(self, button: Gtk.ToggleButton, key: str) -> None:
+        """Mantém exatamente um provedor ativo e sincroniza os grupos visíveis."""
+        if button.get_active():
+            for other_key, other in self.provider_buttons.items():
+                if other_key != key and other.get_active():
+                    other.set_active(False)
+        self._update_visibility()
+
+    def active_provider(self) -> str:
+        """Retorna o provedor atualmente selecionado (padrão: gemini)."""
+        for key, btn in self.provider_buttons.items():
+            if btn.get_active():
+                return key
+        return "gemini"
+
+    def _update_visibility(self) -> None:
+        """Exibe apenas o grupo de configuração do provedor ativo."""
+        active = self.active_provider()
+        self.gemini_group.set_visible(active == "gemini")
+        self.ollama_group.set_visible(active == "ollama")
+        self.openai_group.set_visible(active == "openai")
+
+    def set_active_provider(self, provider: str) -> None:
+        """Seleciona o provedor informado, caindo para gemini se for inválido."""
+        if provider not in VALID_PROVIDERS:
+            provider = "gemini"
+        btn = self.provider_buttons.get(provider)
+        if btn is not None:
+            btn.set_active(True)
+
+    @staticmethod
+    def _resolve_icon(provider: str) -> str:
+        """Devolve o ícone do provedor, caindo para um genérico se o tema não o tiver."""
+        icon = PROVIDER_ICONS.get(provider, FALLBACK_ICON)
+        display = Gdk.Display.get_default()
+        if display is None:
+            return icon
+        theme = Gtk.IconTheme.get_for_display(display)
+        return icon if theme.has_icon(icon) else FALLBACK_ICON
+
     def _build_memory_page(self) -> None:
         page = Adw.PreferencesPage(title="Base de Conhecimento", icon_name="document-properties-symbolic")
         self.add(page)
@@ -327,9 +396,8 @@ class PreferencesDialog(Adw.PreferencesDialog):
         self.add_toast(toast)
 
     def _load_values(self) -> None:
-        # Define provedor ativo no ComboRow
-        prov_map = {"gemini": 0, "ollama": 1, "openai": 2}
-        self.provider_row.set_selected(prov_map.get(self.config.provider, 0))
+        # Define provedor ativo no controle segmentado
+        self.set_active_provider(self.config.provider)
 
         # Gemini
         self.gemini_key_row.set_text(self.config.gemini_api_key)
@@ -379,19 +447,9 @@ class PreferencesDialog(Adw.PreferencesDialog):
         is_custom = self.gemini_model_row.get_selected() == len(self.gemini_models_list) - 1
         self.gemini_custom_model_row.set_visible(is_custom)
 
-    def _on_provider_changed(self, *_args) -> None:
-        self._update_visibility()
-
-    def _update_visibility(self) -> None:
-        sel = self.provider_row.get_selected()
-        self.gemini_group.set_visible(sel == 0)
-        self.ollama_group.set_visible(sel == 1)
-        self.openai_group.set_visible(sel == 2)
-
     def _collect_current_config(self) -> CopilotConfig:
         cfg = CopilotConfig()
-        sel = self.provider_row.get_selected()
-        cfg.provider = ["gemini", "ollama", "openai"][sel]
+        cfg.provider = self.active_provider()
 
         # Gemini
         cfg.gemini_api_key = self.gemini_key_row.get_text().strip()
