@@ -13,7 +13,13 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
 
-from ..ai.providers import GeminiProvider, OllamaProvider, OpenAICompatProvider
+from ..ai.providers import (
+    DEFAULT_GEMINI_MODEL,
+    GEMINI_MODEL_CHOICES,
+    GeminiProvider,
+    OllamaProvider,
+    OpenAICompatProvider,
+)
 from ..core.config import CopilotConfig
 from ..core.memory import MemoryManager
 from ..core.shortcuts import ShortcutManager
@@ -85,18 +91,13 @@ class PreferencesDialog(Adw.PreferencesDialog):
         self.gemini_key_row = Adw.PasswordEntryRow(title="Chave de API (Gemini)")
         self.gemini_group.add(self.gemini_key_row)
 
-        self.gemini_models_list = [
-            "gemini-3.8-flash",
-            "gemini-3.6-flash",
-            "gemini-3.5-flash",
-            "gemini-3.5-flash-lite",
-            "gemini-flash-latest",
-            "gemini-2.5-pro",
-            "Outro (Personalizado)",
-        ]
+        # A lista vem de `ai.providers` para não divergir do que o provedor
+        # realmente aceita. "Outro (Personalizado)" fica sempre no fim — o
+        # código de leitura/escrita abaixo depende dessa posição.
+        self.gemini_models_list: list[str] = [*GEMINI_MODEL_CHOICES, "Outro (Personalizado)"]
         self.gemini_model_row = Adw.ComboRow(
             title="Modelo Gemini",
-            subtitle="gemini-3.8-flash (geração 3.8 / ultrarrápido) ou selecione outro",
+            subtitle=f"{GEMINI_MODEL_CHOICES[0]} acompanha a versão estável atual; fixe uma versão se preferir",
             model=Gtk.StringList.new(self.gemini_models_list),
         )
         self.gemini_model_row.connect("notify::selected", self._on_gemini_model_changed)
@@ -455,11 +456,11 @@ class PreferencesDialog(Adw.PreferencesDialog):
         cfg.gemini_api_key = self.gemini_key_row.get_text().strip()
         g_idx = self.gemini_model_row.get_selected()
         if g_idx == len(self.gemini_models_list) - 1:
-            cfg.gemini_model = self.gemini_custom_model_row.get_text().strip() or "gemini-3.8-flash"
+            cfg.gemini_model = self.gemini_custom_model_row.get_text().strip() or DEFAULT_GEMINI_MODEL
         elif g_idx < len(self.gemini_models_list):
             cfg.gemini_model = self.gemini_models_list[g_idx]
         else:
-            cfg.gemini_model = "gemini-3.8-flash"
+            cfg.gemini_model = DEFAULT_GEMINI_MODEL
 
         # Ollama
         cfg.ollama_url = self.ollama_url_row.get_text().strip() or "http://localhost:11434"
