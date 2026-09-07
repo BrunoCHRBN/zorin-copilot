@@ -271,10 +271,13 @@ Fase 0 (fundação de interação semântica) — CONCLUÍDO
   [x] `to_summary` inclui UID para o agente referenciar elementos de forma determinística
   [x] Testes determinísticos (13 novos, fake AT-SPI headless) + suíte 490 verde
 
-Fase 1 (loop semântico ao vivo) — PENDENTE (próximo PR)
-  [ ] Tools `get_ui_tree` / `click_element(uid)` / `type_element(uid, text)` no LIVE_TOOLS_DECLARATION
-  [ ] Ligar ao `_execute_tool_call` (com `mouse_click` por coordenadas como fallback)
-  [ ] `get_focused_app` + `get_ui_tree` dão contexto do app em uso a voz e vídeo ao vivo
+Fase 1 (loop semântico ao vivo) — CONCLUÍDO
+  [x] Tools `get_ui_tree` / `click_element(uid)` / `type_element(uid, text)` no LIVE_TOOLS_DECLARATION
+  [x] `_dispatch_tool` ligado: resolve UID via `find_element_by_uid`, `do_action` (clique) e
+      `text_insert` semântico (AT-SPI) com fallback para `VirtualInputDriver.type_text`
+  [x] `get_ui_tree`/`get_focused_app` dão contexto do app em uso a voz e vídeo ao vivo
+  [x] System prompt orienta o modelo a preferir ferramentas semânticas (UIDs) sobre coordenadas
+  [x] Testes determinísticos (9 novos, GeminiLiveClient com inspector/driver falsos) + suíte 499 verde
 ```
 
 ### Detalhe do Sprint 4 — por que estes cinco
