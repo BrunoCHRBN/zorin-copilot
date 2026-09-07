@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 import os
 import stat
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +45,14 @@ class CopilotConfig:
     # Atalho Global de Voz ao Vivo (Fase 3, parte B): dispara/alterna a conversa por voz
     live_voice_hotkey_enabled: bool = True
     live_voice_hotkey: str = "<Super>v"
+
+    # Wake word ("palavra de ativação") — detecção offline e hands-free.
+    # As frases são configuráveis/editáveis nas preferências (qualquer frase
+    # funciona: o STT offline transcreve e comparamos por substring). Opt-in:
+    # desativado por padrão para não segurar o microfone sem consentimento.
+    wake_word_enabled: bool = False
+    wake_phrases: list = field(default_factory=lambda: ["ok copilot", "olá copilot"])
+    wake_word_model_path: str = ""  # caminho do modelo Vosk (ex.: pt-BR)
 
     # Prompt de sistema customizável
     system_prompt: str = (

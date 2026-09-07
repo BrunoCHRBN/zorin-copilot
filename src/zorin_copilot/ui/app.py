@@ -41,6 +41,7 @@ from ..core.shortcuts import APP_SHORTCUTS, ShortcutManager
 from ..shell.action_status import ActionOutcome
 from ..shell.executor import ActionExecutor, ExecutionReport
 from ..shell.undo import UndoEntry
+from ..shell.wake_word import WakeWordEngine, default_backend
 from .live_view import LiveVoiceWidget
 from .preferences import PreferencesDialog
 from .style import setup_glass_window
@@ -114,6 +115,11 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.live_client: GeminiLiveClient | None = None
         self.live_voice_widget: LiveVoiceWidget | None = None
 
+        # Wake word ("palavra de ativação") — invocação hands-free.
+        # Opt-in via preferências; pausa durante a sessão Live (o microfone já
+        # está em uso pelo pw-record do Gemini Live).
+        self.wake_word_engine: WakeWordEngine | None = None
+
         # Cerca de Proteção Espacial (isolamento de monitores no Wayland)
         self.fence = ScreenFenceManager()
 
@@ -136,6 +142,49 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.chat_stream.rebuild()
         self.sidebar.populate()
         self.connect("close-request", self._on_close_request)
+        self._init_wake_word()
+
+    # ------------------------------------------------------------------
+    # Wake word ("palavra de ativação")
+    # ------------------------------------------------------------------
+    def _init_wake_word(self) -> None:
+        """Cria e (se habilitado) inicia o motor de wake word a partir do config."""
+        phrases = getattr(self.config, "wake_phrases", None) or []
+        model_path = getattr(self.config, "wake_word_model_path", "")
+        self.wake_word_engine = WakeWordEngine(
+            phrases=phrases,
+            backend=default_backend(model_path),
+            on_wake=self._on_wake_word,
+        )
+        if getattr(self.config, "wake_word_enabled", False):
+            started = self.wake_word_engine.start()
+            if not started:
+                logger.info(
+                    "Wake word habilitado mas indisponível (instale 'vosk' e configure o modelo)."
+                )
+
+    def _reconfigure_wake_word(self) -> None:
+        """Reconfigura o motor após salvar as preferências (frases/modelo/habilitação)."""
+        if self.wake_word_engine is not None:
+            self.wake_word_engine.stop()
+        self._init_wake_word()
+        if getattr(self.config, "wake_word_enabled", False) and (
+            self.wake_word_engine and self.wake_word_engine.running
+        ):
+            self.show_toast("🎙️ Palavra de ativação atualizada e ouvindo.")
+
+    def _on_wake_word(self, phrase: str) -> None:
+        """Chamado pela thread do motor; agenda a abertura da voz no loop principal."""
+        GLib.idle_add(self._handle_wake_on_main_thread, phrase)
+
+    def _handle_wake_on_main_thread(self, phrase: str) -> bool:
+        # Se a conversa por voz já está ativa, ignorar a detecção.
+        if self.live_client and self.live_client.is_active():
+            return GLib.SOURCE_REMOVE
+        self.show_toast(f'🎙️ Entendi "{phrase}"! Iniciando conversa...')
+        self.summon_hud()
+        self.start_live_voice()
+        return GLib.SOURCE_REMOVE
 
     # ------------------------------------------------------------------
     # Construção
@@ -671,6 +720,7 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.config = new_config
         self.engine.reload_config(new_config)
         self.header.update_provider_badge()
+        self._reconfigure_wake_word()
 
     # ------------------------------------------------------------------
     # Sugestões rápidas
@@ -1086,6 +1136,10 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.prompt_bar.bottom_voice_btn.add_css_class("suggested-action")
         self.chat_stream.welcome_box.set_visible(False)
         self.live_client.start()
+        # O microfone passa a ser do Gemini Live (pw-record): pausa a wake word
+        # para evitar conflito de captura e detecções espúrias da própria voz da IA.
+        if self.wake_word_engine is not None:
+            self.wake_word_engine.pause()
         self.show_toast("\U0001f399️ Conversa ao vivo iniciada! Pode falar...")
 
     def stop_live_voice(self) -> None:
@@ -1093,6 +1147,9 @@ class CopilotWindow(Adw.ApplicationWindow):
         summary = self.live_client.get_session_summary() if self.live_client else {}
         if self.live_client:
             self.live_client.stop()
+        # Libera o microfone e volta a ouvir a palavra de ativação.
+        if self.wake_word_engine is not None:
+            self.wake_word_engine.resume()
         self.live_voice_revealer.set_reveal_child(False)
         self.header.voice_call_btn.remove_css_class("suggested-action")
         self.prompt_bar.bottom_voice_btn.remove_css_class("suggested-action")
@@ -1210,6 +1267,14 @@ class ZorinCopilotApp(Adw.Application):
             if isinstance(win, CopilotWindow):
                 return win
         return CopilotWindow(self)
+
+    def do_shutdown(self):
+        # Encerra a thread de wake word junto com o processo (no close-request
+        # ela continua ativa de propósito — o modo HUD depende dela).
+        for win in self.get_windows():
+            if isinstance(win, CopilotWindow) and win.wake_word_engine is not None:
+                win.wake_word_engine.stop()
+        Adw.Application.do_shutdown(self)
 
     def do_activate(self):
         win = self._get_or_create_window()
