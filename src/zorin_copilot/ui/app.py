@@ -50,6 +50,7 @@ from .widgets.chat_stream import (
     format_markdown_to_markup,  # noqa: F401 - reexportado por compatibilidade
     get_action_icon,  # noqa: F401 - reexportado por compatibilidade
 )
+from .widgets.status_bar import StatusBarWidget
 from .widgets.command_palette import CommandPalette, PaletteCommand
 from .widgets.drop_zone import DropZone
 from .widgets.header import HeaderBarWidget
@@ -148,6 +149,11 @@ class CopilotWindow(Adw.ApplicationWindow):
 
         self.header = HeaderBarWidget(self)
         self.toolbar_view.add_top_bar(self.header.header)
+
+        # Barra de status inferior (estilo Warp): modelo, tokens, carga, RAM e RAG.
+        self.status_bar = StatusBarWidget(self)
+        self.toolbar_view.add_bottom_bar(self.status_bar.container)
+
 
         # Atributos de compatibilidade mantidos por código legado/testes
         self.answer_group = Adw.PreferencesGroup()
@@ -579,6 +585,10 @@ class CopilotWindow(Adw.ApplicationWindow):
 
     def _update_provider_badge(self) -> None:
         self.header.update_provider_badge()
+        # Mantém a barra de status sincronizada quando o provedor/modelo muda.
+        if getattr(self, "status_bar", None) is not None:
+            self.status_bar.refresh_model()
+            self.status_bar.refresh_tokens()
 
     def _build_fence_popover(self) -> None:
         self.header.build_fence_popover()
@@ -719,6 +729,10 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.sidebar.populate(filter_query=self.sidebar.search.get_text().strip())
         self.chat_stream.scroll_to_bottom()
         self.entry.grab_focus()
+
+        # Consumo de tokens acumulado nesta resposta (item #2 e #9).
+        self.header.refresh_token_usage()
+        self.status_bar.refresh_tokens()
         return GLib.SOURCE_REMOVE
 
     def _on_copy_answer(self, _btn: Gtk.Button) -> None:

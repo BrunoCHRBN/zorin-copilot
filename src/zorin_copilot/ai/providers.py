@@ -14,6 +14,7 @@ import requests
 
 from .actions import ActionType, DesktopAction
 from ..core.config import CopilotConfig
+from ..core.usage import TokenUsage, TokenUsageTracker, usage_from_gemini, usage_from_ollama, usage_from_openai
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +76,15 @@ Você DEVE responder EXCLUSIVAMENTE em formato JSON com o seguinte esquema:
 
 
 class BaseLLMProvider(ABC):
+    # Preenchido pelo `IntentEngine` com o tracker da sessão. `None` significa
+    # "não rastrear" — útil para chamadas avulsas fora da janela.
+    usage_tracker: TokenUsageTracker | None = None
+
+    def _record_usage(self, usage: TokenUsage | None, *, provider: str, model: str) -> None:
+        """Acumula o consumo de uma resposta no tracker da sessão, se houver."""
+        if self.usage_tracker is not None and usage is not None:
+            self.usage_tracker.record(usage, provider=provider, model=model)
+
     @abstractmethod
     def is_configured(self) -> bool:
         """Indica se as credenciais ou endpoints necessários estão configurados."""
@@ -368,6 +378,9 @@ class GeminiProvider(BaseLLMProvider):
                         content_parts = candidates[0].get("content", {}).get("parts", [])
                         if content_parts:
                             raw_text = content_parts[0].get("text", "")
+                            self._record_usage(
+                                usage_from_gemini(data), provider="gemini", model=current_model
+                            )
                             return self.parse_response_payload(raw_text)
                 
                 # Se for erro transitório (503 ou 429), tenta o próximo modelo da lista
@@ -443,6 +456,7 @@ class OllamaProvider(BaseLLMProvider):
                 return f"Erro no Ollama ({resp.status_code}): {resp.text[:200]}", []
             data = resp.json()
             raw_text = data.get("message", {}).get("content", "")
+            self._record_usage(usage_from_ollama(data), provider="ollama", model=self.model)
             return self.parse_response_payload(raw_text)
         except Exception as exc:
             return f"Erro ao consultar Ollama local: {exc}", []
@@ -529,6 +543,7 @@ class OpenAICompatProvider(BaseLLMProvider):
                 return f"Erro na API ({resp.status_code}): {resp.text[:200]}", []
             data = resp.json()
             raw_text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            self._record_usage(usage_from_openai(data), provider="openai", model=self.model)
             return self.parse_response_payload(raw_text)
         except Exception as exc:
             return f"Erro na requisição: {exc}", []

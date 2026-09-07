@@ -640,3 +640,28 @@ window.light-glass .drop-hint {
     padding: 6px 0;
     border-radius: 10px;
 }
+
+/* --- Barra de status inferior (estilo Warp) --- */
+.status-bar {
+    padding: 4px 10px;
+    background-color: rgba(127, 127, 127, 0.08);
+    border-top: 1px solid rgba(127, 127, 127, 0.18);
+}
+
+window.dark-glass .status-bar {
+    background-color: rgba(0, 0, 0, 0.28);
+    border-top: 1px solid rgba(255, 255, 255, 0.10);
+}
+
+.status-item {
+    padding: 2px 12px;
+}
+
+.status-icon {
+    opacity: 0.70;
+}
+
+.status-text {
+    font-size: 12px;
+    opacity: 0.85;
+}
