@@ -1193,13 +1193,15 @@ class ZorinCopilotApp(Adw.Application):
 
     def do_startup(self):
         Adw.Application.do_startup(self)
-        # Garante o registro dos atalhos de sistema configurados no GNOME (HUD e Recorte)
+        # Garante o registro dos atalhos de sistema configurados no GNOME (HUD, Recorte e Voz ao Vivo)
         try:
             cfg = CopilotConfig.load()
             if cfg.global_shortcut_enabled:
                 ShortcutManager.register(cfg.global_shortcut_key)
             if getattr(cfg, "crop_shortcut_enabled", True):
                 ShortcutManager.register_crop(getattr(cfg, "crop_shortcut_key", "<Super><Shift>s"))
+            if getattr(cfg, "live_voice_hotkey_enabled", True):
+                ShortcutManager.register_voice(getattr(cfg, "live_voice_hotkey", "<Super>v"))
         except Exception:
             pass
 
@@ -1229,7 +1231,7 @@ class ZorinCopilotApp(Adw.Application):
         win = self._get_or_create_window()
         if is_voice:
             win.summon_hud()
-            win.start_live_voice()
+            win.toggle_live_voice()
         elif is_crop:
             win.trigger_direct_crop()
         elif is_toggle:

@@ -20,6 +20,21 @@ from gi.repository import Gio  # noqa: E402
 logger = logging.getLogger(__name__)
 
 
+def _media_keys_schema_exists() -> bool:
+    """Verifica se o schema de media-keys do GNOME está disponível antes de abrir Gio.Settings.
+
+    Abrir Gio.Settings com um schema inexistente causa abort em nível C (não capturável por
+    try/except) em algumas builds do GLib — este guard evita esse crash tanto no app quanto
+    nos testes, degradando para "atalho indisponível" de forma graciosa.
+    """
+    try:
+        src = Gio.SettingsSchemaSource.get_default()
+        return src.lookup(MEDIA_KEYS_SCHEMA, True) is not None
+    except Exception as exc:
+        logger.warning(f"Não foi possível verificar o schema de atalhos do GNOME: {exc}")
+        return False
+
+
 @dataclass(frozen=True)
 class AppShortcut:
     """Atalho interno da janela (escopo de aplicação).
@@ -55,6 +70,9 @@ COPILOT_BINDING_NAME: Final = "Zorin Copilot"
 CROP_BINDING_PATH: Final = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/zorin-copilot-crop/"
 CROP_BINDING_NAME: Final = "Zorin Copilot - Recorte Inteligente"
 
+VOICE_BINDING_PATH: Final = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/zorin-copilot-voice/"
+VOICE_BINDING_NAME: Final = "Zorin Copilot - Voz ao Vivo"
+
 
 class ShortcutManager:
     """Gerencia o registro e remoção dos atalhos de teclado globais do Copilot no GNOME/Zorin OS."""
@@ -78,6 +96,8 @@ class ShortcutManager:
     # -------------------------------------------------------------------------
     @classmethod
     def _is_path_registered(cls, path: str) -> bool:
+        if not _media_keys_schema_exists():
+            return False
         try:
             settings = Gio.Settings.new(MEDIA_KEYS_SCHEMA)
             existing = list(settings.get_strv("custom-keybindings"))
@@ -98,6 +118,9 @@ class ShortcutManager:
 
     @classmethod
     def _register_binding(cls, path: str, name: str, command: str, binding: str) -> bool:
+        if not _media_keys_schema_exists():
+            logger.warning("Schema de media-keys do GNOME indisponível; atalho não registrado.")
+            return False
         try:
             settings = Gio.Settings.new(MEDIA_KEYS_SCHEMA)
             existing = list(settings.get_strv("custom-keybindings"))
@@ -117,6 +140,8 @@ class ShortcutManager:
 
     @classmethod
     def _unregister_binding(cls, path: str) -> bool:
+        if not _media_keys_schema_exists():
+            return False
         try:
             settings = Gio.Settings.new(MEDIA_KEYS_SCHEMA)
             existing = list(settings.get_strv("custom-keybindings"))
@@ -189,3 +214,31 @@ class ShortcutManager:
     def unregister_crop(cls) -> bool:
         """Remove o atalho global de recorte inteligente do sistema operacional."""
         return cls._unregister_binding(CROP_BINDING_PATH)
+
+    # -------------------------------------------------------------------------
+    # Atalho Global de Voz ao Vivo (Fase 3, parte B): Super+V dispara/alterna a conversa
+    # -------------------------------------------------------------------------
+    @classmethod
+    def is_voice_registered(cls) -> bool:
+        """Verifica se o atalho de voz ao vivo está atualmente cadastrado."""
+        return cls._is_path_registered(VOICE_BINDING_PATH)
+
+    @classmethod
+    def get_voice_binding(cls) -> str:
+        """Retorna a combinação de teclas atualmente cadastrada para voz ao vivo."""
+        return cls._get_binding_at_path(VOICE_BINDING_PATH)
+
+    @classmethod
+    def register_voice(cls, binding: str = "<Super>v") -> bool:
+        """Cadastra o atalho global de voz ao vivo (dispara `zorin-copilot --voice`)."""
+        return cls._register_binding(
+            path=VOICE_BINDING_PATH,
+            name=VOICE_BINDING_NAME,
+            command=cls.get_binary_command("--voice"),
+            binding=binding,
+        )
+
+    @classmethod
+    def unregister_voice(cls) -> bool:
+        """Remove o atalho global de voz ao vivo do sistema operacional."""
+        return cls._unregister_binding(VOICE_BINDING_PATH)

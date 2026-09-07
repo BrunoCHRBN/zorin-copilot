@@ -41,7 +41,11 @@ class CopilotConfig:
     # Atalho Global Direto de Recorte Inteligente (Pilar 3: Visão Instantânea)
     crop_shortcut_enabled: bool = True
     crop_shortcut_key: str = "<Super><Shift>s"
-    
+
+    # Atalho Global de Voz ao Vivo (Fase 3, parte B): dispara/alterna a conversa por voz
+    live_voice_hotkey_enabled: bool = True
+    live_voice_hotkey: str = "<Super>v"
+
     # Prompt de sistema customizável
     system_prompt: str = (
         "Você é o Zorin Copilot, assistente inteligente do sistema operacional Zorin OS 18 Core "

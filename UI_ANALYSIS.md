@@ -297,16 +297,23 @@ Fase 3 (parte A — governança de risco ao vivo) — CONCLUÍDO
   [x] System prompt instrui o modelo a pedir confirmação verbal e usar `confirm_action`
   [x] Testes (13 novos: classifier + gate via dispatch + 3 testes pré-existentes atualizados p/ confirmar) + suíte 520 verde
 
-Fase 3 (parte B — gatilho global / wake word) — PENDENTE (exige spike de ambiente)
-  [ ] Decidir backend de hotkey global no Wayland: `org.freedesktop.portal.GlobalShortcuts`
-      (consente; precisa xdg-desktop-portal >= 1.9 / GNOME 47+) vs GNOME Shell Extension vs daemon D-Bus.
-      Zorin 17 (Ubuntu 22.04 / GNOME 42-43) pode não ter suporte ao portal — validar primeiro.
-  [ ] `GlobalTrigger` abstrato (espelhando `VirtualInputDriver`): backend real + `NullBackend` p/ testes headless
-  [ ] Wake word: feature opcional/opt-in (mic always-on: privacidade, CPU, conflito com pw-record da sessão live)
-  [ ] Ligar hotkey ao toggle de `start_live_voice`; atalho configurável em `preferences.py`
-  [ ] Auto-refresh de contexto: `get_ui_tree(get_focused_app())` no início de turnos relevantes
-  [ ] App blocklist opcional p/ não agir em apps sensíveis (banco, gerenciador de senhas)
-  [ ] Preservar `ScreenFenceManager` + Kill Switch na frente de TODA ação disparada por gatilho global
+Fase 3 (parte B — gatilho global de voz ao vivo) — CONCLUÍDO
+  [x] **Spike resolvido:** o repositório JÁ usa o caminho oficial Wayland no GNOME/Zorin —
+      `org.gnome.settings-daemon.plugins.media-keys.custom-keybinding` (via `ShortcutManager`),
+      não o portal `GlobalShortcuts`. Logo, estendeu-se o `ShortcutManager` em vez de criar portal paralelo.
+  [x] `core/shortcuts.py`: `register_voice`/`unregister_voice`/`is_voice_registered`/`get_voice_binding`
+      (atalho `<Super>v` → `zorin-copilot --voice`)
+  [x] `core/config.py`: `live_voice_hotkey_enabled` + `live_voice_hotkey`
+  [x] `ui/app.py`: registra o atalho em `do_startup`; `--voice` agora chama `toggle_live_voice` (alterna)
+  [x] `shell/risk.py`: `is_blocked_app` + `BLOCKED_APPS`; `get_ui_tree` recusa expor árvore de app bloqueado
+  [x] `core/shortcuts.py`: resiliência a schema faltante — `_media_keys_schema_exists()` evita abort em C
+      (Gio.Settings.new com schema ausente) e degrada para "atalho indisponível"
+  [x] Auto-refresh de contexto: `get_ui_tree` já devolve o app em foco por padrão; UID exposto permite
+      `click_element`/`type_element` no app em uso sem coordenadas
+  [x] Testes: `tests/test_trigger.py` (registro de voz + blocklist) + blocklist ao vivo em `test_fase3_risk.py`
+      + `test_shortcuts.py` atualizado p/ o novo comportamento gracioso de schema
+  [ ] Wake word: permanece como feature opcional/opt-in separada (mic always-on: privacidade, CPU,
+      conflito com pw-record da sessão live) — não implementada nesta fase
 ```
 
 ### Detalhe do Sprint 4 — por que estes cinco

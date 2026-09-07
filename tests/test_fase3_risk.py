@@ -19,7 +19,7 @@ from zorin_copilot.ai.live import (  # noqa: E402
     LIVE_TOOLS_DECLARATION,
 )
 from zorin_copilot.core.a11y import DesktopInspector, UIElement  # noqa: E402
-from zorin_copilot.shell.risk import RiskLevel, RiskPolicy  # noqa: E402
+from zorin_copilot.shell.risk import BLOCKED_APPS, RiskLevel, RiskPolicy  # noqa: E402
 
 
 class _FakeInputDriver:
@@ -164,6 +164,39 @@ class LiveRiskGateTest(unittest.TestCase):
         self.assertNotEqual(a["confirmation_id"], b["confirmation_id"])
         c._dispatch_tool("confirm_action", {"confirmation_id": a["confirmation_id"], "approve": True})
         self.assertIn(b["confirmation_id"], c._pending_actions)
+
+
+class LiveBlocklistTest(unittest.TestCase):
+    def setUp(self):
+        self._saved = set(BLOCKED_APPS)
+        BLOCKED_APPS.clear()
+
+    def tearDown(self):
+        BLOCKED_APPS.clear()
+        BLOCKED_APPS.update(self._saved)
+
+    def _client(self, root):
+        c = GeminiLiveClient.__new__(GeminiLiveClient)
+        c.risk_policy = None  # foca no blocklist; o gate de risco é ignorado
+        c._pending_actions = {}
+        c._bypass_risk_gate = False
+        c.inspector = _FakeInspector(root)
+        return c
+
+    def test_get_ui_tree_refuses_blocked_app(self):
+        BLOCKED_APPS.add("Banco Secreto")
+        tree = UIElement(name="Banco Secreto", role="application", uid="0")
+        c = self._client(tree)
+        out = c._dispatch_tool("get_ui_tree", {})
+        self.assertFalse(out["success"])
+        self.assertIn("lista de bloqueio", out["message"])
+
+    def test_get_ui_tree_allows_normal_app(self):
+        tree = UIElement(name="Navegador", role="application", uid="0")
+        c = self._client(tree)
+        out = c._dispatch_tool("get_ui_tree", {})
+        self.assertTrue(out["success"])
+        self.assertEqual(out["app"], "Navegador")
 
 
 if __name__ == "__main__":
