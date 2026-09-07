@@ -15,6 +15,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gtk  # noqa: E402
 
 from ...core.fence import NO_MONITOR_LABEL  # noqa: E402
+from ...core.usage import format_tokens  # noqa: E402
 
 if TYPE_CHECKING:  # pragma: no cover - apenas para type checking
     from ..app import CopilotWindow
@@ -175,17 +176,27 @@ class HeaderBarWidget:
         self.ctx.toggle_sidebar()
 
     def update_provider_badge(self) -> None:
-        """Reflete no badge o provedor/modelo atualmente configurado."""
+        """Reflete no badge o provedor/modelo e o consumo de tokens (item #2)."""
         config = self.ctx.config
+        # Indicador de tokens consumidos na sessão (estilo Raycast) — aparece
+        # sempre que houver uso acumulado, independente de estar configurado agora.
+        tracker = self.ctx.engine.usage_tracker
+        token_txt = ""
+        if tracker is not None and tracker.session.total_tokens:
+            token_txt = f" · {format_tokens(tracker.session.total_tokens)} tokens"
         if config.is_configured():
             prov_name = {
                 "gemini": f"Gemini ({config.gemini_model})",
                 "ollama": f"Ollama ({config.ollama_model})",
                 "openai": f"API ({config.openai_model})",
             }.get(config.provider, "IA Ativa")
-            self.status_badge.set_text(f"● {prov_name}")
+            self.status_badge.set_text(f"● {prov_name}{token_txt}")
         else:
-            self.status_badge.set_text("○ IA não configurada (⚙️)")
+            self.status_badge.set_text(f"○ IA não configurada (⚙️){token_txt}")
+
+    def refresh_token_usage(self) -> None:
+        """Atualiza apenas o contador de tokens do badge (chamado após cada resposta)."""
+        self.update_provider_badge()
 
     def refresh_fence_label(self) -> None:
         """Resincroniza o rótulo do monitor com o estado da cerca espacial."""

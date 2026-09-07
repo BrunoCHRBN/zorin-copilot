@@ -233,5 +233,57 @@ class PackagingTest(unittest.TestCase):
             self.assertTrue(os.path.isfile(os.path.join(ROOT, rel)), f"ausente: {rel}")
 
 
+class StatusBarTest(unittest.TestCase):
+    """Barra de status inferior (item #9) e contador de tokens no badge (item #2)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = Adw.Application(application_id="org.zorin.copilot.test.statusbar")
+
+    def setUp(self):
+        self.win = CopilotWindow(self.app)
+
+    def test_status_bar_mounted(self):
+        """A barra de status deve estar montada como bottom bar da ToolbarView."""
+        from zorin_copilot.ui.widgets.status_bar import StatusBarWidget
+
+        self.assertIsInstance(self.win.status_bar, StatusBarWidget)
+        # O widget da barra foi efetivamente adicionado à ToolbarView.
+        self.assertIsNotNone(self.win.status_bar.container.get_parent())
+
+    def test_engine_tracker_wired_to_provider(self):
+        """O engine cria o tracker e o liga ao provedor de LLM (item #11)."""
+        from zorin_copilot.core.usage import TokenUsageTracker
+
+        self.assertIsInstance(self.win.engine.usage_tracker, TokenUsageTracker)
+        self.assertIs(
+            self.win.engine.llm_provider.usage_tracker,
+            self.win.engine.usage_tracker,
+        )
+
+    def test_token_counter_updates_after_usage(self):
+        """Após uso de tokens, o badge e a barra de status refletem o consumo."""
+        from zorin_copilot.core.usage import TokenUsage
+
+        self.win.engine.usage_tracker.record(
+            TokenUsage(prompt_tokens=120, completion_tokens=30),
+            provider="gemini",
+            model="gemini-1.5-flash",
+        )
+
+        self.win.status_bar.refresh_tokens()
+        self.assertIn("150 tokens", self.win.status_bar.tokens_lbl.get_text())
+
+        self.win.header.refresh_token_usage()
+        self.assertIn("tokens", self.win.header.status_badge.get_text())
+
+    def test_status_bar_refreshes_model_and_rag(self):
+        """A barra deve exibir modelo ativo e contagem do indexador RAG sem quebrar."""
+        self.win.status_bar.refresh_model()
+        self.win.status_bar.refresh_rag()
+        self.assertIsInstance(self.win.status_bar.model_lbl.get_text(), str)
+        self.assertIsInstance(self.win.status_bar.rag_lbl.get_text(), str)
+
+
 if __name__ == "__main__":
     unittest.main()

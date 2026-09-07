@@ -188,14 +188,14 @@ Economiza scroll e deixa óbvio que são mutuamente exclusivos. A flag `_update_
 | # | Sugestão | Esforço | Impacto | Status |
 |---|---|---|---|---|
 | 1 | **Command palette** (Ctrl+K) estilo VSCode, listando todos os comandos da app | 1 dia | Alto — descobribilidade | **FEITO** |
-| 2 | **Indicador de tokens consumidos** no badge do modelo (estilo Raycast) | 2h | Médio — usuários Pro adoram | |
+| 2 | **Indicador de tokens consumidos** no badge do modelo (estilo Raycast) | 2h | Médio — usuários Pro adoram | **FEITO** |
 | 3 | **Drag-and-drop** de arquivos no chat (imagem, PDF, txt) → anexa como contexto | 1 dia | Alto | **FEITO** |
 | 4 | **Markdown export** da conversa (`⌘+S` ou botão) → `.md` bem formatado com frontmatter | 2h | Médio | **FEITO** |
 | 5 | **Split view** para comparar 2 respostas lado a lado | 3 dias | Médio — útil pra debug | |
 | 6 | **Animação de "digitando..."** no user-bubble antes da resposta (estilo iMessage) | 4h | Baixo — cosmético | |
 | 7 | **Suporte a temas customizados** carregados de `~/.config/zorin-copilot/themes/*.css` | 2 dias | Médio | **FEITO** (item 2.10) |
 | 8 | **Picture-in-picture** do orbe quando a janela é minimizada durante voz | 1 dia | Médio | |
-| 9 | **Status bar inferior** com `system_load`, `quota Gemini`, `RAM do RAG indexer` (estilo Warp) | 1 dia | Médio | |
+| 9 | **Status bar inferior** com `system_load`, `quota Gemini`, `RAM do RAG indexer` (estilo Warp) | 1 dia | Médio | **FEITO** |
 | 10 | **Histórico de undo** de ações do executor (rollback das últimas 5 ações) | 2 dias | Alto — confiança | **FEITO** |
 
 ---
@@ -238,7 +238,8 @@ Backlog
   [x] Exportar conversa em Markdown (Ctrl+S) — `core/export.py` + FileDialog
   [x] Anexos por arrastar e soltar — `core/attachments.py` + DropTarget
   [x] Desfazer ações reversíveis — `shell/undo.py` + toast com "Desfazer"
-  → token counter, status bar
+  [x] Indicador de tokens no badge do modelo (estilo Raycast) [PR #17]
+  [x] Status bar inferior com telemetria (estilo Warp) [PR #17]
 
 Sprint 4 (consolidação) — CONCLUÍDO
   [x] Catálogo de modelos Gemini em fonte única [PR #9]
@@ -246,6 +247,13 @@ Sprint 4 (consolidação) — CONCLUÍDO
   [x] Testes determinísticos: suíte verde sem hardware específico [PR #11]
   [x] Cor de acento via variável CSS + acertos pontuais [PR #12]
   [x] CI no GitHub Actions (xvfb + pytest) [PR #13, #14]
+
+Sprint 5 (telemetria de uso) — CONCLUÍDO
+  [x] `core/usage.py`: contagem de tokens + parsers por provedor (Gemini/Ollama/OpenAI)
+  [x] Provedores gravam `usage` no `TokenUsageTracker` da sessão (injeta no engine)
+  [x] Badge do modelo exibe tokens consumidos (estilo Raycast) [item #2]
+  [x] Status bar inferior: modelo, tokens, carga, RAM livre, docs do RAG [item #9]
+  [x] Testes determinísticos (24 novos) + suíte 470 verde
 ```
 
 ### Detalhe do Sprint 4 — por que estes cinco
