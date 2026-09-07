@@ -12,6 +12,7 @@ from typing import Any, Callable, Sequence
 class UIElement:
     name: str
     role: str
+    uid: str = ""  # Identificador estável por inspeção (caminho de índices), usado pelo agente
     description: str = ""
     states: tuple[str, ...] = ()
     actions: tuple[str, ...] = ()
@@ -48,7 +49,8 @@ class UIElement:
         """Gera uma representação textual compacta para enviar como contexto à IA."""
         prefix = "  " * indent
         actions_str = f" [ações: {', '.join(self.actions)}]" if self.actions else ""
-        text = f"{prefix}- {self.role}: '{self.name}'{actions_str}"
+        uid_str = f" [{self.uid}]" if self.uid else ""
+        text = f"{prefix}-{uid_str} {self.role}: '{self.name}'{actions_str}"
         lines = [text]
         for child in self.children:
             lines.append(child.to_summary(indent + 1))
@@ -108,12 +110,14 @@ class DesktopInspector:
             for i in range(count):
                 app = desktop.get_child_at_index(i)
                 if app and app.get_name().lower() == app_name.lower():
-                    return self._parse_node(app, max_depth=max_depth)
+                    return self._parse_node(app, max_depth=max_depth, uid_path=(i,))
         except Exception:
             pass
         return None
 
-    def _parse_node(self, node: Any, depth: int = 0, max_depth: int = 4) -> UIElement:
+    def _parse_node(
+        self, node: Any, depth: int = 0, max_depth: int = 4, uid_path: tuple[int, ...] = ()
+    ) -> UIElement:
         try:
             name = node.get_name() or ""
             role_name = node.get_role_name() or "unknown"
@@ -140,13 +144,17 @@ class DesktopInspector:
                 for c in range(min(child_count, 30)):
                     child_node = node.get_child_at_index(c)
                     if child_node:
-                        children.append(self._parse_node(child_node, depth + 1, max_depth))
+                        children.append(
+                            self._parse_node(child_node, depth + 1, max_depth, uid_path + (c,))
+                        )
             except Exception:
                 pass
 
+        uid = ".".join(str(i) for i in uid_path) if uid_path else "0"
         return UIElement(
             name=name,
             role=role_name,
+            uid=uid,
             description=desc,
             actions=tuple(actions),
             children=children,
@@ -164,3 +172,99 @@ class DesktopInspector:
         except Exception:
             pass
         return False
+
+    def focus_element(self, element: UIElement) -> bool:
+        """Dá foco ao elemento (necessário antes de digitação via input virtual)."""
+        if not element.raw_ref:
+            return False
+        try:
+            return bool(element.raw_ref.grab_focus())
+        except Exception:
+            return False
+
+    def text_insert(self, element: UIElement, text: str, append: bool = False) -> tuple[bool, str]:
+        """Insere texto semanticamente num campo editável via interface de texto do AT-SPI.
+
+        Caminho preferencial para digitação no Wayland: não depende de uinput nem de
+        portais. Requer que o controle exponha ``EditableText``/``Text`` (GTK/Qt expõem).
+        Retorna ``(ok, mensagem)``.
+        """
+        if not element.raw_ref:
+            return False, "Elemento sem referência nativa (raw_ref vazio)."
+        if not text:
+            return False, "Nenhum texto para inserir."
+
+        node = element.raw_ref
+        try:
+            # Garante foco antes de inserir
+            try:
+                node.grab_focus()
+            except Exception:
+                pass
+
+            et_iface = node.get_editable_text_iface()
+            if et_iface is not None:
+                if append:
+                    start = -1
+                    try:
+                        t_iface = node.get_text_iface()
+                        if t_iface is not None:
+                            start = t_iface.get_character_count()
+                    except Exception:
+                        start = -1
+                    et_iface.insert_text(text, start)
+                else:
+                    et_iface.set_text_contents(text)
+                return True, f"Texto inserido em '{element.name}' via AT-SPI EditableText."
+
+            t_iface = node.get_text_iface()
+            if t_iface is not None:
+                t_iface.insert_text(0, text)
+                return True, f"Texto inserido em '{element.name}' via AT-SPI Text."
+
+            return False, f"'{element.name}' não expõe interface de texto editável (AT-SPI)."
+        except Exception as exc:
+            return False, f"Falha ao inserir texto via AT-SPI: {exc}"
+
+    def get_focused_app(self) -> str | None:
+        """Retorna o nome da aplicação que detém o foco de teclado no momento."""
+        if not self._ensure_init() or not self._atspi:
+            return None
+        try:
+            focused = self._atspi.get_focused_element()
+            node = focused
+            last = None
+            while node is not None:
+                last = node
+                try:
+                    if node.get_role_name() == "application":
+                        return node.get_name() or None
+                except Exception:
+                    pass
+                parent = node.get_parent()
+                if parent is None:
+                    break
+                node = parent
+            return last.get_name() if last else None
+        except Exception:
+            return None
+
+    def get_ui_tree(self, app_name: str | None = None) -> UIElement | None:
+        """Árvore de acessibilidade de um app (ou do app com foco, se omitido)."""
+        if app_name:
+            return self.inspect_application(app_name)
+        focused = self.get_focused_app()
+        if focused:
+            return self.inspect_application(focused)
+        return None
+
+    @staticmethod
+    def find_element_by_uid(root: UIElement, uid: str) -> UIElement | None:
+        """Resolve um UID (gerado em `inspect_application`) de volta ao elemento."""
+        if root.uid == uid:
+            return root
+        for child in root.children:
+            found = DesktopInspector.find_element_by_uid(child, uid)
+            if found:
+                return found
+        return None

@@ -16,6 +16,7 @@ from ..core.apps import AppManager
 from ..core.clipboard import ClipboardService
 from ..core.files import FileManager
 from ..core.media import MediaPlayerManager
+from .input_driver import VirtualInputDriver
 from .system import SystemController
 from .undo import UndoStack
 
@@ -137,9 +138,11 @@ class ActionExecutor:
         self,
         inspector: DesktopInspector | None = None,
         undo_stack: UndoStack | None = None,
+        input_driver: VirtualInputDriver | None = None,
     ):
         self.inspector = inspector or DesktopInspector()
         self.undo_stack = undo_stack or UndoStack()
+        self.input_driver = input_driver or VirtualInputDriver()
 
     def execute_plan(
         self, plan: ActionPlan, dry_run: bool = False
@@ -179,6 +182,9 @@ class ActionExecutor:
 
         if action.action_type == ActionType.CLICK:
             return self._click_element(action.target)
+
+        if action.action_type == ActionType.TYPE_TEXT:
+            return self._type_text(action)
 
         if action.action_type == ActionType.CAPTURE_SCREEN:
             return ExecutionReport(action=action, success=True, message=action.describe())
@@ -365,25 +371,79 @@ class ActionExecutor:
 
     def _click_element(self, target_label: str) -> ExecutionReport:
         act = DesktopAction(ActionType.CLICK, target_label)
+        target_el = self._find_element_by_label(target_label)
+        if target_el is None:
+            return ExecutionReport(
+                action=act,
+                success=False,
+                message=f"Elemento interativo com rótulo '{target_label}' não localizado na tela.",
+            )
+        ok = self.inspector.do_action(target_el, 0)
+        if ok:
+            return ExecutionReport(
+                action=act,
+                success=True,
+                message=f"Clique executado em '{target_el.name}'.",
+            )
+        return ExecutionReport(
+            action=act,
+            success=False,
+            message=f"Falha ao executar ação em '{target_el.name}'.",
+        )
+
+    def _find_element_by_label(self, label: str) -> UIElement | None:
+        """Procura o primeiro elemento interativo cujo rótulo contém `label` em qualquer app aberto."""
         apps = self.inspector.list_applications()
         for app in apps:
             root = self.inspector.inspect_application(app)
             if not root:
                 continue
-            matches = root.find(lambda el: target_label.lower() in el.name.lower() and el.is_interactive)
+            matches = root.find(
+                lambda el: label.lower() in el.name.lower() and el.is_interactive
+            )
             if matches:
-                target_el = matches[0]
-                ok = self.inspector.do_action(target_el, 0)
-                if ok:
-                    return ExecutionReport(
-                        action=act,
-                        success=True,
-                        message=f"Clique executado em '{target_el.name}' ({app}).",
-                    )
+                return matches[0]
+        return None
+
+    def _type_text(self, action: DesktopAction) -> ExecutionReport:
+        text = action.params.get("text", "")
+        if not text:
+            return ExecutionReport(
+                action=action,
+                success=False,
+                message="Nenhum texto para digitar.",
+            )
+
+        target_el = self._find_element_by_label(action.target)
+        if target_el is None:
+            return ExecutionReport(
+                action=action,
+                success=False,
+                message=f"Campo '{action.target}' não localizado na tela.",
+            )
+
+        # 1) Caminho semântico: insere via interface de texto do AT-SPI (sem uinput). Ideal no Wayland.
+        ok, msg = self.inspector.text_insert(
+            target_el, text, append=bool(action.params.get("append", False))
+        )
+        if ok:
+            return ExecutionReport(action=action, success=True, message=msg)
+
+        # 2) Fallback: foca o campo e emite digitação por input virtual (ydotool/uinput).
+        self.inspector.focus_element(target_el)
+        ok2, msg2 = self.input_driver.type_text(
+            text, press_enter=bool(action.params.get("press_enter", False))
+        )
+        if ok2:
+            return ExecutionReport(
+                action=action,
+                success=True,
+                message=f"Texto digitado em '{action.target}' (input virtual).",
+            )
         return ExecutionReport(
-            action=act,
+            action=action,
             success=False,
-            message=f"Elemento interativo com rótulo '{target_label}' não localizado na tela.",
+            message=f"Falha ao digitar: semântico=[{msg}] virtual=[{msg2}]",
         )
 
     def _apply_window_layout(self, layout_name: str, params: dict) -> ExecutionReport:

@@ -260,6 +260,21 @@ Sprint 6 (polish de conversa) — CONCLUÍDO
   [x] Diálogo de comparação side-by-side: 2 respostas frente a frente, escolha via dropdowns [item #5]
   [x] Botão "Comparar" em cada card de resposta (aparece com 2+ respostas na conversa)
   [x] Testes determinísticos (7 novos) + suíte 477 verde
+
+Fase 0 (fundação de interação semântica) — CONCLUÍDO
+  [x] `core/a11y.py`: UID estável por elemento (`uid` no UIElement via caminho de índices no parse)
+  [x] `core/a11y.py`: `text_insert(element, text, append)` via AT-SPI EditableText/Text
+      (caminho semântico — sem uinput nem portal; requer controle que exponha a interface)
+  [x] `core/a11y.py`: `focus_element`, `get_focused_app`, `get_ui_tree`, `find_element_by_uid`
+  [x] `shell/executor.py`: branch TYPE_TEXT — localiza campo por rótulo, insere via AT-SPI,
+      fallback foca o campo + `VirtualInputDriver.type_text` (ydotool/uinput)
+  [x] `to_summary` inclui UID para o agente referenciar elementos de forma determinística
+  [x] Testes determinísticos (13 novos, fake AT-SPI headless) + suíte 490 verde
+
+Fase 1 (loop semântico ao vivo) — PENDENTE (próximo PR)
+  [ ] Tools `get_ui_tree` / `click_element(uid)` / `type_element(uid, text)` no LIVE_TOOLS_DECLARATION
+  [ ] Ligar ao `_execute_tool_call` (com `mouse_click` por coordenadas como fallback)
+  [ ] `get_focused_app` + `get_ui_tree` dão contexto do app em uso a voz e vídeo ao vivo
 ```
 
 ### Detalhe do Sprint 4 — por que estes cinco
