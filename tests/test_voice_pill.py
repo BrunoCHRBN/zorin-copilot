@@ -90,6 +90,63 @@ class TestVoicePillWindow(unittest.TestCase):
         self.pill._on_close_clicked(self.pill.close_btn)
         self.assertTrue(self.close_called)
 
+    # --- novos recursos (Dynamic Island v2) ---
+
+    def test_muted_visual_class(self):
+        """Mutar aplica destructive-action + classe pill-muted no container."""
+        self.pill._on_toggle_mute(self.pill.mute_btn)
+        self.assertIn("destructive-action", self.pill.mute_btn.get_css_classes())
+        self.assertIn("pill-muted", self.pill.container.get_css_classes())
+
+    def test_video_state_rec_dot(self):
+        """on_video_state_change(True) torna o REC dot visível; False esconde."""
+        self.pill._ui_on_video_state_change(True)
+        self.assertTrue(self.pill.rec_dot.get_visible())
+        self.pill._ui_on_video_state_change(False)
+        self.assertFalse(self.pill.rec_dot.get_visible())
+
+    def test_privacy_state_class(self):
+        """on_privacy_state_change aplica classe pill-privacy + tooltip no avatar."""
+        self.pill._ui_on_privacy_state_change(True, "Google Chrome")
+        self.assertIn("pill-privacy", self.pill.container.get_css_classes())
+        self.assertEqual(self.pill.avatar_box.get_tooltip_text(), "Privacidade: Google Chrome")
+        # Desativar → remove classe
+        self.pill._ui_on_privacy_state_change(False, "")
+        self.assertNotIn("pill-privacy", self.pill.container.get_css_classes())
+
+    def test_tool_chip_lifecycle(self):
+        """_show_chip troca texto/classe; _restore_status devolve o estado anterior."""
+        original_text = self.pill.status_lbl.get_text()
+        self.pill._show_chip("✓ Chrome", ok=True)
+        self.assertEqual(self.pill.status_lbl.get_text(), "✓ Chrome")
+        self.assertIn("pill-chip-ok", self.pill.container.get_css_classes())
+        # Simula o callback do timeout
+        self.pill._restore_status()
+        self.assertEqual(self.pill.status_lbl.get_text(), original_text)
+        self.assertNotIn("pill-chip-ok", self.pill.container.get_css_classes())
+
+    def test_idle_fade(self):
+        """_set_idle controla opacidade do container."""
+        self.pill._set_idle(True)
+        self.assertAlmostEqual(self.pill.container.get_opacity(), 0.30, places=2)
+        self.pill._set_idle(False)
+        self.assertAlmostEqual(self.pill.container.get_opacity(), 1.0, places=2)
+
+    def test_interrupt_calls_client(self):
+        """_on_interrupt_action chama live_client.interrupt() se existir."""
+        self.pill.live_client.interrupt = MagicMock()
+        self.pill._on_interrupt_action()
+        self.pill.live_client.interrupt.assert_called_once()
+
+    def test_place_smart_no_crash_headless(self):
+        """place_smart() não levanta mesmo com display e cliente mínimos."""
+        # Não temos display real aqui; o método deve retornar cedo sem erro
+        try:
+            self.pill.place_smart()
+        except Exception as exc:  # pragma: no cover
+            self.fail(f"place_smart não deveria levantar, levantou: {exc}")
+
 
 if __name__ == "__main__":
+    unittest.main()
     unittest.main()
