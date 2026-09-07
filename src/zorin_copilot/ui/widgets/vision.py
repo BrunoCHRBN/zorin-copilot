@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import html
 import threading
 import time
 from typing import TYPE_CHECKING
@@ -96,14 +97,24 @@ class VisionAttachment:
         self.ctx.show_toast("Contexto visual descartado.")
 
     def render_thumbnail(
-        self, image_bytes: bytes, is_area: bool = True, is_clipboard: bool = False
+        self,
+        image_bytes: bytes,
+        is_area: bool = True,
+        is_clipboard: bool = False,
+        label: str | None = None,
     ) -> None:
-        """Renderiza a miniatura visual no card de anexo acima da barra de entrada."""
+        """Renderiza a miniatura visual no card de anexo acima da barra de entrada.
+
+        `label` sobrescreve o cabeçalho padrão (usado por arquivos soltos na
+        janela, que não são nem recorte nem captura).
+        """
         try:
             gbytes = GLib.Bytes.new(image_bytes)
             texture = Gdk.Texture.new_from_bytes(gbytes)
             self.thumbnail.set_paintable(texture)
-            if is_clipboard:
+            if label:
+                header_label = f"<b>{html.escape(label)}</b>"
+            elif is_clipboard:
                 header_label = "<b>\U0001f4cb Imagem da Área de Transferência Anexada</b>"
             elif is_area:
                 header_label = "<b>✂️ Recorte de Tela Anexado</b>"

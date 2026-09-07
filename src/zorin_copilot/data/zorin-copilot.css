@@ -619,3 +619,24 @@ window.dark-glass .command-palette {
     border: 1px solid rgba(255, 255, 255, 0.12);
     box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
 }
+
+/* --- Anexos por arrastar e soltar --- */
+.drop-scrim {
+    background-color: rgba(0, 0, 0, 0.45);
+}
+
+.drop-hint {
+    padding: 32px 48px;
+    border-radius: 18px;
+    border: 2px dashed alpha(@accent_color, 0.85);
+    background-color: rgba(20, 24, 32, 0.82);
+}
+
+window.light-glass .drop-hint {
+    background-color: rgba(252, 253, 255, 0.94);
+}
+
+.attachment-chip {
+    padding: 6px 0;
+    border-radius: 10px;
+}

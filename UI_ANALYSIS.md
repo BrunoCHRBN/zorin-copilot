@@ -189,7 +189,7 @@ Economiza scroll e deixa óbvio que são mutuamente exclusivos. A flag `_update_
 |---|---|---|---|---|
 | 1 | **Command palette** (Ctrl+K) estilo VSCode, listando todos os comandos da app | 1 dia | Alto — descobribilidade | **FEITO** |
 | 2 | **Indicador de tokens consumidos** no badge do modelo (estilo Raycast) | 2h | Médio — usuários Pro adoram | |
-| 3 | **Drag-and-drop** de arquivos no chat (imagem, PDF, txt) → anexa como contexto | 1 dia | Alto | |
+| 3 | **Drag-and-drop** de arquivos no chat (imagem, PDF, txt) → anexa como contexto | 1 dia | Alto | **FEITO** |
 | 4 | **Markdown export** da conversa (`⌘+S` ou botão) → `.md` bem formatado com frontmatter | 2h | Médio | **FEITO** |
 | 5 | **Split view** para comparar 2 respostas lado a lado | 3 dias | Médio — útil pra debug | |
 | 6 | **Animação de "digitando..."** no user-bubble antes da resposta (estilo iMessage) | 4h | Baixo — cosmético | |
@@ -236,8 +236,25 @@ Sprint 3 (2 semanas) — CONCLUÍDO
 Backlog
   [x] Command palette (Ctrl+K) — busca difusa sobre todos os comandos [PR #5]
   [x] Exportar conversa em Markdown (Ctrl+S) — `core/export.py` + FileDialog
-  → drag-and-drop, status bar, undo de ações
+  [x] Anexos por arrastar e soltar — `core/attachments.py` + DropTarget
+  → token counter, status bar, undo de ações
 ```
+
+### Detalhe do backlog — anexos por arrastar e soltar
+
+| Decisão | Motivo |
+|---|---|
+| Núcleo puro em `core/attachments.py` | Classificar, extrair PDF e montar o prompt precisa ser testável sem display — mesma razão de `core/export.py`. |
+| Conteúdo entre delimitadores (`----- início de x -----`) | Um documento com `# Título` ou cercas de código não pode se passar por instrução. O cabeçalho diz explicitamente que é material de leitura. |
+| Contexto só na hora de enviar | A bolha do usuário e o histórico guardam o que ele digitou; inflar a bolha com 12k chars de arquivo destruiria a leitura do fluxo. |
+| Imagem no slot multimodal existente | O engine já recebe `image_bytes`; reaproveitar evita um segundo caminho de código. Um slot só, e o excedente vira aviso. |
+| `Gtk.DropTarget` na janela, não no chat | Instalado na janela, o gesto funciona em qualquer ponto; o GTK propaga do widget sob o cursor até a janela quando o filho não aceita o tipo. |
+| PDF via `pdftotext`, injetável | Reaproveita o binário que o RAG já usa, sem nova dependência Python. Injetável para os testes não dependerem do poppler-utils. |
+| Mesmo arquivo duas vezes é recusado | Chips duplicados duplicariam o contexto sem o usuário notar. |
+
+Bugs encontrados pelos testes: diretório sem extensão caía em "formato não suportado"
+(ordem das checagens escondia o motivo real), e soltar o mesmo arquivo duas vezes
+duplicava o bloco de contexto.
 
 ### Detalhe do backlog — exportação em Markdown
 

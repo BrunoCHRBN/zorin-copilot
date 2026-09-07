@@ -80,6 +80,31 @@ Com o foco num campo de texto, `Ctrl+K` continua sendo o atalho de edição do G
 
 ---
 
+## 📎 Anexando arquivos ao chat
+
+Arraste um arquivo do gerenciador de arquivos para dentro da janela e solte.
+
+| Tipo | O que acontece |
+|---|---|
+| Imagem (PNG, JPEG, WebP, GIF…) | Vai para o canal multimodal, no mesmo slot da captura de tela — com miniatura acima da barra de prompt. Uma imagem por vez. |
+| PDF | Texto extraído via `pdftotext` (poppler-utils) e injetado como contexto. |
+| Texto e código (`.txt`, `.md`, `.csv`, `.json`, `.py`, `.html`…) | Conteúdo lido e injetado como contexto. |
+
+Cada anexo de texto/PDF ganha um chip removível acima da barra de prompt. Enquanto
+o chip estiver lá, o conteúdo acompanha as próximas mensagens — é o mesmo critério
+da visão contínua. Para tirar o contexto, use o **x** do chip ou “Remover anexos do
+chat” no `Ctrl+K`.
+
+Detalhes que importam:
+
+- **Limites:** 12.000 caracteres por arquivo (o excedente é truncado e marcado no chip) e 8 MB por imagem.
+- **O conteúdo do arquivo não vira instrução.** Ele entra no prompt entre delimitadores (`----- início de notas.txt -----`) e cercado por um aviso explícito de que é material de leitura.
+- **A bolha do usuário não incha.** O que vai para o histórico é só o que você digitou; o contexto dos anexos é montado na hora de falar com o modelo.
+- **Soltar sem digitar nada** envia “Resuma e explique o conteúdo anexado.”.
+- Pastas, binários e formatos sem leitura possível são recusados com o motivo no toast — e o mesmo arquivo não é anexado duas vezes.
+
+---
+
 ## 📤 Exportando uma conversa
 
 `Ctrl+S` (ou "Exportar conversa (.md)" no painel de comandos) salva a conversa atual

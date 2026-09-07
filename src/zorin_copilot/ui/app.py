@@ -22,6 +22,12 @@ from ..ai.actions import ActionPlan
 from ..ai.engine import IntentEngine
 from ..ai.live import GeminiLiveClient
 from ..core.a11y import DesktopInspector
+from ..core.attachments import (
+    Attachment,
+    AttachmentKind,
+    compose_prompt,
+    load_attachments,
+)
 from ..core.config import CopilotConfig
 from ..core.export import (
     exportable_turns,
@@ -36,12 +42,14 @@ from ..shell.executor import ActionExecutor
 from .live_view import LiveVoiceWidget
 from .preferences import PreferencesDialog
 from .style import setup_glass_window
+from .widgets.attachments import AttachmentBar
 from .widgets.chat_stream import (
     ChatStreamView,
     format_markdown_to_markup,  # noqa: F401 - reexportado por compatibilidade
     get_action_icon,  # noqa: F401 - reexportado por compatibilidade
 )
 from .widgets.command_palette import CommandPalette, PaletteCommand
+from .widgets.drop_zone import DropZone
 from .widgets.header import HeaderBarWidget
 from .widgets.prompt_bar import (
     PromptBar,
@@ -87,6 +95,7 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.engine = IntentEngine(self.inspector, self.config)
         self.session = TopicSession(auto_persist=True)
         self.current_plan: ActionPlan | None = None
+        self.attachments: list[Attachment] = []
         self._raw_answer_text: str = ""
         self._is_busy = False
         self._pending_turn_box: Gtk.Widget | None = None
@@ -116,6 +125,8 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.rag.start_background_indexing()
 
         self._build_ui()
+        # Alvo de arrastar-e-soltar na janela inteira, não só no fluxo de chat.
+        self.drop_zone.attach_to(self)
         setup_glass_window(self)
         self.header.update_provider_badge()
         self.chat_stream.rebuild()
@@ -129,6 +140,8 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.toolbar_view = Adw.ToolbarView()
 
         self.vision = VisionAttachment(self)
+        self.attachment_bar = AttachmentBar(self)
+        self.drop_zone = DropZone(self)
         self.prompt_bar = PromptBar(self)
 
         self.header = HeaderBarWidget(self)
@@ -179,6 +192,8 @@ class CopilotWindow(Adw.ApplicationWindow):
         # toasts, para que avisos continuem visíveis enquanto ele está aberto.
         self.main_overlay = Gtk.Overlay()
         self.main_overlay.set_child(self.split_box)
+        # Véu de "solte aqui" primeiro: o painel de comandos deve ficar por cima.
+        self.main_overlay.add_overlay(self.drop_zone.overlay)
         self.command_palette = CommandPalette(self)
         self.main_overlay.add_overlay(self.command_palette)
 
@@ -325,7 +340,7 @@ class CopilotWindow(Adw.ApplicationWindow):
         def acc(name: str) -> str:
             return accels.get(name, "")
 
-        return [
+        commands = [
             PaletteCommand(
                 "app.new-topic", "Nova conversa", "Começar um tópico limpo",
                 "list-add-symbolic", acc("app.new-topic"), ("limpar", "novo", "chat"),
@@ -377,6 +392,17 @@ class CopilotWindow(Adw.ApplicationWindow):
             ),
         ]
 
+        # Só aparece quando faz sentido: comando que não tem efeito polui a busca.
+        if self.attachments:
+            commands.append(
+                PaletteCommand(
+                    "app.clear-attachments", "Remover anexos do chat",
+                    f"{len(self.attachments)} arquivo(s) em contexto",
+                    "edit-clear-symbolic", "", ("anexo", "arquivo", "remover", "limpar"),
+                )
+            )
+        return commands
+
     def _palette_handlers(self) -> dict[str, object]:
         """Mapa nome -> callable. Separado para poder ser verificado por testes."""
         return {
@@ -389,6 +415,7 @@ class CopilotWindow(Adw.ApplicationWindow):
             "app.toggle-dark-mode": lambda: self._trigger_prompt("ativar modo escuro"),
             "app.copy-answer": self._on_copy_answer,
             "app.export-conversation": self.export_conversation,
+            "app.clear-attachments": self.clear_attachments,
             "app.open-settings": self._open_settings,
             "app.clear-history": self.sidebar.clear_history,
             "app.quit": self._quit_application,
@@ -766,6 +793,93 @@ class CopilotWindow(Adw.ApplicationWindow):
             return
 
         self.show_toast(f"✓ Conversa exportada para {os.path.basename(path)}")
+
+    # ------------------------------------------------------------------
+    # Anexos (arrastar e soltar)
+    # ------------------------------------------------------------------
+    def attach_files(self, paths: list[str]) -> None:
+        """Anexa arquivos soltos na janela.
+
+        Imagens vão para o canal multimodal (há um slot só, como na captura de
+        tela); texto e PDF entram como contexto do prompt, com chip removível.
+        """
+        from dataclasses import replace as _replace
+
+        resolved = load_attachments(paths)
+        images = [a for a in resolved if a.ok and a.kind is AttachmentKind.IMAGE]
+        docs = [a for a in resolved if a.ok and a.kind in (AttachmentKind.TEXT, AttachmentKind.PDF)]
+        rejected = [a for a in resolved if not a.ok]
+
+        # Soltar o mesmo arquivo duas vezes duplicaria o bloco de contexto — e o
+        # usuário não teria como saber. Chips repetidos são o bug, não o recurso.
+        known = {os.path.realpath(a.path) for a in self.attachments}
+        fresh: list[Attachment] = []
+        for att in docs:
+            key = os.path.realpath(att.path)
+            if key in known:
+                rejected.append(_replace(att, error="já anexado"))
+                continue
+            known.add(key)
+            fresh.append(att)
+
+        if fresh:
+            self.attachments.extend(fresh)
+
+        image = images[0] if images else None
+        if image is not None:
+            self._attach_image_file(image)
+            for extra in images[1:]:
+                rejected.append(_replace(extra, error="só uma imagem por vez"))
+
+        self.attachment_bar.refresh()
+        self.show_toast(self._describe_attachments(fresh, image, rejected))
+
+    def _attach_image_file(self, att: Attachment) -> None:
+        """Coloca a imagem solta no mesmo slot multimodal da captura de tela."""
+        if not att.data:
+            return
+        self._active_image_bytes = att.data
+        self._active_image_is_area = False
+        self._active_image_is_clipboard = False
+        self.vision.render_thumbnail(
+            att.data,
+            is_area=False,
+            is_clipboard=False,
+            label=f"\U0001f5bc️ Imagem anexada: {att.name}",
+        )
+        self.entry.set_placeholder_text(
+            "Faça uma pergunta sobre esta imagem ou pressione Enter..."
+        )
+
+    @staticmethod
+    def _describe_attachments(
+        docs: list[Attachment], image: Attachment | None, rejected: list[Attachment]
+    ) -> str:
+        """Frase do toast. Nomeia o primeiro problema: erro genérico não ajuda."""
+        parts = []
+        if image is not None:
+            parts.append(f"imagem {image.name} anexada")
+        if docs:
+            n = len(docs)
+            parts.append(f"{n} arquivo{'s' if n > 1 else ''} de texto anexado{'s' if n > 1 else ''}")
+        if rejected:
+            n = len(rejected)
+            first = rejected[0]
+            detail = f" ({first.error})" if n == 1 else ""
+            parts.append(f"{n} ignorado{'s' if n > 1 else ''}: {first.name}{detail}")
+        if not parts:
+            return "Nada para anexar."
+        return "✓ " + " · ".join(parts)
+
+    def clear_attachments(self, *_args) -> None:
+        """Remove todos os anexos de texto/PDF (não mexe na imagem ativa)."""
+        if not self.attachments:
+            self.show_toast("Nenhum anexo para remover.")
+            return
+        count = len(self.attachments)
+        self.attachments.clear()
+        self.attachment_bar.refresh()
+        self.show_toast(f"{count} anexo{'s' if count > 1 else ''} removido{'s' if count > 1 else ''}.")
 
     # ------------------------------------------------------------------
     # Sessão e histórico
