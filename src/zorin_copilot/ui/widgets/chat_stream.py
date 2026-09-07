@@ -421,7 +421,7 @@ class ChatStreamView:
         def on_exec_all(_):
             exec_all.set_sensitive(False)
             exec_all.set_label("Executando...")
-            reports = ctx.executor.execute_plan(plan, dry_run=False)
+            reports = ctx.execute_plan_with_undo(plan)
 
             ok = 0
             failed = 0
@@ -548,7 +548,16 @@ class ChatStreamView:
     ) -> None:
         """Pinta a linha com o resultado da execução e revela a mensagem recebida."""
         btn.remove_css_class("suggested-action")
-        if outcome.success:
+        btn.remove_css_class("destructive-action")
+        row.remove_css_class("action-failed")
+        if outcome.undone:
+            # Executou e voltou atrás: não é sucesso pendente nem erro.
+            btn.add_css_class("flat")
+            btn.set_label("Desfeito ↩")
+            btn.set_sensitive(False)
+            row.add_css_class("action-done")
+            row.remove_css_class("action-failed")
+        elif outcome.success:
             btn.add_css_class("flat")
             btn.set_label("Executado ✓")
             row.add_css_class("action-done")
@@ -566,7 +575,7 @@ class ChatStreamView:
             row._zc_base_subtitle = base
 
         detail = outcome.message if not row.get_use_markup() else html.escape(outcome.message)
-        prefix = "✓ " if outcome.success else "✗ "
+        prefix = "✓ " if outcome.success else ("↩ " if outcome.undone else "✗ ")
         row.set_subtitle(f"{base}\n{prefix}{detail}" if base else f"{prefix}{detail}")
         row.set_subtitle_lines(3)
 
@@ -654,7 +663,18 @@ class ChatStreamView:
                 thought=ctx.current_plan.thought if ctx.current_plan else "",
                 actions=[action],
             )
-            reports = ctx.executor.execute_plan(single_plan, dry_run=False)
+            # `on_undone` repinta só esta linha: reconstruir o fluxo inteiro
+            # faria as ações de turnos antigos desaparecerem.
+            def repaint(ok: bool, message: str) -> None:
+                undone_outcome = ActionOutcome(success=ok, message=message, undone=True)
+                if key:
+                    self.outcomes.record(key, undone_outcome)
+                if row is not None:
+                    self._apply_outcome_to_row(row, btn, undone_outcome)
+
+            reports = ctx.execute_plan_with_undo(
+                single_plan, ui_key=key, on_undone=repaint
+            )
             rep = reports[0] if reports else None
 
             if rep is None:

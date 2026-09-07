@@ -44,6 +44,7 @@ APP_SHORTCUTS: Final[tuple[AppShortcut, ...]] = (
     AppShortcut("app.toggle-pin", "<Control>p", "Fixar a conversa atual no topo"),
     AppShortcut("app.command-palette", "<Control>k", "Abrir o painel de comandos"),
     AppShortcut("app.export-conversation", "<Control>s", "Exportar a conversa como Markdown"),
+    AppShortcut("app.undo-action", "<Control>z", "Desfazer a última ação reversível"),
 )
 
 MEDIA_KEYS_SCHEMA: Final = "org.gnome.settings-daemon.plugins.media-keys"

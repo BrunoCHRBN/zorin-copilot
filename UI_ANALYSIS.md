@@ -196,7 +196,7 @@ Economiza scroll e deixa óbvio que são mutuamente exclusivos. A flag `_update_
 | 7 | **Suporte a temas customizados** carregados de `~/.config/zorin-copilot/themes/*.css` | 2 dias | Médio | **FEITO** (item 2.10) |
 | 8 | **Picture-in-picture** do orbe quando a janela é minimizada durante voz | 1 dia | Médio | |
 | 9 | **Status bar inferior** com `system_load`, `quota Gemini`, `RAM do RAG indexer` (estilo Warp) | 1 dia | Médio | |
-| 10 | **Histórico de undo** de ações do executor (rollback das últimas 5 ações) | 2 dias | Alto — confiança | |
+| 10 | **Histórico de undo** de ações do executor (rollback das últimas 5 ações) | 2 dias | Alto — confiança | **FEITO** |
 
 ---
 
@@ -237,8 +237,31 @@ Backlog
   [x] Command palette (Ctrl+K) — busca difusa sobre todos os comandos [PR #5]
   [x] Exportar conversa em Markdown (Ctrl+S) — `core/export.py` + FileDialog
   [x] Anexos por arrastar e soltar — `core/attachments.py` + DropTarget
-  → token counter, status bar, undo de ações
+  [x] Desfazer ações reversíveis — `shell/undo.py` + toast com "Desfazer"
+  → token counter, status bar
 ```
+
+### Detalhe do backlog — desfazer ações
+
+**Só entra na pilha o que o app consegue reverter de verdade:** escrever/substituir
+arquivo e organizar pasta. Clique, digitação, abrir app, abrir URL e execução de
+comando mexem em estado de terceiros — prometer desfazer seria prometer falso.
+
+| Decisão | Motivo |
+|---|---|
+| A pilha guarda o *como* reverter (`revert`) | Quem executou conhece o estado anterior; a UI não deveria saber reconstruí-lo. |
+| `deque(maxlen=5)` | O próprio container descarta a mais antiga quando estoura o teto do item 10. |
+| Entrada sai da pilha **antes** de reverter | Um desfazer impossível (arquivo movido pelo usuário) não pode trancar os quatro anteriores. |
+| `FileManager.resolve_target_path()` extraído | O executor precisa fotografar o arquivo *antes* de sobrescrevê-lo; duplicar a regra de higienização do nome daria divergência. |
+| `organize_directory(..., moves=...)` como parâmetro de saída | O resumo atual só conta categorias e não diz quem foi para onde. Parâmetro opcional evita quebrar quem já desempacota 3 valores. |
+| Binário ou > 1 MB não gera snapshot | Restaurar por texto corromperia o arquivo; prometer e corromper é pior que não prometer. |
+| Toast com botão "Desfazer" (10 s) | É o idioma do GTK para ação reversível, e não interrompe o fluxo quanto um diálogo. |
+| Linha mostra "Desfeito ↩" | Sucesso e falha não cobrem o terceiro estado: a ação aconteceu e voltou atrás. |
+| `Ctrl+Z` não rouba o undo de texto | Com o foco num campo editável o handler devolve `False`, mesma regra do `Ctrl+K`. |
+
+A repintura da linha usa um hook (`on_undone`) em vez de reconstruir o fluxo:
+`rebuild()` só repassa o plano ao último turno, e reconstruir faria as ações dos
+turnos anteriores desaparecerem.
 
 ### Detalhe do backlog — anexos por arrastar e soltar
 

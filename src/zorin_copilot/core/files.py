@@ -37,6 +37,25 @@ class FileManager:
     """Serviço para criação de documentos, relatórios e organização inteligente de pastas."""
 
     @classmethod
+    def resolve_target_path(cls, filename: str, directory: str | None = None) -> str:
+        """Caminho final que `write_document` vai usar.
+
+        Existe para que o executor possa fotografar o arquivo **antes** de
+        sobrescrevê-lo — sem duplicar aqui a regra de higienização do nome.
+        """
+        clean_name = os.path.basename((filename or "").strip())
+        if not clean_name:
+            clean_name = "relatorio.md"
+        if "." not in clean_name:
+            clean_name = f"{clean_name}.md"
+
+        if directory:
+            target_dir = os.path.expanduser(directory.strip())
+        else:
+            target_dir = os.path.expanduser("~/Documentos/Relatorios")
+        return os.path.join(target_dir, clean_name)
+
+    @classmethod
     def write_document(
         cls,
         filename: str,
@@ -46,21 +65,11 @@ class FileManager:
     ) -> tuple[bool, str, str]:
         """Cria ou atualiza um arquivo de texto ou Markdown no diretório especificado."""
         try:
-            # Higieniza o nome do arquivo
-            clean_name = os.path.basename(filename.strip())
-            if not clean_name:
-                clean_name = "relatorio.md"
-            if "." not in clean_name:
-                clean_name = f"{clean_name}.md"
-
-            # Resolve diretório de destino
-            if directory:
-                target_dir = os.path.expanduser(directory.strip())
-            else:
-                target_dir = os.path.expanduser("~/Documentos/Relatorios")
+            full_path = cls.resolve_target_path(filename, directory)
+            target_dir = os.path.dirname(full_path)
+            clean_name = os.path.basename(full_path)
 
             os.makedirs(target_dir, exist_ok=True)
-            full_path = os.path.join(target_dir, clean_name)
 
             mode = "a" if append else "w"
             with open(full_path, mode, encoding="utf-8") as f:
@@ -96,8 +105,16 @@ class FileManager:
         cls,
         directory: str | None = None,
         dry_run: bool = False,
+        moves: list[tuple[str, str]] | None = None,
     ) -> tuple[bool, str, dict[str, int]]:
-        """Organiza arquivos avulsos de uma pasta em subpastas categorizadas por tipo."""
+        """Organiza arquivos avulsos de uma pasta em subpastas categorizadas por tipo.
+
+        `moves` é opcional e funciona como saída: recebe os pares
+        `(origem, destino_final)` conforme os arquivos são movidos. É o que
+        permite desfazer — o resumo em `stats` só conta categorias e não diz
+        quem foi para onde. Ficou como parâmetro (e não 4º retorno) para não
+        quebrar quem já desempacota três valores.
+        """
         target_dir = os.path.expanduser((directory or "~/Downloads").strip())
         if not os.path.exists(target_dir) or not os.path.isdir(target_dir):
             return (False, f"Diretório '{target_dir}' não existe ou não é uma pasta.", {})
@@ -157,6 +174,8 @@ class FileManager:
 
                 shutil.move(src_path, dest_file)
                 moved_count += 1
+                if moves is not None:
+                    moves.append((src_path, dest_file))
 
             summary_lines = [f"Organização concluída em '{target_dir}' ({moved_count} arquivos movidos):"]
             for cat, count in sorted(stats.items()):
