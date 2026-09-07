@@ -51,6 +51,7 @@ from .widgets.chat_stream import (
     get_action_icon,  # noqa: F401 - reexportado por compatibilidade
 )
 from .widgets.status_bar import StatusBarWidget
+from .widgets.compare_dialog import CompareResponsesDialog
 from .widgets.command_palette import CommandPalette, PaletteCommand
 from .widgets.drop_zone import DropZone
 from .widgets.header import HeaderBarWidget
@@ -674,6 +675,11 @@ class CopilotWindow(Adw.ApplicationWindow):
     # ------------------------------------------------------------------
     # Sugestões rápidas
     # ------------------------------------------------------------------
+    def _open_compare(self, anchor_turn=None) -> None:
+        """Abre o diálogo de comparação side-by-side de respostas (item #5)."""
+        dlg = CompareResponsesDialog(self, anchor_turn)
+        dlg.present(self)
+
     def _trigger_prompt(self, text: str) -> None:
         """Dispara um prompt ou ação a partir de um chip de sugestão rápida."""
         if text == "voz_ao_vivo":

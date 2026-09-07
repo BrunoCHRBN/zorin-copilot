@@ -191,8 +191,8 @@ Economiza scroll e deixa óbvio que são mutuamente exclusivos. A flag `_update_
 | 2 | **Indicador de tokens consumidos** no badge do modelo (estilo Raycast) | 2h | Médio — usuários Pro adoram | **FEITO** |
 | 3 | **Drag-and-drop** de arquivos no chat (imagem, PDF, txt) → anexa como contexto | 1 dia | Alto | **FEITO** |
 | 4 | **Markdown export** da conversa (`⌘+S` ou botão) → `.md` bem formatado com frontmatter | 2h | Médio | **FEITO** |
-| 5 | **Split view** para comparar 2 respostas lado a lado | 3 dias | Médio — útil pra debug | |
-| 6 | **Animação de "digitando..."** no user-bubble antes da resposta (estilo iMessage) | 4h | Baixo — cosmético | |
+| 5 | **Split view** para comparar 2 respostas lado a lado | 3 dias | Médio — útil pra debug | **FEITO** |
+| 6 | **Animação de "digitando..."** no user-bubble antes da resposta (estilo iMessage) | 4h | Baixo — cosmético | **FEITO** |
 | 7 | **Suporte a temas customizados** carregados de `~/.config/zorin-copilot/themes/*.css` | 2 dias | Médio | **FEITO** (item 2.10) |
 | 8 | **Picture-in-picture** do orbe quando a janela é minimizada durante voz | 1 dia | Médio | |
 | 9 | **Status bar inferior** com `system_load`, `quota Gemini`, `RAM do RAG indexer` (estilo Warp) | 1 dia | Médio | **FEITO** |
@@ -254,6 +254,12 @@ Sprint 5 (telemetria de uso) — CONCLUÍDO
   [x] Badge do modelo exibe tokens consumidos (estilo Raycast) [item #2]
   [x] Status bar inferior: modelo, tokens, carga, RAM livre, docs do RAG [item #9]
   [x] Testes determinísticos (24 novos) + suíte 470 verde
+
+Sprint 6 (polish de conversa) — CONCLUÍDO
+  [x] Indicador de "digitando..." animado (3 pontos, estilo iMessage) no lugar do spinner [item #6]
+  [x] Diálogo de comparação side-by-side: 2 respostas frente a frente, escolha via dropdowns [item #5]
+  [x] Botão "Comparar" em cada card de resposta (aparece com 2+ respostas na conversa)
+  [x] Testes determinísticos (7 novos) + suíte 477 verde
 ```
 
 ### Detalhe do Sprint 4 — por que estes cinco
