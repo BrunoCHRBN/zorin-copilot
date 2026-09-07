@@ -203,11 +203,11 @@ Economiza scroll e deixa óbvio que são mutuamente exclusivos. A flag `_update_
 ## 4. Bugs prováveis que vi de relance
 
 - `app.py:1228–1229`: `GLib.source_remove(self._search_debounce_timer)` retorna `False` se o timer já disparou, mas o `_pending_turn_box.get_parent()` check (L1300) está certo. OK.
-- `app.py:254`: tuple trick `(self.action_revealer.set_reveal_child(False), GLib.SOURCE_REMOVE)[1]` — se a primeira expressão levantar, o SOURCE_REMOVE nunca retorna. Raro, mas silencioso. Usar função nomeada.
-- `live_view.py:65`: `<span foreground='#e01b24'><b>● TELA AO VIVO (1 FPS)</b></span>` — string fixa em PT, deveria ser i18n.
-- `app.py:1721`: `user-available-symbolic` (ícone de presença) é usado para conversa ativa — semanticamente errado. `starred-symbolic` ou `emblem-default-symbolic` seria melhor.
-- `preferences.py:69–77`: lista de modelos Gemini tem `gemini-3.8-flash` como recomendado (L80), mas a string `"gemini-3.8-flash"` não bate com nenhum modelo público conhecido. Provável erro de digitação ou versão futura.
-- `style.py:519`: `rgba(21, 166, 240, 0.30)` no `user-chat-bubble` dark glass — funciona, mas a cor hardcoded `#15a6f0` aparece em 14 lugares diferentes. Deveria ser uma variável CSS.
+- `app.py:254`: tuple trick `(self.action_revealer.set_reveal_child(False), GLib.SOURCE_REMOVE)[1]` — se a primeira expressão levantar, o SOURCE_REMOVE nunca retorna. Raro, mas silencioso. Usar função nomeada. **Resolvido no Sprint 4** (o mesmo padrão em `preferences.py`).
+- `live_view.py:65`: `<span foreground='#e01b24'><b>● TELA AO VIVO (1 FPS)</b></span>` — string fixa em PT, deveria ser i18n. **Não resolvido**: internacionalizar o app inteiro é um projeto à parte, não um acerto pontual. O Sprint 4 resolveu um caso pior no mesmo arquivo — a mensagem de conexão dizia "Gemini 2.5 Live" fixo, contradizendo o modelo escolhido nas preferências.
+- `app.py:1721`: `user-available-symbolic` (ícone de presença) é usado para conversa ativa — semanticamente errado. `starred-symbolic` ou `emblem-default-symbolic` seria melhor. **Já resolvido no Sprint 1**: conversa ativa usa `starred-symbolic`, as demais `format-justification-symbolic`.
+- ~~`preferences.py:69–77`: lista de modelos Gemini tem `gemini-3.8-flash` como recomendado (L80), mas a string `"gemini-3.8-flash"` não bate com nenhum modelo público conhecido.~~ **Diagnóstico errado, corrigido no Sprint 4.** `gemini-3.8-flash` existe e era o Flash estável mais recente. Quem errou fui eu, raciocinando com informação desatualizada — e quase troquei o default por modelos da linha 2.0, que o Google desligou em junho/2026. O problema real era outro: a lista vivia duplicada em três arquivos, e o default do provedor discordava do rótulo da interface. Fica a lição: conferir na documentação antes de declarar que um identificador "não existe".
+- `style.py:519`: `rgba(21, 166, 240, 0.30)` no `user-chat-bubble` dark glass — funciona, mas a cor hardcoded `#15a6f0` aparece em 14 lugares diferentes. Deveria ser uma variável CSS. **Resolvido no Sprint 4**: ~20 ocorrências passaram a usar `@accent_color` / `alpha(@accent_color, n)`. O hex só resta nas duas declarações `@define-color`, que continuam blindando contra temas do sistema.
 
 ---
 
@@ -239,7 +239,28 @@ Backlog
   [x] Anexos por arrastar e soltar — `core/attachments.py` + DropTarget
   [x] Desfazer ações reversíveis — `shell/undo.py` + toast com "Desfazer"
   → token counter, status bar
+
+Sprint 4 (consolidação) — CONCLUÍDO
+  [x] Catálogo de modelos Gemini em fonte única [PR #9]
+  [x] Plano de ações por turno: ações sobrevivem ao rebuild [PR #10]
+  [x] Testes determinísticos: suíte verde sem hardware específico [PR #11]
+  [x] Cor de acento via variável CSS + acertos pontuais [PR #12]
+  [x] CI no GitHub Actions (xvfb + pytest) [PR #13, #14]
 ```
+
+### Detalhe do Sprint 4 — por que estes cinco
+
+O Sprint 4 não entregou funcionalidade nova: entregou confiança. Antes dele, a
+suíte tinha duas falhas crônicas que todo mundo aprendeu a ignorar — e ignorar
+falha de teste é como o bug do rebuild (PR #10) passa meses sem ser notado.
+
+| Item | O que estava errado | Por que importava |
+|---|---|---|
+| Modelos Gemini | lista duplicada em 3 arquivos; default do provedor discordava do rótulo da UI | default silencioso errado; manutenção em três lugares |
+| Plano por turno | `rebuild()` passava o plano só para o último turno | trocar de tópico ou desfazer apagava os botões de ação das respostas anteriores |
+| Testes determinísticos | 2 testes dependiam de Steam e de monitores específicos | suíte vermelha vira ruído de fundo; ninguém mais olha |
+| Variável de acento | `#15a6f0` em ~20 regras | tornava inútil na prática o recurso de temas do item 2.10 |
+| CI | nenhum | era por isso que as duas falhas acima sobreviveram tanto tempo |
 
 ### Detalhe do backlog — desfazer ações
 

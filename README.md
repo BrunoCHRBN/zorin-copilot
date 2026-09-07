@@ -1,5 +1,7 @@
 # Zorin Copilot
 
+[![CI](https://github.com/BrunoCHRBN/zorin-copilot/actions/workflows/ci.yml/badge.svg)](https://github.com/BrunoCHRBN/zorin-copilot/actions/workflows/ci.yml)
+
 Assistente de Inteligência Artificial integrado nativamente ao desktop **Zorin OS 18** (GNOME 46 / Wayland).
 
 Diferente de assistentes convencionais que apenas respondem perguntas em chat ou tiram prints lentos da tela, o **Zorin Copilot** interage de verdade com os elementos do seu desktop por meio dos barramentos nativos do Linux (**AT-SPI2**, **D-Bus** e extensões do compositor).
@@ -59,6 +61,17 @@ cd ~/zorin-copilot
 # Testes automatizados do núcleo
 python3 -m unittest discover -s tests
 ```
+
+A suíte completa (inclui os testes de interface) roda sob um servidor gráfico
+virtual — é exatamente o que o CI faz:
+
+```bash
+xvfb-run -a python3 -m pytest -q
+```
+
+Os testes de interface precisam das typelibs do sistema (`gir1.2-gtk-4.0`,
+`gir1.2-adw-1`). Pillow é opcional em runtime, mas obrigatória para rodar a
+suíte: `pip install -e ".[test]"`.
 
 ---
 
@@ -196,6 +209,10 @@ window.glass-window > contents {
 
 @define-color accent_color #7d5fff;
 ```
+
+Redefinir `@accent_color` é suficiente para retintar a interface inteira: botão
+de envio, bordas de foco, chips e o item ativo da barra lateral leem a variável,
+não a cor literal. Uma linha troca tudo.
 
 O diretório de configuração respeita `XDG_CONFIG_HOME`. CSS inválido é ignorado com um
 aviso no log — o tema embutido continua sendo aplicado.
