@@ -47,7 +47,7 @@ class HeaderBarWidget:
     # Construção
     # ------------------------------------------------------------------
     def _build_start_buttons(self) -> None:
-        """Botões do lado esquerdo: barra lateral e nova conversa."""
+        """Botões do lado esquerdo: barra lateral, nova conversa e painel de comandos."""
         self.sidebar_toggle_btn = Gtk.Button.new_from_icon_name("sidebar-show-symbolic")
         self.sidebar_toggle_btn.set_tooltip_text("Alternar barra lateral de conversas (Ctrl+H)")
         self.sidebar_toggle_btn.add_css_class("flat")
@@ -63,6 +63,16 @@ class HeaderBarWidget:
         self.new_chat_btn.add_css_class("glass-icon-btn")
         self.new_chat_btn.connect("clicked", lambda _: self.ctx._on_new_topic())
         self.header.pack_start(self.new_chat_btn)
+
+        # Sem este botão o Ctrl+K seria indescobrível — a análise pedia exatamente
+        # isso ao sugerir o command palette.
+        self.palette_btn = Gtk.Button.new_from_icon_name("system-search-symbolic")
+        self.palette_btn.set_tooltip_text("Painel de comandos (Ctrl+K)")
+        self.palette_btn.add_css_class("flat")
+        self.palette_btn.add_css_class("circular")
+        self.palette_btn.add_css_class("glass-icon-btn")
+        self.palette_btn.connect("clicked", lambda _: self.ctx._open_command_palette())
+        self.header.pack_start(self.palette_btn)
 
     def _build_end_buttons(self) -> None:
         """Botões do lado direito: preferências, voz, cerca espacial e badge de modelo."""

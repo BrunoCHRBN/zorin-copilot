@@ -163,11 +163,14 @@ class AppShortcutsTest(unittest.TestCase):
     """Os atalhos internos devem vir do registro declarativo, não de keyvals soltos."""
 
     def test_registry_is_declared(self):
+        # Subconjunto, não igualdade: adicionar atalho novo não deve quebrar isto.
+        core = {"app.quit", "app.toggle-live-voice", "app.toggle-sidebar", "app.new-topic", "app.toggle-pin"}
         names = {s.name for s in APP_SHORTCUTS}
-        self.assertEqual(
-            names,
-            {"app.quit", "app.toggle-live-voice", "app.toggle-sidebar", "app.new-topic", "app.toggle-pin"},
-        )
+        self.assertTrue(core.issubset(names), f"faltando: {core - names}")
+
+        # Nomes únicos: dois atalhos com o mesmo nome se sobrescreveriam.
+        self.assertEqual(len(names), len(APP_SHORTCUTS))
+
         for shortcut in APP_SHORTCUTS:
             self.assertTrue(shortcut.accelerator.startswith("<Control>"))
             self.assertTrue(shortcut.description)

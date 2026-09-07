@@ -62,6 +62,23 @@ python3 -m unittest discover -s tests
 
 ---
 
+## ⌨️ Atalhos
+
+| Atalho | Ação |
+|---|---|
+| `Ctrl+K` | Painel de comandos (busca difusa sobre tudo que o app faz) |
+| `Ctrl+N` | Nova conversa |
+| `Ctrl+H` | Mostrar/ocultar a barra de conversas |
+| `Ctrl+P` | Fixar a conversa atual no topo |
+| `Ctrl+M` | Conversa por voz ao vivo |
+| `Ctrl+Q` | Sair |
+
+O painel de comandos também tem um botão de lupa no canto superior esquerdo.
+Com o foco num campo de texto, `Ctrl+K` continua sendo o atalho de edição do GTK
+(apagar até o fim da linha) — o app não rouba a combinação.
+
+---
+
 ## 🎨 Personalizando a aparência
 
 O tema glassmorphism fica em `src/zorin_copilot/data/zorin-copilot.css`. Não é preciso

@@ -291,6 +291,9 @@ class SidebarPanel:
         self.ctx.show_toast("Conversa excluída.")
 
     def _on_clear_all_history(self, _btn: Gtk.Button) -> None:
+        self.clear_history()
+
+    def clear_history(self) -> None:
         """Limpa todas as conversas do histórico SQLite."""
         self.ctx.engine.memory.clear_all_chat_topics()
         self.ctx.session.reset_new()
