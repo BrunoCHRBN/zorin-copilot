@@ -113,6 +113,17 @@ O visualizador (`_draw_audio_visualizer` L267–299) tem 3 círculos concêntric
 
 **Recomendação:** usar `python-markdown` + `pycmarkgfm` ou `mistune`, com extensão `fenced_code` + `tables`. **OU** renderizar markdown num WebView (WebKitGTK) com `Gtk.WebView` — o ChatGPT desktop faz exatamente isso e ganha com syntax highlight (highlight.js), copiar imagem, etc. Custaria ~10MB de dependência mas dá flexibilidade absurda.
 
+> **Status: RESOLVIDO (Sprint 3)** por renderer próprio em `ui/markdown.py`, sem nova
+> dependência. Motivo da escolha: WebView exigiria webkit2gtk e quebraria o visual
+> nativo (o app inteiro é glassmorphism em GTK); `python-markdown` adicionaria uma
+> dependência de empacotamento a um app distribuído como `.deb` — decisão que não
+> cabe a quem só mexe na UI. ~250 linhas resolvem o subconjunto que os modelos
+> realmente emitem.
+>
+> Perda silenciosa mais grave que a análise não tinha notado: **listas aninhadas**.
+> O regex achatava tudo no mesmo nível (`'  • um\n  • filho'`), então a hierarquia
+> simplesmente desaparecia.
+
 ### 2.7 — Atalho `Esc` no `on_key_pressed` (L562–574) tem **fallthrough perigoso**
 
 ```python
@@ -163,6 +174,13 @@ Economiza scroll e deixa óbvio que são mutuamente exclusivos. A flag `_update_
 
 **Sugestão:** mover para `data/zorin-copilot.css` carregado de `/usr/share/zorin-copilot/` (system) e `~/.config/zorin-copilot/user.css` (override). Suporte a `@import` no GTK4 já existe.
 
+> **Status: RESOLVIDO (Sprint 3).** O CSS agora vive em
+> `src/zorin_copilot/data/zorin-copilot.css` e é carregado via
+> `importlib.resources`. A cadeia de prioridade ficou:
+> embutido → `/usr/share/...` → `themes/*.css` (alfabética) → `user.css`.
+> Verificado que o arquivo entra no wheel (`pip wheel` + inspeção do zip) e que
+> o app sobe com overrides reais aplicados.
+
 ---
 
 ## 3. Ideias incrementais (nice-to-have)
@@ -210,10 +228,10 @@ Sprint 2 — CONCLUÍDO
   [x] Sidebar: ícones corretos no histórico (item 2.4) [debounce feito no Sprint 1]
   [x] Histórico rolável + cronômetro no live widget (item 2.5)
 
-Sprint 3 (2 semanas)
+Sprint 3 (2 semanas) — CONCLUÍDO
   [x] Feedback de falha em ações (item 2.8) — com bug de "falso sucesso" corrigido
-  → Markdown renderer real (item 2.6) OU WebView
-  → Temas customizáveis (item 2.10)
+  [x] Markdown renderer real (item 2.6) — renderer próprio, sem nova dependência
+  [x] Temas customizáveis (item 2.10) — CSS extraído + cadeia de sobrescrita
 
 Backlog
   → Command palette, drag-and-drop, status bar, undo de ações
