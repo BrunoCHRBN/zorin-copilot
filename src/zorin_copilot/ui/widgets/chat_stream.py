@@ -182,10 +182,11 @@ class ChatStreamView:
             return
 
         self.welcome_box.set_visible(False)
-        for i, turn in enumerate(self.ctx.session.turns):
-            is_last = i == len(self.ctx.session.turns) - 1
-            plan_to_use = self.ctx.current_plan if is_last else None
-            self.stream_box.append(self.create_turn_widget(turn, plan=plan_to_use))
+        for turn in self.ctx.session.turns:
+            # O plano vem do turno, não de `ctx.current_plan`: antes só o último
+            # turno recebia plano e os botões de ação das respostas anteriores
+            # desapareciam a cada reconstrução do fluxo.
+            self.stream_box.append(self.create_turn_widget(turn, plan=turn.plan))
 
         self.scroll_to_bottom()
 
