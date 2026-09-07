@@ -259,6 +259,42 @@ class PreferencesDialog(Adw.PreferencesDialog):
         crop_group.add(crop_info_row)
         page.add(crop_group)
 
+        self._build_wake_word_group(page)
+
+    def _build_wake_word_group(self, page: Adw.PreferencesPage) -> None:
+        """Grupo de wake word ("palavra de ativação") — invocação hands-free.
+
+        As frases são definidas/editáveis aqui (separadas por vírgula). Como o
+        STT offline (Vosk) transcreve e comparamos por substring, qualquer frase
+        funciona — o usuário pode trocar/adicionar a qualquer momento.
+        """
+        wake_group = Adw.PreferencesGroup(
+            title="Palavra de Ativação (Wake Word)",
+            description="Invoque o Copilot por voz, sem tocar no teclado. A detecção é 100% local e offline (Vosk) — nenhum áudio sai do computador.",
+        )
+
+        self.wake_word_switch_row = Adw.SwitchRow(
+            title="Ativar Palavra de Ativação",
+            subtitle="Mantém o microfone ouvindo as frases abaixo quando o app está aberto",
+        )
+        wake_group.add(self.wake_word_switch_row)
+
+        self.wake_phrases_row = Adw.EntryRow(title="Frases de Ativação (separadas por vírgula)")
+        wake_group.add(self.wake_phrases_row)
+
+        self.wake_model_row = Adw.EntryRow(title="Caminho do Modelo Vosk (ex.: ~/modelos/vosk-pt)")
+        wake_group.add(self.wake_model_row)
+
+        wake_info_row = Adw.ActionRow(
+            title="Como Funciona a Palavra de Ativação",
+            subtitle="Diga uma das frases (ex.: \"ok copilot\") para iniciar a conversa por voz. "
+            "Você pode definir e alterar as frases livremente. Requer o pacote 'vosk' e um modelo "
+            "de linguagem (ex.: pt-BR) — sem eles, o recurso permanece desativado.",
+        )
+        wake_info_row.set_subtitle_lines(4)
+        wake_group.add(wake_info_row)
+        page.add(wake_group)
+
     def _make_provider_button(self, key: str, label: str) -> Gtk.ToggleButton:
         """Cria um botão do controle segmentado de provedores."""
         btn = Gtk.ToggleButton()
@@ -442,6 +478,12 @@ class PreferencesDialog(Adw.PreferencesDialog):
                 break
         self.crop_shortcut_combo_row.set_selected(matching_crop_idx)
 
+        # Wake word ("palavra de ativação")
+        self.wake_word_switch_row.set_active(getattr(self.config, "wake_word_enabled", False))
+        phrases = getattr(self.config, "wake_phrases", None) or ["ok copilot", "olá copilot"]
+        self.wake_phrases_row.set_text(", ".join(phrases))
+        self.wake_model_row.set_text(getattr(self.config, "wake_word_model_path", ""))
+
         self._update_visibility()
 
     def _on_gemini_model_changed(self, *_args) -> None:
@@ -489,6 +531,13 @@ class PreferencesDialog(Adw.PreferencesDialog):
             cfg.crop_shortcut_key = self.crop_shortcut_options[sel_crop][0]
         else:
             cfg.crop_shortcut_key = "<Super><Shift>s"
+
+        # Wake word ("palavra de ativação")
+        cfg.wake_word_enabled = self.wake_word_switch_row.get_active()
+        raw_phrases = self.wake_phrases_row.get_text()
+        phrases = [p.strip() for p in raw_phrases.split(",") if p.strip()]
+        cfg.wake_phrases = phrases or ["ok copilot", "olá copilot"]
+        cfg.wake_word_model_path = self.wake_model_row.get_text().strip()
 
         return cfg
 
