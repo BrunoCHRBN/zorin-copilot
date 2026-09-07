@@ -1,0 +1,417 @@
+# Zorin Copilot — Análise da UI e Plano de Melhorias
+
+Análise dos arquivos em `src/zorin_copilot/ui/` (4 arquivos, **3.425 linhas**) — `app.py` (1.976), `preferences.py` (481), `style.py` (626) e `live_view.py` (342) — cruzada com o `ARCHITECTURE.md`, o `README.md` e os screenshots fornecidos (tela inicial + modo voz ao vivo).
+
+> Construído em GTK4 + Libadwaita com tema glassmorphism proprietário. Stack de IA: Gemini (padrão), Ollama, OpenAI-compat. Voz ao vivo via Gemini Multimodal Live, captura via Wayland + libei/ydotool, e cerca espacial de monitores (`ScreenFenceManager`).
+
+---
+
+## 1. O que a UI atual faz bem
+
+| Aspecto | Onde | Comentário |
+|---|---|---|
+| Linguagem visual coesa | `style.py` (CSS injetado em `STYLE_PROVIDER_PRIORITY_USER`) | Sistema de design próprio, blindado contra temas do SO (`window.light-glass` / `window.dark-glass` escopados), com 13 estilos utilitários (`glass-card`, `glass-pill`, `glass-chip`, `glass-entry`, `glass-submit-btn`, `prompt-bar-card`, `user-chat-bubble`, `assistant-message-card`, `glass-row`, `glass-icon-btn`, `glass-launch-btn`, `glass-pin-btn`, `sidebar-chat-row`, `welcome-title`). |
+| Tema claro/escuro sincronizado | `setup_glass_window` (style.py L610–626) | Reage a `Adw.StyleManager.notify::dark` e alterna classes de janela, sem flash. |
+| Hierarquia da barra de prompt | `app.py` L886–1017 | Floating pill com 4 zonas: visão (popover), clipboard (popover), entrada de texto expansível, voz + submit. Acolhe o anexo de imagem sem reflow. |
+| Multi-turn streaming | `app.py` L1233–1285 | Pending turn widget é inserido antes da resposta da IA (efeito "Pensando…") e substituído pelo card final — sem layout shift. |
+| Ações propostas inline | `_create_action_row` (app.py L1526–1639) | Cada `DesktopAction` vira um `Adw.ActionRow` com ícone semântico + botão de execução + atalho "Executar Todas" quando > 1. |
+| Vidro + 96% de opacidade | `style.py` L17–585 | Resolve o trade-off clássico de glassmorphism (legibilidade vs. blur); anota `PreferencesDialog` com `preferencesdialog { background-color: @dialog_bg_color; }` para não vazar. |
+| Modo HUD (`toggle_hud`) | `app.py` L213–218, `_on_close_request` L200–205 | Janela esconde sem matar processo — bate com atalhos globais de `ShortcutManager`. |
+
+---
+
+## 2. Problemas prioritários (e onde mexer)
+
+### 2.1 — `app.py` é um **monolito de 1.976 linhas** com 7+ responsabilidades
+
+A classe `CopilotWindow` (L152–1886) faz tudo: ciclo de vida, layout, threading, sessão, atalhos, vision, sidebar, voz, fence, toasts. Isso está tornando qualquer mudança arriscada e o `_create_turn_widget` sozinho tem 200 linhas.
+
+**Sugestão de refatoração** (sem mudar comportamento):
+
+```
+src/zorin_copilot/ui/
+├── app.py                 # só Adw.ApplicationWindow + wiring
+├── widgets/
+│   ├── sidebar.py         # _build_sidebar, _populate_sidebar_history, _on_sidebar_search_changed, _on_delete_topic, _on_clear_all_history
+│   ├── chat_stream.py     # _create_turn_widget, _create_action_row, _rebuild_chat_stream, _scroll_to_bottom
+│   ├── prompt_bar.py      # prompt_bar_box, vision_popover, clipboard_popover, _on_submit, _on_entry_changed, _update_app_preview
+│   ├── vision.py          # vision_preview_box, _render_active_vision_thumbnail, _clear_active_vision, _on_capture_finished
+│   ├── header.py          # HeaderBar, fence_menu_btn, status_badge_btn, _build_fence_popover
+│   ├── live.py            # re-export LiveVoiceWidget (já está em live_view.py)
+│   └── toasts.py          # show_toast + helpers
+```
+
+Risco baixo: nenhuma mudança de comportamento, só movimentação de código. Posso fazer isso em um PR com diff pequeno se você quiser.
+
+### 2.2 — HeaderBar está **sobrecarregado e pouco escaneável** (screenshot 1)
+
+Hoje o pack_end tem **4 itens** lado a lado, sem agrupamento semântico:
+
+```
+[modelo pill]  [AOC 27" pill]  [microfone]  [engrenagem]
+```
+
+Problemas que vejo nas linhas L516–519:
+- O badge "WorkBuddy (hy4-preview)" e o fence "AOC 27\"" são texto-puros sem hierarquia — parecem o mesmo tipo de coisa.
+- O botão de voz duplica o botão de voz da barra de prompt (L477 + L994).
+- Não há como ver se a janela está **fixada no topo** (pin) ou em **modo HUD**.
+- `Ctrl+M` (voz), `Ctrl+H` (sidebar), `Ctrl+N` (nova conversa), `Ctrl+P` (pin) estão **hardcoded** no `on_key_pressed` (L542–577), fora do `ShortcutManager`. Isso quebra o padrão do app.
+
+**Melhorias concretas:**
+
+1. **Agrupar header com `Adw.SplitButton` + popovers.** Em vez de 4 botões soltos, ter:
+   - `☰ Menu` (esquerda, abre: Nova conversa, Fixar, Histórico, Preferências, Sair)
+   - Título centralizado dinâmico ("Conversa nova" / "Conversa retomada")
+   - Direita: badge do modelo + botão de voz + ⚙️
+   
+2. **Mover todos os atalhos para `ShortcutManager`** (`core/shortcuts.py`), com escopo "app" vs. "global", e exibir a combinação ao lado do tooltip em cada botão.
+
+3. **Mostrar estado do pin** com uma estrela discreta no título quando `session.pinned`.
+
+### 2.3 — Tela inicial: chips com **lógica rígida e mal localizada** (screenshot 1 vs. código)
+
+O código define `suggestions = [...]` (L736–741) como uma lista **Python literal** com strings em PT-BR embutidas, e `_trigger_prompt` (L1064–1080) trata cada uma por comparação `if text == "voz_ao_vivo"`. Isso não escala.
+
+**Sugestões:**
+
+- Mover para `data/onboarding_suggestions.json` (ou `.yaml`), carregado por `core/config.py`. Suporta i18n via `gettext` (GNOME já usa isso no Zorin) e personalização por usuário.
+- Cada chip deveria ter: `{icon, label, prompt, category, requires_voice, requires_image}`. O botão só aparece se a capability existir (ex.: "Voz ao Vivo" some se não houver microfone ou chave Gemini).
+- Adicionar **suggestions contextuais**: depois de uma conversa, oferecer "Resumir esta conversa" / "Continuar em voz" / "Salvar como nota" — recurso clássico do Gemini/ChatGPT.
+
+### 2.4 — Sidebar tem **problema de affordance grave** no botão "Nova conversa"
+
+No screenshot 1 a sidebar tem "Nova conversa" como um card clicável com `+` à esquerda. Mas no código (L614–632) isso é um `Gtk.Button` com `card` + `pill` + `glass-card`. **Bate.** Só que:
+
+- O `pan-start-symbolic` no canto superior da sidebar (L604) recolhe, mas **não há nada indicando que a sidebar é recolhível** quando ela está escondida — só o `sidebar-show-symbolic` na HeaderBar. Para quem chega pela primeira vez, é invisível.
+- O ícone `dialog-information-symbolic` em conversas (L1721) é o mesmo usado para "info do sistema" — ambíguo. Trocar para `format-justification-symbolic` ou `user-available-symbolic` apenas na ativa (não em todas).
+- O `_populate_sidebar_history` **recarrega tudo a cada tecla digitada** (L1760–1763 → L1671). Para listas grandes isso vai engasgar. **Cache + diff incremental**, ou ao menos debounce de 80ms.
+
+### 2.5 — `live_view.py` desenha o orbe, mas o **estado do assistente não é audível** (screenshot 2)
+
+O visualizador (`_draw_audio_visualizer` L267–299) tem 3 círculos concêntricos com cor variando por estado (azul/roxo/verde/âmbar). Bonito, mas:
+
+- Não há **anel de "tempo de fala"** (cronômetro / contador de segundos). Em chamadas de 5 minutos não dá pra saber quanto já durou.
+- Não há **histórico rolável da transcrição** dentro do card. O `subtitle_lbl` (L111) só guarda a *última* fala (linha 260 substitui) — falas anteriores somem.
+- O `GLib.timeout_add_seconds(5, ...)` na L254 para esconder o pill de ação usa uma tuple `(..., GLib.SOURCE_REMOVE)[1]` que é confusa e silenciosa se falhar.
+
+**Melhorias:**
+
+1. Substituir o pill efêmero por uma **lista rolável de ações** dentro do card (`Gtk.ScrolledWindow` + `Gtk.ListBox`), sempre visível durante a sessão — o usuário pode revisar o que foi feito.
+2. Adicionar cronômetro no header (substituir o "• Conectando..." por "• Conectando... 00:08").
+3. Mostrar transcrição completa em uma `Adw.PreferencesGroup` colapsável com timestamps.
+4. Trocar a tuple trick por `return GLib.SOURCE_REMOVE` direto (refator L254 → função nomeada).
+
+### 2.6 — Markdown renderer é **ingênuo e perde sintaxe** (app.py L58–95)
+
+`format_markdown_to_markup` implementa: blocos de código, código inline, links, bold, itálico, listas. Mas:
+
+- Tabelas markdown → nada.
+- Cabeçalhos `#`/`##` → nada (vira texto).
+- Block quotes `>` → nada.
+- Imagens `![alt](url)` → nada (vira link).
+- Não escapa `<`/`>` **antes** de detectar marcação (faz `html.escape` primeiro, ok — mas se o markup falha, retorna o texto escapado, escondendo o bug).
+
+**Recomendação:** usar `python-markdown` + `pycmarkgfm` ou `mistune`, com extensão `fenced_code` + `tables`. **OU** renderizar markdown num WebView (WebKitGTK) com `Gtk.WebView` — o ChatGPT desktop faz exatamente isso e ganha com syntax highlight (highlight.js), copiar imagem, etc. Custaria ~10MB de dependência mas dá flexibilidade absurda.
+
+> **Status: RESOLVIDO (Sprint 3)** por renderer próprio em `ui/markdown.py`, sem nova
+> dependência. Motivo da escolha: WebView exigiria webkit2gtk e quebraria o visual
+> nativo (o app inteiro é glassmorphism em GTK); `python-markdown` adicionaria uma
+> dependência de empacotamento a um app distribuído como `.deb` — decisão que não
+> cabe a quem só mexe na UI. ~250 linhas resolvem o subconjunto que os modelos
+> realmente emitem.
+>
+> Perda silenciosa mais grave que a análise não tinha notado: **listas aninhadas**.
+> O regex achatava tudo no mesmo nível (`'  • um\n  • filho'`), então a hierarquia
+> simplesmente desaparecia.
+
+### 2.7 — Atalho `Esc` no `on_key_pressed` (L562–574) tem **fallthrough perigoso**
+
+```python
+if keyval == Gdk.KEY_Escape:
+    if self.live_client and self.live_client.is_active():
+        self.stop_live_voice(); return True
+    if self.entry.get_text():
+        self.entry.set_text(""); return True
+    elif self.sidebar_search.get_text():
+        self.sidebar_search.set_text(""); return True
+    else:
+        self.set_visible(False); return True
+```
+
+Esc dentro de um popover aberto (ex.: `vision_btn.popover`) **não fecha o popover** — fecha tudo abaixo. E se o usuário está com foco num campo do PreferencesDialog (transiente), pode fechar a janela principal por engano.
+
+**Fix:** checar `self.get_focus()` antes da cascata; fechar popovers explicitamente; só esconder a janela se nenhum filho tem foco.
+
+### 2.8 — **Zero feedback** para ações falhas no histórico
+
+Em `_on_plan_ready` (L1287–1327) e em `_create_turn_widget` para o `exec_all`, quando algo falha não há rastro visível na linha do tempo do chat. O usuário vê só um toast efêmero ("✗ Erro"). Para um app que toca o sistema operacional inteiro, isso é grave.
+
+**Sugestão:** marcar ações com `Adw.ActionRow` em vermelho (`@define-color error_bg_color #fce8e6`) quando `rep.success = False`, e adicionar botão "Tentar novamente" / "Diagnosticar".
+
+> **Status: RESOLVIDO (Sprint 3).** Além do sugerido, o diagnóstico revelou um bug pior:
+> `_build_execute_all_button` escrevia `"Todas Executadas ✓"` e disparava o toast
+> `"✓ N ações executadas com sucesso!"` **independentemente de falhas** — confirmado
+> por reprodução contra o commit anterior (1 ação falha, 2 ok → label `Todas Executadas ✓`).
+> O resultado agora fica registrado em `shell/action_status.py` e sobrevive à
+> reconstrução do fluxo, então trocar de tópico e voltar não apaga o rastro.
+
+### 2.9 — `PreferencesDialog` empilha **3 grupos do mesmo provedor** sem agrupamento forte
+
+Em `preferences.py` (L60–129) Gemini, Ollama e OpenAI ficam em três `Adw.PreferencesGroup` separados dentro da mesma página "Inteligência Artificial". Visualmente isso vira uma parede de entradas.
+
+**Melhoria:** usar `Adw.ViewSwitcher` + `Adw.ViewStack` no topo da página:
+
+```
+[ Gemini ] [ Ollama ] [ OpenAI ]
+└───────── só o grupo ativo aparece ─────────┘
+```
+
+Economiza scroll e deixa óbvio que são mutuamente exclusivos. A flag `_update_visibility` (L385–389) já existe — só precisa virar `view_stack.set_visible_child_name(...)`.
+
+### 2.10 — `style.py` é uma **string gigante de 568 linhas** sem validação
+
+`GLASS_CSS` está hardcoded em um único string. Não há como o usuário customizar nada (tamanho de fonte, blur, cores) — só "light" e "dark" nativos. Para um app "Spotlight-style" no Zorin, onde a comunidade gosta de tweakar, isso é limitante.
+
+**Sugestão:** mover para `data/zorin-copilot.css` carregado de `/usr/share/zorin-copilot/` (system) e `~/.config/zorin-copilot/user.css` (override). Suporte a `@import` no GTK4 já existe.
+
+> **Status: RESOLVIDO (Sprint 3).** O CSS agora vive em
+> `src/zorin_copilot/data/zorin-copilot.css` e é carregado via
+> `importlib.resources`. A cadeia de prioridade ficou:
+> embutido → `/usr/share/...` → `themes/*.css` (alfabética) → `user.css`.
+> Verificado que o arquivo entra no wheel (`pip wheel` + inspeção do zip) e que
+> o app sobe com overrides reais aplicados.
+
+---
+
+## 3. Ideias incrementais (nice-to-have)
+
+| # | Sugestão | Esforço | Impacto | Status |
+|---|---|---|---|---|
+| 1 | **Command palette** (Ctrl+K) estilo VSCode, listando todos os comandos da app | 1 dia | Alto — descobribilidade | **FEITO** |
+| 2 | **Indicador de tokens consumidos** no badge do modelo (estilo Raycast) | 2h | Médio — usuários Pro adoram | **FEITO** |
+| 3 | **Drag-and-drop** de arquivos no chat (imagem, PDF, txt) → anexa como contexto | 1 dia | Alto | **FEITO** |
+| 4 | **Markdown export** da conversa (`⌘+S` ou botão) → `.md` bem formatado com frontmatter | 2h | Médio | **FEITO** |
+| 5 | **Split view** para comparar 2 respostas lado a lado | 3 dias | Médio — útil pra debug | **FEITO** |
+| 6 | **Animação de "digitando..."** no user-bubble antes da resposta (estilo iMessage) | 4h | Baixo — cosmético | **FEITO** |
+| 7 | **Suporte a temas customizados** carregados de `~/.config/zorin-copilot/themes/*.css` | 2 dias | Médio | **FEITO** (item 2.10) |
+| 8 | **Picture-in-picture** do orbe quando a janela é minimizada durante voz | 1 dia | Médio | |
+| 9 | **Status bar inferior** com `system_load`, `quota Gemini`, `RAM do RAG indexer` (estilo Warp) | 1 dia | Médio | **FEITO** |
+| 10 | **Histórico de undo** de ações do executor (rollback das últimas 5 ações) | 2 dias | Alto — confiança | **FEITO** |
+
+---
+
+## 4. Bugs prováveis que vi de relance
+
+- `app.py:1228–1229`: `GLib.source_remove(self._search_debounce_timer)` retorna `False` se o timer já disparou, mas o `_pending_turn_box.get_parent()` check (L1300) está certo. OK.
+- `app.py:254`: tuple trick `(self.action_revealer.set_reveal_child(False), GLib.SOURCE_REMOVE)[1]` — se a primeira expressão levantar, o SOURCE_REMOVE nunca retorna. Raro, mas silencioso. Usar função nomeada. **Resolvido no Sprint 4** (o mesmo padrão em `preferences.py`).
+- `live_view.py:65`: `<span foreground='#e01b24'><b>● TELA AO VIVO (1 FPS)</b></span>` — string fixa em PT, deveria ser i18n. **Não resolvido**: internacionalizar o app inteiro é um projeto à parte, não um acerto pontual. O Sprint 4 resolveu um caso pior no mesmo arquivo — a mensagem de conexão dizia "Gemini 2.5 Live" fixo, contradizendo o modelo escolhido nas preferências.
+- `app.py:1721`: `user-available-symbolic` (ícone de presença) é usado para conversa ativa — semanticamente errado. `starred-symbolic` ou `emblem-default-symbolic` seria melhor. **Já resolvido no Sprint 1**: conversa ativa usa `starred-symbolic`, as demais `format-justification-symbolic`.
+- ~~`preferences.py:69–77`: lista de modelos Gemini tem `gemini-3.8-flash` como recomendado (L80), mas a string `"gemini-3.8-flash"` não bate com nenhum modelo público conhecido.~~ **Diagnóstico errado, corrigido no Sprint 4.** `gemini-3.8-flash` existe e era o Flash estável mais recente. Quem errou fui eu, raciocinando com informação desatualizada — e quase troquei o default por modelos da linha 2.0, que o Google desligou em junho/2026. O problema real era outro: a lista vivia duplicada em três arquivos, e o default do provedor discordava do rótulo da interface. Fica a lição: conferir na documentação antes de declarar que um identificador "não existe".
+- `style.py:519`: `rgba(21, 166, 240, 0.30)` no `user-chat-bubble` dark glass — funciona, mas a cor hardcoded `#15a6f0` aparece em 14 lugares diferentes. Deveria ser uma variável CSS. **Resolvido no Sprint 4**: ~20 ocorrências passaram a usar `@accent_color` / `alpha(@accent_color, n)`. O hex só resta nas duas declarações `@define-color`, que continuam blindando contra temas do sistema.
+
+---
+
+## 5. Roteiro recomendado
+
+```
+Sprint 1 — CONCLUÍDO
+  [x] Refatorar app.py em widgets/ (item 2.1) — 1976 -> 823 linhas (-58%)
+  [x] Atalhos em registro declarativo APP_SHORTCUTS (item 2.2)
+  [x] Fix do Esc handler: fecha popovers antes de esconder a janela (item 2.7)
+  [x] Correções extras: record_turn devolve o turno; empacotamento inclui ui/
+
+Sprint 2 — CONCLUÍDO
+  [x] Seletor de provedor segmentado no PreferencesDialog (item 2.9)
+      └─ Adw.PreferencesPage.add() só aceita PreferencesGroup, então Adw.ViewStack
+         não pôde ser embutido. Solução equivalente: 3 ToggleButtons linkados
+         dentro de um PreferencesGroup, com exclusão mútua e ícones validados.
+  [x] Sidebar: ícones corretos no histórico (item 2.4) [debounce feito no Sprint 1]
+  [x] Histórico rolável + cronômetro no live widget (item 2.5)
+
+Sprint 3 (2 semanas) — CONCLUÍDO
+  [x] Feedback de falha em ações (item 2.8) — com bug de "falso sucesso" corrigido
+  [x] Markdown renderer real (item 2.6) — renderer próprio, sem nova dependência
+  [x] Temas customizáveis (item 2.10) — CSS extraído + cadeia de sobrescrita
+
+Backlog
+  [x] Command palette (Ctrl+K) — busca difusa sobre todos os comandos [PR #5]
+  [x] Exportar conversa em Markdown (Ctrl+S) — `core/export.py` + FileDialog
+  [x] Anexos por arrastar e soltar — `core/attachments.py` + DropTarget
+  [x] Desfazer ações reversíveis — `shell/undo.py` + toast com "Desfazer"
+  [x] Indicador de tokens no badge do modelo (estilo Raycast) [PR #17]
+  [x] Status bar inferior com telemetria (estilo Warp) [PR #17]
+
+Sprint 4 (consolidação) — CONCLUÍDO
+  [x] Catálogo de modelos Gemini em fonte única [PR #9]
+  [x] Plano de ações por turno: ações sobrevivem ao rebuild [PR #10]
+  [x] Testes determinísticos: suíte verde sem hardware específico [PR #11]
+  [x] Cor de acento via variável CSS + acertos pontuais [PR #12]
+  [x] CI no GitHub Actions (xvfb + pytest) [PR #13, #14]
+
+Sprint 5 (telemetria de uso) — CONCLUÍDO
+  [x] `core/usage.py`: contagem de tokens + parsers por provedor (Gemini/Ollama/OpenAI)
+  [x] Provedores gravam `usage` no `TokenUsageTracker` da sessão (injeta no engine)
+  [x] Badge do modelo exibe tokens consumidos (estilo Raycast) [item #2]
+  [x] Status bar inferior: modelo, tokens, carga, RAM livre, docs do RAG [item #9]
+  [x] Testes determinísticos (24 novos) + suíte 470 verde
+
+Sprint 6 (polish de conversa) — CONCLUÍDO
+  [x] Indicador de "digitando..." animado (3 pontos, estilo iMessage) no lugar do spinner [item #6]
+  [x] Diálogo de comparação side-by-side: 2 respostas frente a frente, escolha via dropdowns [item #5]
+  [x] Botão "Comparar" em cada card de resposta (aparece com 2+ respostas na conversa)
+  [x] Testes determinísticos (7 novos) + suíte 477 verde
+
+Fase 0 (fundação de interação semântica) — CONCLUÍDO
+  [x] `core/a11y.py`: UID estável por elemento (`uid` no UIElement via caminho de índices no parse)
+  [x] `core/a11y.py`: `text_insert(element, text, append)` via AT-SPI EditableText/Text
+      (caminho semântico — sem uinput nem portal; requer controle que exponha a interface)
+  [x] `core/a11y.py`: `focus_element`, `get_focused_app`, `get_ui_tree`, `find_element_by_uid`
+  [x] `shell/executor.py`: branch TYPE_TEXT — localiza campo por rótulo, insere via AT-SPI,
+      fallback foca o campo + `VirtualInputDriver.type_text` (ydotool/uinput)
+  [x] `to_summary` inclui UID para o agente referenciar elementos de forma determinística
+  [x] Testes determinísticos (13 novos, fake AT-SPI headless) + suíte 490 verde
+
+Fase 1 (loop semântico ao vivo) — CONCLUÍDO
+  [x] Tools `get_ui_tree` / `click_element(uid)` / `type_element(uid, text)` no LIVE_TOOLS_DECLARATION
+  [x] `_dispatch_tool` ligado: resolve UID via `find_element_by_uid`, `do_action` (clique) e
+      `text_insert` semântico (AT-SPI) com fallback para `VirtualInputDriver.type_text`
+  [x] `get_ui_tree`/`get_focused_app` dão contexto do app em uso a voz e vídeo ao vivo
+  [x] System prompt orienta o modelo a preferir ferramentas semânticas (UIDs) sobre coordenadas
+  [x] Testes determinísticos (9 novos, GeminiLiveClient com inspector/driver falsos) + suíte 499 verde
+
+Fase 2 (fusão vídeo + AT-SPI) — CONCLUÍDO
+  [x] `core/a11y.py`: `_parse_node` extrai geometria (`bbox`) de cada elemento via `get_extents(SCREEN)`
+  [x] `UIElement.to_summary(include_bounds=True)` embute `@(x,y w×h)` para correlacionar com o frame de vídeo
+  [x] `DesktopInspector.element_at_point(x, y)`: resolve o ponto de tela no UID mais específico (menor área)
+  [x] `ai/live.py`: tool `locate_element(x, y)` converte coordenada vista no vídeo em UID semântico
+  [x] `get_ui_tree` agora retorna geometria por padrão; system prompt orienta a fusão vídeo + árvore
+  [x] Testes determinísticos (8 novos: bbox do parse, to_summary com bounds, element_at_point, get_ui_tree/locate_element) + suíte 507 verde
+
+Fase 3 (parte A — governança de risco ao vivo) — CONCLUÍDO
+  [x] `shell/risk.py`: `RiskPolicy.classify(name, args)` puro e determinístico (SAFE/CONFIRM)
+      cobre email_compose, write_document, organize_directory e keyboard_hotkey destrutivo (alt+f4/ctrl+q/...)
+  [x] `ai/live.py`: portão de confirmação em `_dispatch_tool` — ações de risco NÃO executam na hora;
+      devolvem `confirmation_id` e aguardam `confirm_action(id, approve)`
+  [x] Tool `confirm_action` reexecuta a ação pendente (com bypass do gate) ou a cancela
+  [x] Proteção de campo de senha: `type_element` em role `password_text`/`password` exige confirmação
+  [x] System prompt instrui o modelo a pedir confirmação verbal e usar `confirm_action`
+  [x] Testes (13 novos: classifier + gate via dispatch + 3 testes pré-existentes atualizados p/ confirmar) + suíte 520 verde
+
+Fase 3 (parte B — gatilho global de voz ao vivo) — CONCLUÍDO
+  [x] **Spike resolvido:** o repositório JÁ usa o caminho oficial Wayland no GNOME/Zorin —
+      `org.gnome.settings-daemon.plugins.media-keys.custom-keybinding` (via `ShortcutManager`),
+      não o portal `GlobalShortcuts`. Logo, estendeu-se o `ShortcutManager` em vez de criar portal paralelo.
+  [x] `core/shortcuts.py`: `register_voice`/`unregister_voice`/`is_voice_registered`/`get_voice_binding`
+      (atalho `<Super>v` → `zorin-copilot --voice`)
+  [x] `core/config.py`: `live_voice_hotkey_enabled` + `live_voice_hotkey`
+  [x] `ui/app.py`: registra o atalho em `do_startup`; `--voice` agora chama `toggle_live_voice` (alterna)
+  [x] `shell/risk.py`: `is_blocked_app` + `BLOCKED_APPS`; `get_ui_tree` recusa expor árvore de app bloqueado
+  [x] `core/shortcuts.py`: resiliência a schema faltante — `_media_keys_schema_exists()` evita abort em C
+      (Gio.Settings.new com schema ausente) e degrada para "atalho indisponível"
+  [x] Auto-refresh de contexto: `get_ui_tree` já devolve o app em foco por padrão; UID exposto permite
+      `click_element`/`type_element` no app em uso sem coordenadas
+  [x] Testes: `tests/test_trigger.py` (registro de voz + blocklist) + blocklist ao vivo em `test_fase3_risk.py`
+      + `test_shortcuts.py` atualizado p/ o novo comportamento gracioso de schema
+  [ ] Wake word: permanece como feature opcional/opt-in separada (mic always-on: privacidade, CPU,
+      conflito com pw-record da sessão live) — não implementada nesta fase
+```
+
+### Detalhe do Sprint 4 — por que estes cinco
+
+O Sprint 4 não entregou funcionalidade nova: entregou confiança. Antes dele, a
+suíte tinha duas falhas crônicas que todo mundo aprendeu a ignorar — e ignorar
+falha de teste é como o bug do rebuild (PR #10) passa meses sem ser notado.
+
+| Item | O que estava errado | Por que importava |
+|---|---|---|
+| Modelos Gemini | lista duplicada em 3 arquivos; default do provedor discordava do rótulo da UI | default silencioso errado; manutenção em três lugares |
+| Plano por turno | `rebuild()` passava o plano só para o último turno | trocar de tópico ou desfazer apagava os botões de ação das respostas anteriores |
+| Testes determinísticos | 2 testes dependiam de Steam e de monitores específicos | suíte vermelha vira ruído de fundo; ninguém mais olha |
+| Variável de acento | `#15a6f0` em ~20 regras | tornava inútil na prática o recurso de temas do item 2.10 |
+| CI | nenhum | era por isso que as duas falhas acima sobreviveram tanto tempo |
+
+### Detalhe do backlog — desfazer ações
+
+**Só entra na pilha o que o app consegue reverter de verdade:** escrever/substituir
+arquivo e organizar pasta. Clique, digitação, abrir app, abrir URL e execução de
+comando mexem em estado de terceiros — prometer desfazer seria prometer falso.
+
+| Decisão | Motivo |
+|---|---|
+| A pilha guarda o *como* reverter (`revert`) | Quem executou conhece o estado anterior; a UI não deveria saber reconstruí-lo. |
+| `deque(maxlen=5)` | O próprio container descarta a mais antiga quando estoura o teto do item 10. |
+| Entrada sai da pilha **antes** de reverter | Um desfazer impossível (arquivo movido pelo usuário) não pode trancar os quatro anteriores. |
+| `FileManager.resolve_target_path()` extraído | O executor precisa fotografar o arquivo *antes* de sobrescrevê-lo; duplicar a regra de higienização do nome daria divergência. |
+| `organize_directory(..., moves=...)` como parâmetro de saída | O resumo atual só conta categorias e não diz quem foi para onde. Parâmetro opcional evita quebrar quem já desempacota 3 valores. |
+| Binário ou > 1 MB não gera snapshot | Restaurar por texto corromperia o arquivo; prometer e corromper é pior que não prometer. |
+| Toast com botão "Desfazer" (10 s) | É o idioma do GTK para ação reversível, e não interrompe o fluxo quanto um diálogo. |
+| Linha mostra "Desfeito ↩" | Sucesso e falha não cobrem o terceiro estado: a ação aconteceu e voltou atrás. |
+| `Ctrl+Z` não rouba o undo de texto | Com o foco num campo editável o handler devolve `False`, mesma regra do `Ctrl+K`. |
+
+A repintura da linha usa um hook (`on_undone`) em vez de reconstruir o fluxo:
+`rebuild()` só repassa o plano ao último turno, e reconstruir faria as ações dos
+turnos anteriores desaparecerem.
+
+### Detalhe do backlog — anexos por arrastar e soltar
+
+| Decisão | Motivo |
+|---|---|
+| Núcleo puro em `core/attachments.py` | Classificar, extrair PDF e montar o prompt precisa ser testável sem display — mesma razão de `core/export.py`. |
+| Conteúdo entre delimitadores (`----- início de x -----`) | Um documento com `# Título` ou cercas de código não pode se passar por instrução. O cabeçalho diz explicitamente que é material de leitura. |
+| Contexto só na hora de enviar | A bolha do usuário e o histórico guardam o que ele digitou; inflar a bolha com 12k chars de arquivo destruiria a leitura do fluxo. |
+| Imagem no slot multimodal existente | O engine já recebe `image_bytes`; reaproveitar evita um segundo caminho de código. Um slot só, e o excedente vira aviso. |
+| `Gtk.DropTarget` na janela, não no chat | Instalado na janela, o gesto funciona em qualquer ponto; o GTK propaga do widget sob o cursor até a janela quando o filho não aceita o tipo. |
+| PDF via `pdftotext`, injetável | Reaproveita o binário que o RAG já usa, sem nova dependência Python. Injetável para os testes não dependerem do poppler-utils. |
+| Mesmo arquivo duas vezes é recusado | Chips duplicados duplicariam o contexto sem o usuário notar. |
+
+Bugs encontrados pelos testes: diretório sem extensão caía em "formato não suportado"
+(ordem das checagens escondia o motivo real), e soltar o mesmo arquivo duas vezes
+duplicava o bloco de contexto.
+
+### Detalhe do backlog — exportação em Markdown
+
+| Decisão | Motivo |
+|---|---|
+| Módulo `core/export.py`, sem GTK | É uma função pura (sessão → texto). Testável sem display e reutilizável pela CLI. |
+| Frontmatter YAML | `title`/`provider`/`model`/`turn_count` tornam o arquivo indexável por Obsidian, Docusaurus e Jekyll sem pós-processamento. |
+| Respostas copiadas literalmente | O `ui/markdown.py` converte para Pango e perde informação (ex.: cerca de código). Exportar o *fonte* preserva blocos e tabelas. |
+| Inclui `_last_unpinned_turn` | O turno ainda não fixado aparece na tela; omiti-lo do arquivo seria um "furo" silencioso. A checagem é por identidade, não por `==`. |
+| `Gtk.FileDialog` assíncrono | O antigo `Gtk.FileChooserDialog` bloqueava o main loop; o novo usa o portal XDG e não trava a janela. |
+| Cancelar não gera toast | `GLib.Error` com `Gtk.DialogError.DISMISSED` é uma ação legítima do usuário, não falha. |
+
+### Estrutura resultante dos Sprints 1 + 2
+
+```
+src/zorin_copilot/ui/
+├── app.py            823 linhas  (orquestração: sessão, voz, HUD, ciclo de mensagem)
+├── live_view.py      487 linhas  (log de sessão acumulativo + cronômetro)
+├── preferences.py    539 linhas  (seletor de provedor segmentado)
+├── style.py          626 linhas
+└── widgets/
+    ├── header.py      221  HeaderBar, badge de modelo, popover de cerca espacial
+    ├── sidebar.py     300  histórico de conversas (busca com debounce)
+    ├── chat_stream.py 602  fluxo de mensagens, ações propostas, markdown
+    ├── prompt_bar.py  445  barra de prompt, prévia de app, envio
+    └── vision.py      180  anexo visual e captura de tela
+```
+
+#### Detalhe do Sprint 2 — live widget
+
+| Antes | Depois |
+|---|---|
+| `subtitle_lbl` sobrescrito a cada transcrição | `_append_log_row()` acumula linhas com ícone de papel |
+| Pill de ação que some em 5 s (`GLib.timeout_add_seconds` + truque de tupla) | Linha permanente no log, com ícone por ferramenta |
+| Sem noção de duração da chamada | `timer_lbl` com `mm:ss`, inicia no CONNECTING e para no DISCONNECTED |
+| Erros só no log | Erros também entram no log como linha de aviso |
+
+---
+
+## 6. Resumo executivo (TL;DR)
+
+A UI é **ambiciosa e visualmente coesa** para um app GTK puro — o tema glassmorphism é bem-feito e a separação live/chat/preferências está clara. Os **3 maiores problemas** são:
+
+1. **Acoplamento**: `app.py` com quase 2.000 linhas trava a evolução. Dividir em widgets/.
+2. **Hierarquia do header**: 4 botões no pack_end sem agrupamento semântico confunde novatos.
+3. **Falta de rastro**: ações que falham somem do histórico; voz ao vivo não mostra transcrição completa nem cronômetro.
+
+Refatorar `app.py`, melhorar o header e enriquecer o live widget com histórico rolável entregaria 70% do valor com ~1 semana de trabalho.

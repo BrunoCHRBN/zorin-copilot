@@ -16,7 +16,13 @@ from ..core.apps import AppManager
 from ..core.clipboard import ClipboardService
 from ..core.files import FileManager
 from ..core.media import MediaPlayerManager
+from .input_driver import VirtualInputDriver
 from .system import SystemController
+from .undo import UndoStack
+
+#: Acima disso o conteúdo anterior não cabe em memória de forma razoável: a
+#: ação acontece, mas entra na pilha sem snapshot (sem promessa de desfazer).
+MAX_SNAPSHOT_BYTES = 1_000_000
 
 
 @dataclass
@@ -26,11 +32,117 @@ class ExecutionReport:
     message: str
 
 
+@dataclass(frozen=True)
+class FileSnapshot:
+    """Estado de um arquivo antes de ser escrito pelo Copilot."""
+
+    existed: bool
+    size: int
+    #: Vazio em modo append (basta truncar) ou quando o arquivo não existia.
+    content: str = ""
+
+
+def snapshot_file(path: str, append: bool) -> FileSnapshot | None:
+    """Fotografa o arquivo antes da escrita. `None` = não dá para desfazer."""
+    try:
+        if not os.path.exists(path):
+            return FileSnapshot(existed=False, size=0)
+
+        size = os.path.getsize(path)
+        if append:
+            # Só o tamanho importa: desfazer um append é truncar de volta.
+            return FileSnapshot(existed=True, size=size)
+
+        if size > MAX_SNAPSHOT_BYTES:
+            return None
+
+        with open(path, "rb") as handle:
+            raw = handle.read()
+        # Binário: restaurar por texto corromperia o arquivo. Melhor não prometer.
+        if b"\x00" in raw[:4096]:
+            return None
+        return FileSnapshot(existed=True, size=size, content=raw.decode("utf-8", "replace"))
+    except OSError:
+        return None
+
+
+def make_file_revert(path: str, snapshot: FileSnapshot):
+    """Devolve a função que desfaz uma escrita em `path`."""
+    name = os.path.basename(path)
+
+    def revert() -> tuple[bool, str]:
+        try:
+            if not snapshot.existed:
+                if os.path.exists(path):
+                    os.remove(path)
+                return True, f"Arquivo '{name}' criado pela ação foi removido."
+
+            if not os.path.exists(path):
+                return False, f"'{name}' não existe mais; não há o que restaurar."
+
+            if snapshot.content:
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write(snapshot.content)
+            else:
+                # Append desfeito, ou arquivo que já era vazio.
+                os.truncate(path, snapshot.size)
+            return True, f"Conteúdo anterior de '{name}' restaurado."
+        except OSError as exc:
+            return False, f"Falha ao desfazer: {exc}"
+
+    return revert
+
+
+def make_organize_revert(moves: Sequence[tuple[str, str]]):
+    """Devolve a função que devolve cada arquivo à pasta de origem."""
+    pairs = list(moves)
+
+    def revert() -> tuple[bool, str]:
+        restored = 0
+        missing: list[str] = []
+        for source, destination in reversed(pairs):
+            if not os.path.exists(destination):
+                missing.append(os.path.basename(source))
+                continue
+            try:
+                os.makedirs(os.path.dirname(source), exist_ok=True)
+                shutil.move(destination, source)
+                restored += 1
+            except OSError:
+                missing.append(os.path.basename(source))
+
+        # Pastas de categoria criadas pela organização e agora vazias são lixo.
+        for _source, destination in pairs:
+            folder = os.path.dirname(destination)
+            try:
+                if os.path.isdir(folder) and not os.listdir(folder):
+                    os.rmdir(folder)
+            except OSError:
+                pass
+
+        if missing:
+            shown = ", ".join(missing[:3]) + ("…" if len(missing) > 3 else "")
+            return False, (
+                f"{restored} arquivo(s) voltaram ao lugar; "
+                f"{len(missing)} não foram encontrados ({shown})."
+            )
+        return True, f"{restored} arquivo(s) voltaram ao lugar."
+
+    return revert
+
+
 class ActionExecutor:
     """Executa ações concretas no ambiente de desktop Zorin/GNOME."""
 
-    def __init__(self, inspector: DesktopInspector | None = None):
+    def __init__(
+        self,
+        inspector: DesktopInspector | None = None,
+        undo_stack: UndoStack | None = None,
+        input_driver: VirtualInputDriver | None = None,
+    ):
         self.inspector = inspector or DesktopInspector()
+        self.undo_stack = undo_stack or UndoStack()
+        self.input_driver = input_driver or VirtualInputDriver()
 
     def execute_plan(
         self, plan: ActionPlan, dry_run: bool = False
@@ -306,25 +418,79 @@ class ActionExecutor:
 
     def _click_element(self, target_label: str) -> ExecutionReport:
         act = DesktopAction(ActionType.CLICK, target_label)
+        target_el = self._find_element_by_label(target_label)
+        if target_el is None:
+            return ExecutionReport(
+                action=act,
+                success=False,
+                message=f"Elemento interativo com rótulo '{target_label}' não localizado na tela.",
+            )
+        ok = self.inspector.do_action(target_el, 0)
+        if ok:
+            return ExecutionReport(
+                action=act,
+                success=True,
+                message=f"Clique executado em '{target_el.name}'.",
+            )
+        return ExecutionReport(
+            action=act,
+            success=False,
+            message=f"Falha ao executar ação em '{target_el.name}'.",
+        )
+
+    def _find_element_by_label(self, label: str) -> UIElement | None:
+        """Procura o primeiro elemento interativo cujo rótulo contém `label` em qualquer app aberto."""
         apps = self.inspector.list_applications()
         for app in apps:
             root = self.inspector.inspect_application(app)
             if not root:
                 continue
-            matches = root.find(lambda el: target_label.lower() in el.name.lower() and el.is_interactive)
+            matches = root.find(
+                lambda el: label.lower() in el.name.lower() and el.is_interactive
+            )
             if matches:
-                target_el = matches[0]
-                ok = self.inspector.do_action(target_el, 0)
-                if ok:
-                    return ExecutionReport(
-                        action=act,
-                        success=True,
-                        message=f"Clique executado em '{target_el.name}' ({app}).",
-                    )
+                return matches[0]
+        return None
+
+    def _type_text(self, action: DesktopAction) -> ExecutionReport:
+        text = action.params.get("text", "")
+        if not text:
+            return ExecutionReport(
+                action=action,
+                success=False,
+                message="Nenhum texto para digitar.",
+            )
+
+        target_el = self._find_element_by_label(action.target)
+        if target_el is None:
+            return ExecutionReport(
+                action=action,
+                success=False,
+                message=f"Campo '{action.target}' não localizado na tela.",
+            )
+
+        # 1) Caminho semântico: insere via interface de texto do AT-SPI (sem uinput). Ideal no Wayland.
+        ok, msg = self.inspector.text_insert(
+            target_el, text, append=bool(action.params.get("append", False))
+        )
+        if ok:
+            return ExecutionReport(action=action, success=True, message=msg)
+
+        # 2) Fallback: foca o campo e emite digitação por input virtual (ydotool/uinput).
+        self.inspector.focus_element(target_el)
+        ok2, msg2 = self.input_driver.type_text(
+            text, press_enter=bool(action.params.get("press_enter", False))
+        )
+        if ok2:
+            return ExecutionReport(
+                action=action,
+                success=True,
+                message=f"Texto digitado em '{action.target}' (input virtual).",
+            )
         return ExecutionReport(
-            action=act,
+            action=action,
             success=False,
-            message=f"Elemento interativo com rótulo '{target_label}' não localizado na tela.",
+            message=f"Falha ao digitar: semântico=[{msg}] virtual=[{msg2}]",
         )
 
     def _apply_window_layout(self, layout_name: str, params: dict) -> ExecutionReport:
@@ -335,36 +501,6 @@ class ActionExecutor:
             message=f"Layout de janelas '{layout_name}' aplicado.",
         )
 
-    def _type_text(self, action: DesktopAction) -> ExecutionReport:
-        text = action.params.get("text") or action.target
-        if not text:
-            return ExecutionReport(action=action, success=False, message="Nenhum texto informado para digitação.")
-
-        # Tentativa via wtype (Wayland) ou xdotool (X11 / XWayland)
-        wtype_bin = shutil.which("wtype")
-        xdotool_bin = shutil.which("xdotool")
-        if wtype_bin:
-            try:
-                subprocess.run([wtype_bin, text], check=False, timeout=3)
-                return ExecutionReport(action=action, success=True, message=f"Texto digitado via wtype: '{text[:30]}'")
-            except Exception:
-                pass
-        if xdotool_bin:
-            try:
-                subprocess.run([xdotool_bin, "type", "--", text], check=False, timeout=3)
-                return ExecutionReport(action=action, success=True, message=f"Texto digitado via xdotool: '{text[:30]}'")
-            except Exception:
-                pass
-
-        # Fallback confiável: copia para o clipboard
-        ok = ClipboardService.set_text(text)
-        if ok:
-            return ExecutionReport(
-                action=action,
-                success=True,
-                message=f"Texto copiado para a área de transferência: '{text[:30]}'",
-            )
-        return ExecutionReport(action=action, success=False, message="Não foi possível simular digitação.")
 
     def _control_media(self, action: DesktopAction) -> ExecutionReport:
         act = action.params.get("action", action.target)
@@ -389,14 +525,35 @@ class ActionExecutor:
         content = action.params.get("content", "")
         directory = action.params.get("directory")
         append = bool(action.params.get("append", False))
+
+        # Fotografa antes: depois da escrita o conteúdo anterior já era.
+        path = FileManager.resolve_target_path(filename, directory)
+        snapshot = snapshot_file(path, append)
+
         ok, msg, _ = FileManager.write_document(
             filename=filename, content=content, directory=directory, append=append
         )
+        if ok and snapshot is not None:
+            self.undo_stack.push(
+                label=f"Salvar '{os.path.basename(path)}'",
+                revert=make_file_revert(path, snapshot),
+                action_type=ActionType.WRITE_FILE.value,
+            )
         return ExecutionReport(action=action, success=ok, message=msg)
 
     def _organize_files(self, action: DesktopAction) -> ExecutionReport:
         directory = action.params.get("directory") or action.target or "~/Downloads"
         dry_run = bool(action.params.get("dry_run", False))
-        ok, msg, _ = FileManager.organize_directory(directory=directory, dry_run=dry_run)
+        moves: list[tuple[str, str]] = []
+        ok, msg, _ = FileManager.organize_directory(
+            directory=directory, dry_run=dry_run, moves=moves
+        )
+        if ok and moves:
+            folder = os.path.basename(os.path.expanduser(directory).rstrip("/")) or directory
+            self.undo_stack.push(
+                label=f"Organizar '{folder}' ({len(moves)} arquivo{'s' if len(moves) > 1 else ''})",
+                revert=make_organize_revert(moves),
+                action_type=ActionType.ORGANIZE_FILES.value,
+            )
         return ExecutionReport(action=action, success=ok, message=msg)
 

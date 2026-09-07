@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
@@ -18,6 +19,49 @@ gi.require_version("Gio", "2.0")
 from gi.repository import Gio  # noqa: E402
 
 logger = logging.getLogger(__name__)
+
+
+def _media_keys_schema_exists() -> bool:
+    """Verifica se o schema de media-keys do GNOME está disponível antes de abrir Gio.Settings.
+
+    Abrir Gio.Settings com um schema inexistente causa abort em nível C (não capturável por
+    try/except) em algumas builds do GLib — este guard evita esse crash tanto no app quanto
+    nos testes, degradando para "atalho indisponível" de forma graciosa.
+    """
+    try:
+        src = Gio.SettingsSchemaSource.get_default()
+        return src.lookup(MEDIA_KEYS_SCHEMA, True) is not None
+    except Exception as exc:
+        logger.warning(f"Não foi possível verificar o schema de atalhos do GNOME: {exc}")
+        return False
+
+
+@dataclass(frozen=True)
+class AppShortcut:
+    """Atalho interno da janela (escopo de aplicação).
+
+    Diferente dos atalhos globais de sistema (que vivem no GNOME via GSettings),
+    estes só têm efeito enquanto a janela do Copilot está aberta e focada.
+    """
+
+    name: str
+    accelerator: str
+    description: str
+
+
+#: Atalhos de aplicação declarados em um único lugar, para que possam ser
+#: reutilizados na instalação dos controllers e futuramente numa janela de
+#: referência ("cheatsheet") exibida ao usuário.
+APP_SHORTCUTS: Final[tuple[AppShortcut, ...]] = (
+    AppShortcut("app.quit", "<Control>q", "Sair do Zorin Copilot"),
+    AppShortcut("app.toggle-live-voice", "<Control>m", "Iniciar/encerrar conversa por voz"),
+    AppShortcut("app.toggle-sidebar", "<Control>h", "Mostrar/ocultar a barra de conversas"),
+    AppShortcut("app.new-topic", "<Control>n", "Iniciar uma nova conversa"),
+    AppShortcut("app.toggle-pin", "<Control>p", "Fixar a conversa atual no topo"),
+    AppShortcut("app.command-palette", "<Control>k", "Abrir o painel de comandos"),
+    AppShortcut("app.export-conversation", "<Control>s", "Exportar a conversa como Markdown"),
+    AppShortcut("app.undo-action", "<Control>z", "Desfazer a última ação reversível"),
+)
 
 MEDIA_KEYS_SCHEMA: Final = "org.gnome.settings-daemon.plugins.media-keys"
 CUSTOM_KEY_SCHEMA: Final = "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding"
@@ -53,6 +97,8 @@ class ShortcutManager:
     # -------------------------------------------------------------------------
     @classmethod
     def _is_path_registered(cls, path: str) -> bool:
+        if not _media_keys_schema_exists():
+            return False
         try:
             settings = Gio.Settings.new(MEDIA_KEYS_SCHEMA)
             existing = list(settings.get_strv("custom-keybindings"))
@@ -73,6 +119,9 @@ class ShortcutManager:
 
     @classmethod
     def _register_binding(cls, path: str, name: str, command: str, binding: str) -> bool:
+        if not _media_keys_schema_exists():
+            logger.warning("Schema de media-keys do GNOME indisponível; atalho não registrado.")
+            return False
         try:
             settings = Gio.Settings.new(MEDIA_KEYS_SCHEMA)
             existing = list(settings.get_strv("custom-keybindings"))
@@ -92,6 +141,8 @@ class ShortcutManager:
 
     @classmethod
     def _unregister_binding(cls, path: str) -> bool:
+        if not _media_keys_schema_exists():
+            return False
         try:
             settings = Gio.Settings.new(MEDIA_KEYS_SCHEMA)
             existing = list(settings.get_strv("custom-keybindings"))
@@ -166,7 +217,8 @@ class ShortcutManager:
         return cls._unregister_binding(CROP_BINDING_PATH)
 
     # -------------------------------------------------------------------------
-    # Atalho Global Direto de Conversa por Voz (Super+Shift+V)
+    # -------------------------------------------------------------------------
+    # Atalho Global Direto de Conversa por Voz (Super+Shift+V / Super+V)
     # -------------------------------------------------------------------------
     @classmethod
     def is_voice_registered(cls) -> bool:

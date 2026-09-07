@@ -171,10 +171,12 @@ class TestExecutorAppInteractions(unittest.TestCase):
         self.assertTrue(rep.success)
         mock_search.assert_called_with("Queen", player_name="spotify")
 
-    @patch("shutil.which")
-    @patch("subprocess.run")
-    def test_executor_type_text_wtype(self, mock_run, mock_which):
-        mock_which.side_effect = lambda b: "/usr/bin/wtype" if b == "wtype" else None
+    @patch.object(ActionExecutor, "_find_element_by_label")
+    def test_executor_type_text(self, mock_find):
+        mock_find.return_value = MagicMock()
+        self.executor.inspector.text_insert = MagicMock(
+            return_value=(True, "Texto inserido via AT-SPI (EditableText).")
+        )
         act = DesktopAction(
             action_type=ActionType.TYPE_TEXT,
             target="campo de pesquisa",
@@ -182,8 +184,7 @@ class TestExecutorAppInteractions(unittest.TestCase):
         )
         rep = self.executor.execute(act)
         self.assertTrue(rep.success)
-        mock_run.assert_called_once()
-        self.assertIn("wtype", rep.message)
+        self.assertIn("EditableText", rep.message)
 
 
 if __name__ == "__main__":

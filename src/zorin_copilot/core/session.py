@@ -11,26 +11,50 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from ..ai.actions import ActionPlan
+
 
 @dataclass
 class ChatTurn:
     prompt: str
     answer: str
     timestamp: float = field(default_factory=time.time)
+    # Identificador estável: permite associar resultados de execução a um turno
+    # específico mesmo depois de o fluxo de chat ser reconstruído do zero.
+    id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    # Plano de ações proposto junto com a resposta. Vive no turno, e não no
+    # estado da janela, para que os botões de ação sobrevivam a um `rebuild()`
+    # e a um restart do app — antes só o último turno os exibia.
+    # `compare=False` mantém a igualdade por conteúdo de texto, usada nos testes.
+    plan: ActionPlan | None = field(default=None, compare=False)
 
     def to_dict(self) -> dict:
         return {
             "prompt": self.prompt,
             "answer": self.answer,
             "timestamp": self.timestamp,
+            "id": self.id,
+            "plan": self.plan.to_dict() if self.plan and not self.plan.is_empty else None,
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> ChatTurn:
+        raw_plan = data.get("plan")
+        plan = None
+        if isinstance(raw_plan, dict):
+            try:
+                plan = ActionPlan.from_dict(raw_plan)
+            except (TypeError, AttributeError, ValueError):
+                # Plano gravado por uma versão incompatível: seguir sem ele.
+                plan = None
         return cls(
             prompt=data.get("prompt", ""),
             answer=data.get("answer", ""),
             timestamp=float(data.get("timestamp", time.time())),
+            # Turnos gravados antes deste campo existir recebem um id novo na
+            # leitura — aceitável, porque o registro de execução é em memória.
+            id=data.get("id") or uuid.uuid4().hex,
+            plan=plan,
         )
 
 
@@ -125,11 +149,14 @@ class TopicSession:
             return cleaned
         return cleaned[:47].rstrip() + "..."
 
-    def record_turn(self, prompt: str, answer: str) -> ChatTurn:
-        """Registra uma interação usuário/assistente na demanda ativa."""
+    def record_turn(self, prompt: str, answer: str, plan: ActionPlan | None = None) -> ChatTurn:
+        """Registra uma interação usuário/assistente na demanda ativa.
+
+        Retorna o turno criado para que a interface possa renderizá-lo imediatamente.
+        """
         clean_p = prompt.strip()
         clean_a = answer.strip()
-        turn = ChatTurn(prompt=clean_p, answer=clean_a)
+        turn = ChatTurn(prompt=clean_p, answer=clean_a, plan=plan)
 
         if not self.title and clean_p:
             self.title = self._derive_title(clean_p)
@@ -144,6 +171,8 @@ class TopicSession:
         else:
             # Guarda em memória temporária caso o usuário decida fixar logo em seguida
             self._last_unpinned_turn = turn
+        return turn
+
         return turn
 
     def get_history_for_llm(self) -> list[dict[str, str]]:

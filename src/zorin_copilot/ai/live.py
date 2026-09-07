@@ -27,17 +27,19 @@ except ImportError:
 
 from ..core.a11y import DesktopInspector
 from ..core.apps import AppManager
+from ..core.a11y import DesktopInspector
 from ..core.browser import BrowserManager
 from ..core.calendar import CalendarManager
 from ..core.config import CopilotConfig
 from ..core.email import EmailManager
-from ..core.fence import ScreenFenceManager
+from ..core.fence import NO_MONITOR_LABEL, ScreenFenceManager
 from ..core.memory import MemoryManager
 from ..core.rag import LocalDocumentRAG
 from ..core.vision import ScreenCaptureService
 from ..core.web_search import DeepWebResearcher, WebSearchClient
 from ..shell.executor import ActionExecutor
 from ..shell.input_driver import VirtualInputDriver
+from ..shell.risk import RiskLevel, RiskPolicy, is_blocked_app
 from .actions import ActionPlan, ActionType, DesktopAction
 
 logger = logging.getLogger(__name__)
@@ -60,6 +62,17 @@ class LiveVoiceState(Enum):
     SPEAKING = "speaking"
     EXECUTING = "executing"
     ERROR = "error"
+
+
+def build_realtime_text_msg(text: str) -> dict[str, Any]:
+    """Fase 4C: monta o payload `realtimeInput` de texto (contexto dinâmico).
+
+    Diferente do `clientContent` (turnComplete=true → provoca resposta do
+    modelo), o realtimeInput apenas ACRESCENTA informação ao contexto da
+    sessão sem exigir uma resposta imediata — ideal para deltas de contexto
+    (fato memorizado, monitor ativo alterado, contato salvo).
+    """
+    return {"realtimeInput": {"text": text}}
 
 
 LIVE_TOOLS_DECLARATION = [
@@ -207,7 +220,7 @@ LIVE_TOOLS_DECLARATION = [
             },
             {
                 "name": "screen_fence_control",
-                "description": "Controla a cerca de segurança espacial e qual monitor físico está autorizado para receber cliques e automações (ex: monitor principal AOC 27, monitor secundário VIE 24, ou todas as telas).",
+                "description": "Controla a cerca de segurança espacial e qual monitor físico está autorizado para receber cliques e automações (ex: monitor principal, monitor secundário, ou todas as telas).",
                 "parameters": {
                     "type": "OBJECT",
                     "properties": {
@@ -322,6 +335,24 @@ LIVE_TOOLS_DECLARATION = [
                         },
                     },
                     "required": ["name", "email"],
+                },
+            },
+            {
+                "name": "memory_remember",
+                "description": "Memoriza um fato ou preferência dita pelo usuário (ex: 'lembre-se que prefiro Vim'). O fato fica disponível imediatamente nesta sessão e em conversas futuras.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "fact": {
+                            "type": "STRING",
+                            "description": "O fato ou preferência a memorizar, em linguagem natural",
+                        },
+                        "category": {
+                            "type": "STRING",
+                            "description": "Categoria opcional (ex: 'preferencia', 'sistema', 'projeto')",
+                        },
+                    },
+                    "required": ["fact"],
                 },
             },
             {
@@ -490,6 +521,111 @@ LIVE_TOOLS_DECLARATION = [
                     "required": ["query"],
                 },
             },
+            {
+                "name": "get_ui_tree",
+                "description": "Obtém a árvore de acessibilidade (elementos interativos com UIDs [n.n]) do aplicativo em uso. CHAME ESTA PRIMEIRO para descobrir os UIDs antes de click_element/type_element. Sem UIDs, use mouse_click/keyboard_type como fallback.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "app_name": {
+                            "type": "STRING",
+                            "description": "Nome do aplicativo alvo (opcional). Se omitido, usa o app com foco no teclado no momento.",
+                        }
+                    },
+                },
+            },
+            {
+                "name": "click_element",
+                "description": "Clica/ativa um elemento da interface pelo seu UID obtido via get_ui_tree (ex: '0.1'). Interação semântica e precisa, sem depender de coordenadas de tela.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "uid": {
+                            "type": "STRING",
+                            "description": "UID do elemento retornado por get_ui_tree (ex: '0.1')",
+                        },
+                        "app_name": {
+                            "type": "STRING",
+                            "description": "Nome do aplicativo alvo (opcional, mas recomendado para estabilidade do UID).",
+                        },
+                    },
+                    "required": ["uid"],
+                },
+            },
+            {
+                "name": "type_element",
+                "description": "Digita texto em um campo da interface pelo seu UID obtido via get_ui_tree (ex: '0.0'). Inserção semântica via AT-SPI, com fallback para teclado virtual. Sem UID, use keyboard_type como fallback.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "uid": {
+                            "type": "STRING",
+                            "description": "UID do campo de texto retornado por get_ui_tree (ex: '0.0')",
+                        },
+                        "text": {
+                            "type": "STRING",
+                            "description": "Texto a ser digitado no campo",
+                        },
+                        "press_enter": {
+                            "type": "BOOLEAN",
+                            "description": "Se true, pressiona Enter após a digitação",
+                        },
+                        "append": {
+                            "type": "BOOLEAN",
+                            "description": "Se true, anexa ao texto existente em vez de substituir",
+                        },
+                        "app_name": {
+                            "type": "STRING",
+                            "description": "Nome do aplicativo alvo (opcional, mas recomendado para estabilidade do UID).",
+                        },
+                    },
+                    "required": ["uid", "text"],
+                },
+            },
+            {
+                "name": "locate_element",
+                "description": "Dado um ponto na tela, retorna o UID, nome e papel do elemento de interface ali presente. Use para FUNDIR o que você VÊ no vídeo ao vivo com a árvore semântica: passe as coordenadas do ponto que você observou e, em seguida, chame click_element/type_element com o UID retornado.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "x": {
+                            "type": "NUMBER",
+                            "description": "Coordenada horizontal (relativa [0,1] do frame de vídeo por padrão, ou pixel absoluto se is_relative=false)",
+                        },
+                        "y": {
+                            "type": "NUMBER",
+                            "description": "Coordenada vertical (relativa [0,1] do frame de vídeo por padrão, ou pixel absoluto se is_relative=false)",
+                        },
+                        "is_relative": {
+                            "type": "BOOLEAN",
+                            "description": "Se true (padrão), x/y são [0,1] do vídeo; se false, pixels absolutos de tela.",
+                        },
+                        "app_name": {
+                            "type": "STRING",
+                            "description": "Nome do aplicativo alvo (opcional).",
+                        },
+                    },
+                    "required": ["x", "y"],
+                },
+            },
+            {
+                "name": "confirm_action",
+                "description": "Confirma ou cancela uma ação de risco previamente solicitada (ex: enviar e-mail, sobrescrever arquivo, atalho destrutivo, digitar em senha). Chamada apenas após o usuário aprovar verbalmente.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "confirmation_id": {
+                            "type": "STRING",
+                            "description": "ID retornado pela ferramenta de risco (campo confirmation_id).",
+                        },
+                        "approve": {
+                            "type": "BOOLEAN",
+                            "description": "true para executar a ação; false para cancelá-la.",
+                        },
+                    },
+                    "required": ["confirmation_id", "approve"],
+                },
+            },
         ]
     }
 ]
@@ -515,6 +651,13 @@ class GeminiLiveClient:
 
         self.fence = ScreenFenceManager()
         self.input_driver = VirtualInputDriver(fence=self.fence)
+        self.inspector = DesktopInspector()
+        self.risk_policy = RiskPolicy()
+        self._pending_actions: dict[str, dict[str, Any]] = {}
+        self._bypass_risk_gate = False
+        # Comando de texto capturado junto à wake word (Fase 4A), enviado à
+        # sessão assim que o setup do Gemini Live completar.
+        self._queued_initial_text: str = ""
         self.email_mgr = EmailManager(memory=self.memory)
         self.cal_mgr = CalendarManager(memory=self.memory)
         self.rag = LocalDocumentRAG(memory=self.memory)
@@ -599,6 +742,9 @@ class GeminiLiveClient:
         self._session_start_time = time.time()
         self._executed_actions_log.clear()
         self._transcripts_log.clear()
+        # Fase 4B: descarta confirmações de risco pendentes da sessão anterior —
+        # um confirmation_id nunca deve sobreviver ao fim da chamada.
+        self._pending_actions.clear()
         self._thread = threading.Thread(target=self._run_loop, daemon=True, name="GeminiLiveWorker")
         self._thread.start()
 
@@ -607,6 +753,8 @@ class GeminiLiveClient:
         self.stop_video_stream()
         self._is_running = False
         self._terminate_audio_processes()
+        # Fase 4B: nenhuma ação de risco pode ficar armada após o encerramento.
+        self._pending_actions.clear()
 
         if self._loop and self._loop.is_running():
             self._loop.call_soon_threadsafe(self._loop.stop)
@@ -719,11 +867,11 @@ class GeminiLiveClient:
                 # 1. Prepara contexto dinâmico de memória e cercas espaciais
                 context_summary = self.memory.get_context_summary()
                 active_mon = self.fence.get_active_monitor()
-                active_mon_name = active_mon.name if active_mon else "Principal (AOC 27\")"
+                active_mon_name = active_mon.name if active_mon else NO_MONITOR_LABEL
                 monitors_desc = ", ".join([f"Monitor {m.index}: {m.name}" for m in self.fence.monitors])
 
                 system_prompt_text = (
-                    "Você é o Zorin Copilot, assistente e parceiro nativo de voz e visão do Zorin OS 18 (Linux / GNOME / Wayland). "
+                    "Você é o Zorin Copilot, assistente e parceiro nativo de voz e visão multimodal do sistema operacional Zorin OS 18 (Linux / GNOME / Wayland). "
                     "Você conversa por áudio em tempo real com o usuário em português brasileiro como um colega de trabalho próximo, prestativo e ágil. "
                     "\n\nDIRETRIZES DE FALA NATURAL E CADÊNCIA ORAL:\n"
                     "1. Use linguagem falada brasileira autêntica e marcadores naturais ('Opa, beleza!', 'Deixa comigo!', 'Prontinho!', 'Vou dar uma olhada nisso...'). "
@@ -734,11 +882,14 @@ class GeminiLiveClient:
                     "\n\nCONTROLE DO DESKTOP E FERRAMENTAS:\n"
                     f"- Monitores conectados: [{monitors_desc}]. Monitor autorizado ativo: '{active_mon_name}'. "
                     "- Para alternar a tela autorizada de trabalho, use 'screen_fence_control'. "
-                    "- Para interagir no desktop, use 'mouse_click', 'keyboard_type' e 'keyboard_hotkey' (validadas pela cerca espacial). "
-                    "- Ao redigir ou iniciar e-mails, use 'email_compose'. Não adivinhe e-mails; se não souber, use 'contact_lookup'. "
+                    "- Para interagir com a interface de um aplicativo específico de forma precisa e semântica, prefira primeiro 'get_ui_tree' para obter os elementos com UIDs [n.n] e geometria (@x,y w×h). Para agir em algo que você VÊ no vídeo mas só conhece pela aparência, use 'locate_element(x, y)' para converter o ponto visto em um UID semântico, e então 'click_element(uid)' / 'type_element(uid, text)'. Use 'mouse_click'/'keyboard_type' e 'keyboard_hotkey' apenas como fallback ou quando não houver UID (validadas pela cerca espacial). "
+                    "- Ao redigir ou iniciar e-mails, use 'email_compose'. Não adivinhe e-mails; se não souber, use 'contact_lookup' ou pergunte ao usuário. "
+                    "- Quando o usuário pedir para lembrar de algo ('lembre-se que...'), use 'memory_remember' — o fato fica disponível imediatamente nesta sessão e nas futuras. "
                     "- Para compromissos e agenda, use 'calendar_event'. "
                     "- Para pesquisas na web, use 'browser_search', 'web_search' ou 'deep_web_search'. "
+                    "- Para ler páginas abertas no navegador, use 'read_open_webpage'. "
                     "- Para documentos locais (PDFs, relatórios), use 'search_documents', 'read_document_page' e 'open_document_file'. "
+                    "- Ações de risco (enviar e-mail, sobrescrever arquivo, atalho destrutivo como Alt+F4, ou digitar em campo de senha) NÃO são executadas de imediato: você receberá um 'confirmation_id' e deve pedir confirmação verbal ao usuário; se aprovada, chame 'confirm_action(confirmation_id, approve=true)'. Se o usuário recusar, chame com approve=false."
                     f"\n\n{context_summary}\n\n"
                     "Trate o usuário com carinho, eficiência e naturalidade. Sempre que ele pedir algo, use imediatamente a ferramenta certa e confirme com um toque leve de voz!"
                 )
@@ -779,6 +930,24 @@ class GeminiLiveClient:
 
                 self._set_state(LiveVoiceState.LISTENING, "Conectado! Pode falar...")
                 logger.info("Sessão Gemini Live estabelecida com sucesso.")
+
+                # Fase 4A: se a wake word já trouxe o pedido ("ok copilot abre o
+                # navegador"), injeta o comando como primeiro turno de texto.
+                if self._queued_initial_text:
+                    initial_msg = {
+                        "clientContent": {
+                            "turns": [
+                                {
+                                    "role": "user",
+                                    "parts": [{"text": self._queued_initial_text}],
+                                }
+                            ],
+                            "turnComplete": True,
+                        }
+                    }
+                    logger.info("Enviando comando inicial da wake word: %r", self._queued_initial_text)
+                    self._queued_initial_text = ""
+                    await ws.send(json.dumps(initial_msg))
 
                 # Inicia tarefas concorrentes: Gravação do Mic e Leitura do Servidor
                 mic_task = asyncio.create_task(self._mic_recorder_loop(ws))
@@ -970,6 +1139,12 @@ class GeminiLiveClient:
 
     def _dispatch_tool(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         """Despacha a execução concreta para os subsistemas do Zorin Copilot."""
+        # Portão de risco: ações perigosas não executam imediatamente — exigem
+        # confirmação explícita via tool `confirm_action` (voz/"sim" ou "não").
+        if not getattr(self, "_bypass_risk_gate", False) and getattr(self, "risk_policy", None) is not None:
+            level, desc = self.risk_policy.classify(name, args)
+            if level == RiskLevel.CONFIRM:
+                return self._require_confirmation(name, args, desc)
         try:
             if name == "launch_app":
                 app_name = args.get("app_name", "").strip()
@@ -1065,6 +1240,10 @@ class GeminiLiveClient:
                 ok = self.fence.set_active_monitor(target)
                 m = self.fence.get_active_monitor()
                 name_str = m.name if m else target
+                if ok:
+                    # Fase 4C: o novo monitor ativo entra no contexto da sessão,
+                    # pois o systemInstruction (estático) registrou o antigo.
+                    self._push_context_delta(f"o monitor ativo autorizado agora é '{name_str}'.")
                 return {
                     "success": ok,
                     "message": f"Cerca de tela definida para '{name_str}'." if ok else f"Monitor '{target}' não localizado.",
@@ -1095,6 +1274,159 @@ class GeminiLiveClient:
                 ok, msg = self.input_driver.hotkey(*keys)
                 return {"success": ok, "message": msg}
 
+            elif name == "get_ui_tree":
+                app_name = args.get("app_name")
+                root = self.inspector.get_ui_tree(app_name)
+                if root is None:
+                    return {
+                        "success": False,
+                        "message": "Árvore de acessibilidade indisponível (AT-SPI ausente ou nenhum app com foco). Use mouse_click/keyboard_type como fallback.",
+                    }
+                if is_blocked_app(root.name):
+                    return {
+                        "success": False,
+                        "message": f"App '{root.name}' está na lista de bloqueio; o agente não opera nele por segurança.",
+                    }
+                include_bounds = bool(args.get("include_bounds", True))
+                tree_text = root.to_summary(include_bounds=include_bounds)
+                MAX_TREE = 6000
+                truncated = len(tree_text) > MAX_TREE
+                if truncated:
+                    tree_text = tree_text[:MAX_TREE] + "\n... (árvore truncada)"
+                return {
+                    "success": True,
+                    "app": root.name,
+                    "app_name": app_name or root.name,
+                    "tree": tree_text,
+                    "truncated": truncated,
+                    "message": (
+                        f"Árvore de '{root.name}' obtida"
+                        + (" com geometria (@x,y w×h)." if include_bounds else ".")
+                        + " Use click_element(uid)/type_element(uid, text) ou locate_element(x,y) com os UIDs [n.n]."
+                    ),
+                }
+
+            elif name == "locate_element":
+                x = float(args.get("x", 0.0))
+                y = float(args.get("y", 0.0))
+                is_rel = bool(args.get("is_relative", True))
+                if is_rel:
+                    x, y = self.fence.convert_relative_point(x, y)
+                app_name = args.get("app_name")
+                root = self.inspector.get_ui_tree(app_name)
+                if root is None:
+                    return {
+                        "success": False,
+                        "message": "Árvore de acessibilidade indisponível (AT-SPI).",
+                    }
+                el = DesktopInspector.element_at_point(root, int(x), int(y))
+                if el is None:
+                    return {
+                        "success": False,
+                        "message": f"Nenhum elemento encontrado nas coordenadas ({int(x)}, {int(y)}).",
+                    }
+                return {
+                    "success": True,
+                    "uid": el.uid,
+                    "name": el.name,
+                    "role": el.role,
+                    "bbox": list(el.bbox),
+                    "message": f"Elemento '{el.name}' (UID {el.uid}, {el.role}) nas coordenadas informadas.",
+                }
+
+            elif name == "click_element":
+                uid = str(args.get("uid", "")).strip()
+                if not uid:
+                    return {"success": False, "message": "UID do elemento é obrigatório."}
+                app_name = args.get("app_name")
+                root = self.inspector.get_ui_tree(app_name)
+                if root is None:
+                    return {"success": False, "message": "Árvore de acessibilidade indisponível (AT-SPI)."}
+                element = DesktopInspector.find_element_by_uid(root, uid)
+                if element is None:
+                    return {
+                        "success": False,
+                        "message": f"Elemento com UID '{uid}' não encontrado na árvore atual. Chame get_ui_tree novamente.",
+                    }
+                ok = self.inspector.do_action(element, 0)
+                return {
+                    "success": ok,
+                    "message": (
+                        f"Clique em '{element.name}' (UID {uid}) executado."
+                        if ok
+                        else f"Falha ao clicar em '{element.name}' (UID {uid})."
+                    ),
+                }
+
+            elif name == "type_element":
+                uid = str(args.get("uid", "")).strip()
+                text = args.get("text", "")
+                if not uid:
+                    return {"success": False, "message": "UID do elemento é obrigatório."}
+                if not text:
+                    return {"success": False, "message": "Texto a digitar é obrigatório."}
+                app_name = args.get("app_name")
+                root = self.inspector.get_ui_tree(app_name)
+                if root is None:
+                    return {"success": False, "message": "Árvore de acessibilidade indisponível (AT-SPI)."}
+                element = DesktopInspector.find_element_by_uid(root, uid)
+                if element is None:
+                    return {
+                        "success": False,
+                        "message": f"Elemento com UID '{uid}' não encontrado. Chame get_ui_tree novamente.",
+                    }
+                # Campos de senha: nunca digitar sem confirmação explícita.
+                if element.role in ("password_text", "password") and not getattr(
+                    self, "_bypass_risk_gate", False
+                ):
+                    return self._require_confirmation(
+                        name, args, "digitação em campo de senha"
+                    )
+                ok, msg = self.inspector.text_insert(
+                    element, text, append=bool(args.get("append", False))
+                )
+                if ok:
+                    return {
+                        "success": True,
+                        "message": f"Texto digitado em '{element.name}' (UID {uid}) via AT-SPI.",
+                    }
+                # Fallback: foca o campo e emite digitação por input virtual (ydotool/uinput)
+                self.inspector.focus_element(element)
+                ok2, msg2 = self.input_driver.type_text(
+                    text, press_enter=bool(args.get("press_enter", False))
+                )
+                if ok2:
+                    return {
+                        "success": True,
+                        "message": f"Texto digitado em '{element.name}' (UID {uid}) via input virtual (fallback).",
+                    }
+                return {
+                    "success": False,
+                    "message": f"Falha ao digitar: semântico=[{msg}] virtual=[{msg2}]",
+                }
+
+            elif name == "confirm_action":
+                cid = args.get("confirmation_id", "")
+                approve = bool(args.get("approve", False))
+                self._sweep_expired_pending()
+                pending = self._pending_actions.pop(cid, None)
+                if pending is None:
+                    return {
+                        "success": False,
+                        "message": (
+                            f"Nenhuma ação pendente com id '{cid}' "
+                            "(pode ter expirado). Se ainda fizer sentido, solicite a ação novamente."
+                        ),
+                    }
+                if not approve:
+                    return {"success": True, "message": "Ação cancelada pelo usuário."}
+                # Reexecuta a ação original ignorando o portão de risco.
+                self._bypass_risk_gate = True
+                try:
+                    return self._dispatch_tool(pending["name"], dict(pending["args"]))
+                finally:
+                    self._bypass_risk_gate = False
+
             elif name == "contact_lookup":
                 q = args.get("query", "").strip()
                 contacts = self.memory.find_contact(q)
@@ -1116,7 +1448,26 @@ class GeminiLiveClient:
                 c_aliases = args.get("aliases", [])
                 c_notes = args.get("notes", "").strip()
                 saved = self.memory.save_contact(name=c_name, email=c_email, aliases=c_aliases, notes=c_notes)
+                # Fase 4C: o contato novo já entra no contexto desta sessão.
+                self._push_context_delta(f"contato salvo: {c_name} <{c_email}>.")
                 return {"success": True, "contact": saved, "message": f"Contato '{c_name}' <{c_email}> salvo com sucesso."}
+
+            elif name == "memory_remember":
+                fact = args.get("fact", "").strip()
+                if not fact:
+                    return {"success": False, "message": "Nenhum fato informado para memorizar."}
+                category = args.get("category", "").strip() or "preferencia"
+                # Chave determinística a partir do início do fato (atualiza se repetido).
+                key = " ".join(fact.lower().split())[:48]
+                self.memory.save_fact(key, fact, category=category, source="voz ao vivo")
+                # Fase 4C: injeta o fato no contexto IMEDIATAMENTE — o
+                # systemInstruction é estático, então sem isso o modelo só
+                # conheceria o fato na próxima sessão.
+                self._push_context_delta(f"memorizei agora: '{fact}'. Considere isso daqui em diante.")
+                return {
+                    "success": True,
+                    "message": f"Fato memorizado: '{fact}'. Já estou considerando isso.",
+                }
 
             elif name == "email_compose":
                 recip = args.get("recipient", "").strip()
@@ -1234,6 +1585,111 @@ class GeminiLiveClient:
         except Exception as exc:
             logger.error(f"Erro ao despachar ferramenta {name}: {exc}")
             return {"success": False, "message": f"Erro de execução: {exc}"}
+
+    # Fase 4B: tempo máximo (segundos) que uma confirmação de risco fica
+    # aguardando decisão do usuário antes de expirar automaticamente.
+    PENDING_CONFIRMATION_TTL_SEC = 120
+
+    def _store_pending(self, name: str, args: dict[str, Any]) -> str:
+        """Armazena uma ação aguardando confirmação e devolve seu id."""
+        import uuid
+
+        self._sweep_expired_pending()
+        cid = uuid.uuid4().hex[:8]
+        self._pending_actions[cid] = {
+            "name": name,
+            "args": dict(args),
+            "created_at": time.time(),
+        }
+        return cid
+
+    def _sweep_expired_pending(self) -> int:
+        """Remove confirmações pendentes mais antigas que o TTL. Retorna quantas expiraram."""
+        now = time.time()
+        expired = [
+            cid
+            for cid, p in self._pending_actions.items()
+            if now - p.get("created_at", now) > self.PENDING_CONFIRMATION_TTL_SEC
+        ]
+        for cid in expired:
+            self._pending_actions.pop(cid, None)
+            logger.info("Confirmação de risco %s expirou (TTL=%ds) e foi descartada.", cid, self.PENDING_CONFIRMATION_TTL_SEC)
+        return len(expired)
+
+    def _require_confirmation(self, name: str, args: dict[str, Any], desc: str) -> dict[str, Any]:
+        """Bloqueia a execução e devolve um id de confirmação para o modelo solicitar ao usuário."""
+        cid = self._store_pending(name, args)
+        return {
+            "success": False,
+            "requires_confirmation": True,
+            "confirmation_id": cid,
+            "risk": desc,
+            "message": (
+                f"Ação de risco: {desc}. Confirme com o usuário e, se aprovada, "
+                f"chame confirm_action(confirmation_id='{cid}', approve=true)."
+            ),
+        }
+
+    def queue_initial_text(self, text: str) -> None:
+        """Fase 4A: agenda um comando de texto para ser enviado logo após o setup da sessão.
+
+        Usado quando a wake word já traz o pedido embutido ("ok copilot abre o
+        navegador" -> "abre o navegador"). Deve ser chamado antes ou logo após
+        start(); o texto é consumido uma única vez no início da sessão.
+        """
+        self._queued_initial_text = (text or "").strip()
+
+    def send_text_input(self, text: str) -> bool:
+        """Fase 4A: injeta um turno de texto do usuário numa sessão Live ativa.
+
+        Envia um `clientContent` com turnComplete=true — a API trata como se o
+        usuário tivesse falado. Retorna False se a sessão não estiver ativa.
+        """
+        text = (text or "").strip()
+        if not text or not self._is_running or not self._ws or not self._loop:
+            return False
+        msg = {
+            "clientContent": {
+                "turns": [
+                    {
+                        "role": "user",
+                        "parts": [{"text": text}],
+                    }
+                ],
+                "turnComplete": True,
+            }
+        }
+        try:
+            asyncio.run_coroutine_threadsafe(self._ws.send(json.dumps(msg)), self._loop)
+            logger.info("Comando de texto injetado na sessão Live: %r", text)
+            return True
+        except Exception as exc:
+            logger.warning("Falha ao injetar texto na sessão Live: %s", exc)
+            return False
+
+    def send_context_update(self, text: str) -> bool:
+        """Fase 4C: injeta um delta de contexto na sessão ativa via realtimeInput.
+
+        O texto entra no contexto do modelo SEM provocar uma resposta imediata
+        (ao contrário de send_text_input). Uso: fatos memorizados, mudança de
+        monitor ativo, contatos salvos — informação que o modelo deve conhecer
+        dali em diante. No-op silencioso (False) se a sessão não estiver ativa.
+        """
+        text = (text or "").strip()
+        if not text or not self._is_running or not self._ws or not self._loop:
+            return False
+        msg = build_realtime_text_msg(text)
+        try:
+            asyncio.run_coroutine_threadsafe(self._ws.send(json.dumps(msg)), self._loop)
+            logger.info("Delta de contexto injetado na sessão Live: %r", text)
+            return True
+        except Exception as exc:
+            logger.warning("Falha ao injetar contexto na sessão Live: %s", exc)
+            return False
+
+    def _push_context_delta(self, delta: str) -> bool:
+        """Melhor esforço: rotula e injeta um delta de contexto na sessão ativa."""
+        return self.send_context_update(f"[Atualização de contexto] {delta}")
 
     def send_screen_frame(self) -> bool:
         """Captura um snapshot da tela e injeta no fluxo visual do Gemini Live."""

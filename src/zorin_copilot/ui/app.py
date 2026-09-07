@@ -1,175 +1,95 @@
-# Decisão de design: interface fluida com processamento assíncrono em threads (zero travamentos na UI), exibição rica de respostas textuais explicativas com suporte a cópia, e orquestração de ações concretas de desktop e web.
+# Decisão de design: a janela principal atua apenas como orquestradora — monta os componentes
+# de interface (cabeçalho, barra lateral, fluxo de conversa, barra de prompt e anexo visual),
+# mantém o estado da sessão e coordena o ciclo pergunta -> IA -> renderização. Toda a
+# construção de widgets foi movida para `zorin_copilot.ui.widgets`.
 
 """Interface gráfica do Zorin Copilot em GTK4 / Libadwaita."""
 
 from __future__ import annotations
 
-import html
-import re
-import threading
-from datetime import datetime
+import logging
+import os
+
 import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 gi.require_version("Pango", "1.0")
-from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
-from .. import __app_id__, __version__
-from ..ai.actions import ActionPlan, ActionType, DesktopAction
+from .. import __app_id__
+from ..ai.actions import ActionPlan
 from ..ai.engine import IntentEngine
-from ..core.a11y import DesktopInspector
-from ..core.apps import AppManager
-from ..core.clipboard import ClipboardService
-from ..core.config import CopilotConfig
-import time
-from ..core.session import TopicSession, ChatTurn
-from ..core.shortcuts import ShortcutManager
-from ..core.vision import ScreenCaptureService
-from ..shell.executor import ActionExecutor
 from ..ai.live import GeminiLiveClient
-from ..ai.local_voice import LocalLiveVoiceClient
-from ..core.fence import ScreenFenceManager, FenceMode
+from ..core.a11y import DesktopInspector
+from ..core.attachments import (
+    Attachment,
+    AttachmentKind,
+    compose_prompt,
+    load_attachments,
+)
+from ..core.config import CopilotConfig
+from ..core.export import (
+    exportable_turns,
+    render_conversation_markdown,
+    suggest_filename,
+)
+from ..core.fence import ScreenFenceManager
 from ..core.rag import LocalDocumentRAG
+from ..core.session import TopicSession
+from ..core.shortcuts import APP_SHORTCUTS, ShortcutManager
+from ..shell.action_status import ActionOutcome
+from ..shell.executor import ActionExecutor, ExecutionReport
+from ..shell.undo import UndoEntry
+from ..shell.wake_word import WakeWordEngine, default_backend
+from ..ai.local_voice import LocalLiveVoiceClient
 from .live_view import LiveVoiceWidget
 from .preferences import PreferencesDialog
 from .style import setup_glass_window
 from .voice_pill import VoicePillWindow
+from .widgets.attachments import AttachmentBar
+from .widgets.chat_stream import (
+    ChatStreamView,
+    format_markdown_to_markup,  # noqa: F401 - reexportado por compatibilidade
+    get_action_icon,  # noqa: F401 - reexportado por compatibilidade
+)
+from .widgets.status_bar import StatusBarWidget
+from .widgets.compare_dialog import CompareResponsesDialog
+from .widgets.command_palette import CommandPalette, PaletteCommand
+from .widgets.drop_zone import DropZone
+from .widgets.header import HeaderBarWidget
+from .widgets.prompt_bar import (
+    PromptBar,
+    get_app_subtitle,  # noqa: F401 - reexportado por compatibilidade
+)
+from .widgets.sidebar import (
+    SidebarPanel,
+    format_relative_timestamp,  # noqa: F401 - reexportado por compatibilidade
+)
+from .widgets.vision import VisionAttachment
+
+logger = logging.getLogger(__name__)
 
 
-def get_dynamic_greeting() -> str:
-    """Retorna uma saudação dinâmica e calorosa baseada no horário atual do dia."""
-    hour = datetime.now().hour
-    if 5 <= hour < 12:
-        salute = "Bom dia!"
-    elif 12 <= hour < 18:
-        salute = "Boa tarde!"
-    else:
-        salute = "Boa noite!"
-    return f"<b>{salute} Como posso ajudar hoje?</b>"
+def _is_dialog_dismissed(error: GLib.Error) -> bool:
+    """Distingue "usuário cancelou" de uma falha real do Gtk.FileDialog.
 
-
-def format_relative_timestamp(iso_str: str) -> str:
-    """Formata timestamp ISO de forma amigável para exibição no histórico de tópicos."""
-    if not iso_str:
-        return ""
+    Cancelar é uma ação legítima e não deve gerar toast de erro; qualquer outra
+    falha do diálogo (portal ausente, permissão negada) deve.
+    """
+    quark_fn = getattr(Gtk, "dialog_error_quark", None)
+    dismissed = getattr(getattr(Gtk, "DialogError", None), "DISMISSED", None)
+    if quark_fn is None or dismissed is None:
+        return False
     try:
-        dt = datetime.fromisoformat(iso_str)
-        now = datetime.now()
-        time_part = dt.strftime("%H:%M")
-        if dt.date() == now.date():
-            return f"Hoje às {time_part}"
-        elif (now.date() - dt.date()).days == 1:
-            return f"Ontem às {time_part}"
-        elif dt.year == now.year:
-            return dt.strftime("%d/%m") + f" às {time_part}"
-        else:
-            return dt.strftime("%d/%m/%Y")
-    except Exception:
-        return iso_str[:16].replace("T", " ")
-
-
-def format_markdown_to_markup(text: str) -> str:
-    """Converte markdown comum (negrito, itálico, código, links) em GTK/Pango markup válido."""
-    if not text:
-        return ""
-    try:
-        s = html.escape(text)
-
-        # 1. Blocos de código multilinhas: ```lang\ncode\n```
-        s = re.sub(
-            r"```(?:[a-zA-Z0-9_-]+)?\n?(.*?)```",
-            lambda m: f"\n<tt><b>{m.group(1).strip()}</b></tt>\n",
-            s,
-            flags=re.DOTALL,
-        )
-
-        # 2. Código inline / caminhos de diretório: `código` -> <tt><b>código</b></tt>
-        s = re.sub(r"`([^`\n]+)`", r"<tt><b>\1</b></tt>", s)
-
-        # 3. Links markdown: [texto](url) -> <a href="url">texto</a>
-        s = re.sub(
-            r"\[([^\]]+)\]\((https?://[^\s\)]+)\)",
-            lambda m: f'<a href="{m.group(2)}">{m.group(1)}</a>',
-            s,
-        )
-
-        # 4. Negrito: **texto** ou __texto__ -> <b>texto</b>
-        s = re.sub(r"\*\*([^\*\n]+)\*\*", r"<b>\1</b>", s)
-        s = re.sub(r"__([^_\n]+)__", r"<b>\1</b>", s)
-
-        # 5. Itálico: *texto* -> <i>texto</i>
-        s = re.sub(r"(?<!\*)\*([^\*\n]+)\*(?!\*)", r"<i>\1</i>", s)
-
-        # 6. Marcadores de lista
-        s = re.sub(r"(?m)^[\t ]*[-*]\s+", "  • ", s)
-
-        return s
-    except Exception:
-        return html.escape(text)
-
-
-def get_action_icon(action: DesktopAction) -> str:
-    """Retorna o ícone semântico padrão mais adequado para a ação proposta."""
-    target_low = action.target.lower()
-    if action.action_type == ActionType.LAUNCH_APP:
-        if "terminal" in target_low:
-            return "utilities-terminal-symbolic"
-        if "calc" in target_low:
-            return "accessories-calculator-symbolic"
-        if "steam" in target_low or "jog" in target_low:
-            return "applications-games-symbolic"
-        if any(b in target_low for b in ("web", "browser", "firefox", "chrome", "edge", "brave")):
-            return "web-browser-symbolic"
-        if any(f in target_low for f in ("file", "arquiv", "pasta", "nautilus")):
-            return "system-file-manager-symbolic"
-        return "application-x-executable-symbolic"
-    if action.action_type == ActionType.OPEN_URL:
-        return "web-browser-symbolic"
-    if action.action_type == ActionType.SYSTEM_CONTROL:
-        return "preferences-system-symbolic"
-    if action.action_type == ActionType.CLICK:
-        return "input-mouse-symbolic"
-    if action.action_type == ActionType.NOTIFY:
-        return "dialog-information-symbolic"
-    if action.action_type == ActionType.FIX_COMMAND:
-        return "utilities-terminal-symbolic"
-    if action.action_type == ActionType.SMART_OCR:
-        return "edit-copy-symbolic"
-    if action.action_type == ActionType.MEDIA_CONTROL:
-        return "multimedia-player-symbolic"
-    if action.action_type == ActionType.WRITE_FILE:
-        return "document-save-symbolic"
-    if action.action_type == ActionType.ORGANIZE_FILES:
-        return "folder-symbolic"
-    if action.action_type == ActionType.OPEN_DOCUMENT:
-        return "x-office-document-symbolic"
-    if action.action_type == ActionType.READ_PAGE:
-        return "web-browser-symbolic"
-    if action.action_type == ActionType.DEEP_RESEARCH:
-        return "system-search-symbolic"
-    return "system-run-symbolic"
-
-
-def get_app_subtitle(app: Gio.AppInfo) -> str:
-    """Retorna uma descrição legível e amigável para o aplicativo."""
-    desc = app.get_description()
-    if desc and len(desc) < 65:
-        return desc.strip()
-
-    app_id = (app.get_id() or "").lower()
-    if "chrome-" in app_id or "msedge-" in app_id or "brave-" in app_id:
-        return "Aplicativo Web • Integrado ao desktop"
-
-    exe = app.get_executable()
-    if exe:
-        exe_name = exe.split("/")[-1]
-        return f"Comando '{exe_name}' • Aplicativo instalado"
-
-    return "Aplicativo instalado no Zorin OS"
+        return bool(error.matches(quark_fn(), int(dismissed)))
+    except (TypeError, ValueError):  # bindings antigos sem Gtk.DialogError
+        return False
 
 
 class CopilotWindow(Adw.ApplicationWindow):
+    """Janela principal do Copilot: compõe os widgets e orquestra a conversa."""
+
     def __init__(self, app: Adw.Application):
         super().__init__(application=app)
         self.set_title("Zorin Copilot")
@@ -182,44 +102,601 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.engine = IntentEngine(self.inspector, self.config)
         self.session = TopicSession(auto_persist=True)
         self.current_plan: ActionPlan | None = None
+        self.attachments: list[Attachment] = []
         self._raw_answer_text: str = ""
         self._is_busy = False
-        self._search_debounce_timer: int | None = None
-        self._matched_preview_app: Gio.AppInfo | None = None
-        self._last_captured_image_bytes: bytes | None = None
+        self._pending_turn_box: Gtk.Widget | None = None
 
-        # Contexto de Visão Contínua (Retém recorte para conversas multiturn)
+        # Contexto de Visão Contínua (retém recorte para conversas multi-turn)
         self._active_image_bytes: bytes | None = None
         self._active_image_is_area: bool = False
         self._active_image_is_clipboard: bool = False
         self._current_ocr_text: str | None = None
 
-        # Widget pendente durante raciocínio do modelo
-        self._pending_turn_box: Gtk.Widget | None = None
-
-        # Voz ao Vivo (Local Soberana com Piper/Whisper ou Gemini Multimodal Live)
+        # Voz ao Vivo (Gemini Multimodal Live / Local Soberana)
         self.live_client: GeminiLiveClient | LocalLiveVoiceClient | None = None
         self.live_voice_widget: LiveVoiceWidget | None = None
         self.voice_pill_window: VoicePillWindow | None = None
 
-        # Cerca de Proteção Espacial (Isolamento de Monitores no Wayland)
+        # Wake word ("palavra de ativação") — invocação hands-free.
+        # Opt-in via preferências; pausa durante a sessão Live (o microfone já
+        # está em uso pelo pw-record do Gemini Live).
+        self.wake_word_engine: WakeWordEngine | None = None
+
+        # Cerca de Proteção Espacial (isolamento de monitores no Wayland)
         self.fence = ScreenFenceManager()
 
-        # RAG Local & Inteligência Documental (Indexação incremental em segundo plano)
+        # Campos usados por componentes; criados antes da construção dos widgets
+        self.entry: Gtk.Entry = Gtk.Entry()
+        self.answer_label: Gtk.Label = Gtk.Label()
+        self.exec_status: Gtk.Label = Gtk.Label()
+
+        # RAG Local & Inteligência Documental (indexação incremental em segundo plano)
         self.rag = LocalDocumentRAG(memory=self.engine.memory)
         self.executor.rag = self.rag
         self.engine.rag = self.rag
         self.rag.start_background_indexing()
 
         self._build_ui()
+        # Alvo de arrastar-e-soltar na janela inteira, não só no fluxo de chat.
+        self.drop_zone.attach_to(self)
         setup_glass_window(self)
-        self._update_provider_badge()
-        self._rebuild_chat_stream()
-        self._populate_sidebar_history()
+        self.header.update_provider_badge()
+        self.chat_stream.rebuild()
+        self.sidebar.populate()
         self.connect("close-request", self._on_close_request)
+        self._init_wake_word()
 
+    # ------------------------------------------------------------------
+    # Wake word ("palavra de ativação")
+    # ------------------------------------------------------------------
+    def _init_wake_word(self) -> None:
+        """Cria e (se habilitado) inicia o motor de wake word a partir do config."""
+        phrases = getattr(self.config, "wake_phrases", None) or []
+        model_path = getattr(self.config, "wake_word_model_path", "")
+        self.wake_word_engine = WakeWordEngine(
+            phrases=phrases,
+            backend=default_backend(model_path),
+            on_wake=self._on_wake_word,
+        )
+        if getattr(self.config, "wake_word_enabled", False):
+            started = self.wake_word_engine.start()
+            if not started:
+                logger.info(
+                    "Wake word habilitado mas indisponível (instale 'vosk' e configure o modelo)."
+                )
+
+    def _reconfigure_wake_word(self) -> None:
+        """Reconfigura o motor após salvar as preferências (frases/modelo/habilitação)."""
+        if self.wake_word_engine is not None:
+            self.wake_word_engine.stop()
+        self._init_wake_word()
+        if getattr(self.config, "wake_word_enabled", False) and (
+            self.wake_word_engine and self.wake_word_engine.running
+        ):
+            self.show_toast("🎙️ Palavra de ativação atualizada e ouvindo.")
+
+    def _on_wake_word(self, phrase: str, command: str = "") -> None:
+        """Chamado pela thread do motor; agenda a abertura da voz no loop principal."""
+        GLib.idle_add(self._handle_wake_on_main_thread, phrase, command)
+
+    def _handle_wake_on_main_thread(self, phrase: str, command: str = "") -> bool:
+        # Se a conversa por voz já está ativa, o comando vira um turno de texto
+        # na própria sessão (ex.: wake word acidental durante a chamada).
+        if self.live_client and self.live_client.is_active():
+            if command:
+                self.live_client.send_text_input(command)
+            return GLib.SOURCE_REMOVE
+        self.summon_hud()
+        if command:
+            self.show_toast(f'🎙️ "{phrase}" — executando: "{command}"')
+            self.start_live_voice(initial_command=command)
+        else:
+            self.show_toast(f'🎙️ Entendi "{phrase}"! Iniciando conversa...')
+            self.start_live_voice()
+        return GLib.SOURCE_REMOVE
+
+    # ------------------------------------------------------------------
+    # Construção
+    # ------------------------------------------------------------------
+    def _build_ui(self) -> None:
+        self.toolbar_view = Adw.ToolbarView()
+
+        self.vision = VisionAttachment(self)
+        self.attachment_bar = AttachmentBar(self)
+        self.drop_zone = DropZone(self)
+        self.prompt_bar = PromptBar(self)
+
+        self.header = HeaderBarWidget(self)
+        self.toolbar_view.add_top_bar(self.header.header)
+
+        # Barra de status inferior (estilo Warp): modelo, tokens, carga, RAM e RAG.
+        self.status_bar = StatusBarWidget(self)
+        self.toolbar_view.add_bottom_bar(self.status_bar.container)
+
+
+        # Atributos de compatibilidade mantidos por código legado/testes
+        self.answer_group = Adw.PreferencesGroup()
+        self.answer_group.set_visible(False)
+        self.actions_group = Adw.PreferencesGroup()
+        self.actions_group.set_visible(False)
+        self.actions_box = Gtk.Box()
+        self.history_btn = Gtk.MenuButton()
+        self.history_popover = Gtk.Popover()
+        self.topic_revealer = Gtk.Revealer()
+        self.topic_info_lbl = Gtk.Label()
+        self.pin_btn = Gtk.Button()
+        self.pin_btn_label = Gtk.Label()
+        self.pin_btn_icon = Gtk.Image()
+        self.exec_all_btn = Gtk.Button()
+        self.copy_btn = Gtk.Button()
+
+        self._install_key_controller()
+
+        self.split_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+
+        self.sidebar = SidebarPanel(self)
+        self.split_box.append(self.sidebar.revealer)
+
+        chat_main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        chat_main_box.set_hexpand(True)
+
+        self.live_voice_revealer = Gtk.Revealer()
+        self.live_voice_revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_DOWN)
+        self.live_voice_revealer.set_transition_duration(200)
+        self.live_voice_revealer.set_reveal_child(False)
+        chat_main_box.append(self.live_voice_revealer)
+
+        self.chat_stream = ChatStreamView(self)
+        chat_main_box.append(self.chat_stream.scrolled)
+
+        clamp_bottom = Adw.Clamp(maximum_size=820)
+        clamp_bottom.set_child(self.prompt_bar.container)
+        chat_main_box.append(clamp_bottom)
+
+        self.split_box.append(chat_main_box)
+
+        # O painel de comandos fica num overlay acima do conteúdo, mas abaixo dos
+        # toasts, para que avisos continuem visíveis enquanto ele está aberto.
+        self.main_overlay = Gtk.Overlay()
+        self.main_overlay.set_child(self.split_box)
+        # Véu de "solte aqui" primeiro: o painel de comandos deve ficar por cima.
+        self.main_overlay.add_overlay(self.drop_zone.overlay)
+        self.command_palette = CommandPalette(self)
+        self.main_overlay.add_overlay(self.command_palette)
+
+        self.toast_overlay = Adw.ToastOverlay()
+        self.toast_overlay.set_child(self.main_overlay)
+        self.toolbar_view.set_content(self.toast_overlay)
+        self.set_content(self.toolbar_view)
+
+    def _install_key_controller(self) -> None:
+        """Instala os atalhos declarativos da aplicação e o handler de Escape."""
+        self._install_app_shortcuts()
+
+        key_ctrl = Gtk.EventControllerKey()
+        key_ctrl.connect("key-pressed", self._on_key_pressed)
+        self.add_controller(key_ctrl)
+
+    def _install_app_shortcuts(self) -> None:
+        """Registra os atalhos de `APP_SHORTCUTS` via Gtk.ShortcutController.
+
+        Antes as combinações eram comparadas manualmente contra keyvals; agora vêm
+        de um registro único em `core.shortcuts`, reutilizável e documentável.
+        """
+        handlers = {
+            "app.quit": self._quit_application,
+            "app.toggle-live-voice": self.toggle_live_voice,
+            "app.toggle-sidebar": self.toggle_sidebar,
+            "app.new-topic": self._on_new_topic,
+            "app.toggle-pin": self._on_toggle_pin,
+            "app.command-palette": self._open_command_palette,
+            "app.export-conversation": self.export_conversation,
+            "app.undo-action": self._on_undo_shortcut,
+        }
+
+        controller = Gtk.ShortcutController()
+        # Escopo GLOBAL garante que os atalhos funcionem mesmo com o foco no campo de texto
+        controller.set_scope(Gtk.ShortcutScope.GLOBAL)
+
+        for shortcut in APP_SHORTCUTS:
+            handler = handlers.get(shortcut.name)
+            if handler is None:
+                continue
+            trigger = Gtk.ShortcutTrigger.parse_string(shortcut.accelerator)
+            if trigger is None:
+                logger.warning("Atalho inválido ignorado: %s", shortcut.accelerator)
+                continue
+            action = Gtk.CallbackAction.new(self._make_shortcut_callback(handler))
+            controller.add_shortcut(Gtk.Shortcut.new(trigger, action))
+
+        self.app_shortcut_controller = controller
+        self.add_controller(controller)
+
+    @staticmethod
+    def _make_shortcut_callback(handler):
+        """Envolve o handler para o CallbackAction.
+
+        Se o handler devolver ``False``, o atalho é considerado não tratado e o
+        evento segue para o widget focado — é o que permite ao Ctrl+K conviver com
+        o atalho de edição de texto do GTK.
+        """
+        def invoke(_widget, _args):
+            result = handler()
+            return True if result is None else bool(result)
+        return invoke
+
+    @staticmethod
+    def _quit_application() -> None:
+        app = Adw.Application.get_default()
+        if app:
+            app.quit()
+
+    def _on_key_pressed(self, _ctrl, keyval, _keycode, state) -> bool:
+        """Mantém apenas o Escape no controlador de teclas, por sua lógica em cascata."""
+        if keyval == Gdk.KEY_Escape:
+            return self._handle_escape()
+        return False
+
+    def _handle_escape(self) -> bool:
+        """Esc fecha primeiro o que estiver aberto; só esconde a janela por último.
+
+        A versão anterior fechava a janela mesmo com um popover aberto, descartando
+        menus sem intenção do usuário.
+        """
+        if self.command_palette.is_open:
+            self.command_palette.close()
+            return True
+
+        if self.live_client and self.live_client.is_active():
+            self.stop_live_voice()
+            return True
+
+        if self._close_open_popovers():
+            return True
+
+        if self.entry.get_text():
+            self.entry.set_text("")
+            return True
+
+        if self.sidebar.search.get_text():
+            self.sidebar.search.set_text("")
+            return True
+
+        self.set_visible(False)
+        return True
+
+    def _close_open_popovers(self) -> bool:
+        """Fecha qualquer popover visível ancorado nos botões da interface."""
+        closed = False
+        for button in (
+            self.prompt_bar.vision_btn,
+            self.prompt_bar.clipboard_btn,
+            self.header.fence_menu_btn,
+            self.history_btn,
+        ):
+            popover = button.get_popover() if isinstance(button, Gtk.MenuButton) else None
+            if popover and popover.get_visible():
+                popover.popdown()
+                closed = True
+        return closed
+
+    # ------------------------------------------------------------------
+    # Painel de comandos (Ctrl+K)
+    # ------------------------------------------------------------------
+    def _open_command_palette(self) -> bool:
+        """Abre (ou fecha) o painel de comandos.
+
+        Devolve ``False`` quando o foco está num campo de texto: o GTK usa Ctrl+K
+        para apagar até o fim da linha, e retornar False deixa o evento seguir
+        para o widget focado em vez de roubar a combinação.
+        """
+        if self.command_palette.is_open:
+            self.command_palette.close()
+            return True
+
+        focus = self.get_focus()
+        if isinstance(focus, (Gtk.Editable, Gtk.TextView)):
+            return False
+
+        self.command_palette.open()
+        return True
+
+    def palette_commands(self) -> list[PaletteCommand]:
+        """Comandos oferecidos no painel. Reconstruído a cada abertura."""
+        accels = {s.name: s.accelerator for s in APP_SHORTCUTS}
+
+        def acc(name: str) -> str:
+            return accels.get(name, "")
+
+        commands = [
+            PaletteCommand(
+                "app.new-topic", "Nova conversa", "Começar um tópico limpo",
+                "list-add-symbolic", acc("app.new-topic"), ("limpar", "novo", "chat"),
+            ),
+            PaletteCommand(
+                "app.toggle-sidebar", "Mostrar/ocultar conversas", "Alterna a barra lateral",
+                "sidebar-show-symbolic", acc("app.toggle-sidebar"), ("histórico", "lateral"),
+            ),
+            PaletteCommand(
+                "app.toggle-pin", "Fixar/desafixar conversa", "Mantém o tópico atual no topo",
+                "view-pin-symbolic", acc("app.toggle-pin"), ("pin", "fixar"),
+            ),
+            PaletteCommand(
+                "app.toggle-live-voice", "Conversa por voz ao vivo", "Inicia ou encerra o Gemini Live",
+                "audio-input-microphone-symbolic", acc("app.toggle-live-voice"), ("voz", "microfone", "live"),
+            ),
+            PaletteCommand(
+                "app.capture-area", "Recortar área da tela", "Analisa um recorte com a IA",
+                "edit-cut-symbolic", "", ("screenshot", "print", "captura", "recorte"),
+            ),
+            PaletteCommand(
+                "app.analyze-clipboard", "Analisar conteúdo copiado", "Usa o texto da área de transferência",
+                "edit-paste-symbolic", "", ("colar", "clipboard", "cópia"),
+            ),
+            PaletteCommand(
+                "app.toggle-dark-mode", "Alternar modo escuro", "Muda o tema do sistema",
+                "weather-clear-night-symbolic", "", ("tema", "escuro", "claro", "dark"),
+            ),
+            PaletteCommand(
+                "app.copy-answer", "Copiar última resposta", "Copia a resposta do assistente",
+                "edit-copy-symbolic", "", ("copiar", "clipboard"),
+            ),
+            PaletteCommand(
+                "app.export-conversation", "Exportar conversa (.md)", "Salva a conversa em Markdown",
+                "document-save-symbolic", acc("app.export-conversation"),
+                ("exportar", "salvar", "markdown", "md", "arquivo"),
+            ),
+            PaletteCommand(
+                "app.open-settings", "Preferências", "Provedor de IA e chaves",
+                "preferences-system-symbolic", "", ("configurações", "chave", "api", "modelo"),
+            ),
+            PaletteCommand(
+                "app.clear-history", "Limpar todo o histórico", "Apaga as conversas salvas",
+                "user-trash-symbolic", "", ("apagar", "excluir", "lixeira"),
+            ),
+            PaletteCommand(
+                "app.quit", "Sair do Zorin Copilot", "",
+                "application-exit-symbolic", acc("app.quit"), ("fechar", "encerrar"),
+            ),
+        ]
+
+        # Só aparece quando faz sentido: comando que não tem efeito polui a busca.
+        undo_stack = getattr(self.executor, "undo_stack", None)
+        undo_entry = undo_stack.peek() if undo_stack is not None else None
+        if undo_entry is not None:
+            commands.append(
+                PaletteCommand(
+                    "app.undo-action", f"Desfazer: {undo_entry.label}",
+                    "Reverte a última ação reversível",
+                    "edit-undo-symbolic", acc("app.undo-action"),
+                    ("desfazer", "voltar", "undo", "ctrl+z"),
+                )
+            )
+        if self.attachments:
+            commands.append(
+                PaletteCommand(
+                    "app.clear-attachments", "Remover anexos do chat",
+                    f"{len(self.attachments)} arquivo(s) em contexto",
+                    "edit-clear-symbolic", "", ("anexo", "arquivo", "remover", "limpar"),
+                )
+            )
+        return commands
+
+    def _palette_handlers(self) -> dict[str, object]:
+        """Mapa nome -> callable. Separado para poder ser verificado por testes."""
+        return {
+            "app.new-topic": self._on_new_topic,
+            "app.toggle-sidebar": self.toggle_sidebar,
+            "app.toggle-pin": self._on_toggle_pin,
+            "app.toggle-live-voice": self.toggle_live_voice,
+            "app.capture-area": lambda: self._start_screen_capture(interactive=True),
+            "app.analyze-clipboard": lambda: self._trigger_prompt("analisar_copiado"),
+            "app.toggle-dark-mode": lambda: self._trigger_prompt("ativar modo escuro"),
+            "app.copy-answer": self._on_copy_answer,
+            "app.export-conversation": self.export_conversation,
+            "app.undo-action": self.undo_last_action,
+            "app.clear-attachments": self.clear_attachments,
+            "app.open-settings": self._open_settings,
+            "app.clear-history": self.sidebar.clear_history,
+            "app.quit": self._quit_application,
+        }
+
+    def run_palette_command(self, command: PaletteCommand) -> None:
+        """Executa o comando escolhido no painel."""
+        handler = self._palette_handlers().get(command.name)
+        if handler is None:
+            logger.warning("Comando do painel sem handler: %s", command.name)
+            return
+        handler()
+
+    def palette_closed(self) -> None:
+        """Devolve o foco ao campo de prompt depois de fechar o painel."""
+        self.entry.grab_focus()
+
+    # ------------------------------------------------------------------
+    # Compatibilidade de API (usada por testes e código legado)
+    # ------------------------------------------------------------------
+    @property
+    def window_title(self) -> Adw.WindowTitle:
+        return self.header.window_title
+
+    @property
+    def sidebar_revealer(self) -> Gtk.Revealer:
+        return self.sidebar.revealer
+
+    @property
+    def sidebar_search(self) -> Gtk.SearchEntry:
+        return self.sidebar.search
+
+    @property
+    def history_listbox(self) -> Gtk.ListBox:
+        return self.sidebar.history_listbox
+
+    @property
+    def clear_history_btn(self) -> Gtk.Button:
+        return self.sidebar.clear_history_btn
+
+    @property
+    def sidebar_toggle_btn(self) -> Gtk.Button:
+        return self.header.sidebar_toggle_btn
+
+    @property
+    def new_chat_btn(self) -> Gtk.Button:
+        return self.header.new_chat_btn
+
+    @property
+    def voice_call_btn(self) -> Gtk.Button:
+        return self.header.voice_call_btn
+
+    @property
+    def status_badge_btn(self) -> Gtk.Button:
+        return self.header.status_badge_btn
+
+    @property
+    def status_badge(self) -> Gtk.Label:
+        return self.header.status_badge
+
+    @property
+    def fence_menu_btn(self) -> Gtk.MenuButton:
+        return self.header.fence_menu_btn
+
+    @property
+    def fence_lbl(self) -> Gtk.Label:
+        return self.header.fence_lbl
+
+    @property
+    def chat_stream_box(self) -> Gtk.Box:
+        return self.chat_stream.stream_box
+
+    @property
+    def chat_scrolled(self) -> Gtk.ScrolledWindow:
+        return self.chat_stream.scrolled
+
+    @property
+    def welcome_box(self) -> Gtk.Box:
+        return self.chat_stream.welcome_box
+
+    @property
+    def prompt_bar_box(self) -> Gtk.Box:
+        return self.prompt_bar.prompt_bar_box
+
+    @property
+    def app_preview_revealer(self) -> Gtk.Revealer:
+        return self.prompt_bar.app_preview_revealer
+
+    @property
+    def vision_preview_box(self) -> Gtk.Box:
+        return self.vision.preview_box
+
+    @property
+    def vision_btn(self) -> Gtk.MenuButton:
+        return self.prompt_bar.vision_btn
+
+    @property
+    def clipboard_btn(self) -> Gtk.MenuButton:
+        return self.prompt_bar.clipboard_btn
+
+    @property
+    def bottom_voice_btn(self) -> Gtk.Button:
+        return self.prompt_bar.bottom_voice_btn
+
+    @property
+    def submit_btn(self) -> Gtk.Button:
+        return self.prompt_bar.submit_btn
+
+    @property
+    def spinner(self) -> Gtk.Spinner:
+        return self.prompt_bar.spinner
+
+    # Delegações de comportamento
+    def toggle_sidebar(self, _btn: Gtk.Button | None = None) -> None:
+        """Alterna a visibilidade da barra lateral de conversas."""
+        self.sidebar.toggle()
+
+    def _populate_sidebar_history(self, filter_query: str = "") -> None:
+        self.sidebar.populate(filter_query=filter_query)
+
+    def _on_sidebar_search_changed(self, entry: Gtk.SearchEntry) -> None:
+        self.sidebar._on_search_changed(entry)
+
+    def _on_history_row_activated(self, _listbox, row) -> None:
+        self.sidebar._on_row_activated(_listbox, row)
+
+    def _on_delete_topic(self, topic_id: str) -> None:
+        self.sidebar.on_delete_topic(topic_id)
+
+    def _on_clear_all_history(self, _btn: Gtk.Button) -> None:
+        self.sidebar._on_clear_all_history(_btn)
+
+    def _rebuild_chat_stream(self) -> None:
+        self.chat_stream.rebuild()
+
+    def _create_turn_widget(self, turn, plan=None, image_bytes=None, is_pending=False):
+        return self.chat_stream.create_turn_widget(
+            turn, plan=plan, image_bytes=image_bytes, is_pending=is_pending
+        )
+
+    def _create_action_row(self, action, turn=None, index=0):
+        return self.chat_stream.create_action_row(action, turn=turn, index=index)
+
+    def _scroll_to_bottom(self) -> None:
+        self.chat_stream.scroll_to_bottom()
+
+    def _update_provider_badge(self) -> None:
+        self.header.update_provider_badge()
+        # Mantém a barra de status sincronizada quando o provedor/modelo muda.
+        if getattr(self, "status_bar", None) is not None:
+            self.status_bar.refresh_model()
+            self.status_bar.refresh_tokens()
+
+    def _build_fence_popover(self) -> None:
+        self.header.build_fence_popover()
+
+    def _on_select_fence_monitor(self, monitor_idx: int, popover: Gtk.Popover) -> None:
+        self.header.on_select_fence_monitor(monitor_idx, popover)
+
+    def _on_select_all_monitors(self, popover: Gtk.Popover) -> None:
+        self.header.on_select_all_monitors(popover)
+
+    def _on_toggle_kill_switch(self, popover: Gtk.Popover) -> None:
+        self.header.on_toggle_kill_switch(popover)
+
+    def _update_app_preview(self, text: str) -> None:
+        self.prompt_bar._update_app_preview(text)
+
+    def _on_quick_launch_app(self, _btn: Gtk.Button) -> None:
+        self.prompt_bar._on_quick_launch_app(_btn)
+
+    def _on_submit(self, _widget: Gtk.Widget) -> None:
+        self.prompt_bar.submit(_widget)
+
+    def _on_entry_changed(self, entry: Gtk.Entry) -> None:
+        self.prompt_bar._on_entry_changed(entry)
+
+    def _render_active_vision_thumbnail(
+        self, image_bytes: bytes, is_area: bool = True, is_clipboard: bool = False
+    ) -> None:
+        self.vision.render_thumbnail(image_bytes, is_area=is_area, is_clipboard=is_clipboard)
+
+    def _clear_active_vision(self, _btn: Gtk.Button | None = None) -> None:
+        self.vision.clear(_btn)
+
+    def _start_screen_capture(self, interactive: bool = True, direct_mode: bool = False) -> None:
+        self.vision.start_capture(interactive=interactive, direct_mode=direct_mode)
+
+    def _on_capture_finished(
+        self, success, image_bytes, mode, prompt_typed, is_area, direct_mode=False
+    ) -> bool:
+        return self.vision._on_capture_finished(
+            success, image_bytes, mode, prompt_typed, is_area, direct_mode
+        )
+
+    # ------------------------------------------------------------------
+    # Ciclo de vida e HUD
+    # ------------------------------------------------------------------
     def _on_close_request(self, _win) -> bool:
-        """Em modo HUD, fecha a janela ocultando-a da tela sem matar o processo em segundo plano."""
+        """Em modo HUD, oculta a janela sem matar o processo em segundo plano."""
         if self.live_client and self.live_client.is_active():
             self.stop_live_voice()
         self.set_visible(False)
@@ -238,132 +715,460 @@ class CopilotWindow(Adw.ApplicationWindow):
         else:
             self.summon_hud()
 
-    def toggle_sidebar(self, _btn: Gtk.Button | None = None) -> None:
-        """Alterna a visibilidade da barra lateral de conversas."""
-        is_revealed = self.sidebar_revealer.get_reveal_child()
-        self.sidebar_revealer.set_reveal_child(not is_revealed)
-        if not is_revealed:
-            self._populate_sidebar_history(filter_query=self.sidebar_search.get_text().strip())
+    def show_toast(self, message: str) -> None:
+        """Exibe uma notificação flutuante elegante na janela."""
+        self.toast_overlay.add_toast(Adw.Toast.new(message))
 
-    def _build_fence_popover(self) -> None:
-        """Constrói o menu suspenso de seleção de telas e Kill Switch."""
-        popover = Gtk.Popover()
-        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        vbox.set_margin_top(8)
-        vbox.set_margin_bottom(8)
-        vbox.set_margin_start(8)
-        vbox.set_margin_end(8)
+    # ------------------------------------------------------------------
+    # Configurações
+    # ------------------------------------------------------------------
+    def _open_settings(self, _btn: Gtk.Button | None = None) -> None:
+        dialog = PreferencesDialog(self, on_saved=self._on_config_saved)
+        dialog.present(self)
 
-        title = Gtk.Label(label="<b>Cerca de Proteção Espacial</b>", use_markup=True, xalign=0)
-        title.add_css_class("caption")
-        title.set_margin_bottom(4)
-        vbox.append(title)
+    def _on_config_saved(self, new_config: CopilotConfig) -> None:
+        self.config = new_config
+        self.engine.reload_config(new_config)
+        self.header.update_provider_badge()
+        self._reconfigure_wake_word()
 
-        for m in self.fence.monitors:
-            suffix = " (Principal)" if m.is_primary else " (Secundária)"
-            row_btn = Gtk.Button(label=f"🖥️ {m.name}{suffix}")
-            row_btn.add_css_class("flat")
-            idx = m.index
-            row_btn.connect("clicked", lambda _, i=idx, pop=popover: self._on_select_fence_monitor(i, pop))
-            vbox.append(row_btn)
+    # ------------------------------------------------------------------
+    # Sugestões rápidas
+    # ------------------------------------------------------------------
+    def _open_compare(self, anchor_turn=None) -> None:
+        """Abre o diálogo de comparação side-by-side de respostas (item #5)."""
+        dlg = CompareResponsesDialog(self, anchor_turn)
+        dlg.present(self)
 
-        all_btn = Gtk.Button(label="🌐 Todas as Telas (Livre)")
-        all_btn.add_css_class("flat")
-        all_btn.connect("clicked", lambda _, pop=popover: self._on_select_all_monitors(pop))
-        vbox.append(all_btn)
+    def _trigger_prompt(self, text: str) -> None:
+        """Dispara um prompt ou ação a partir de um chip de sugestão rápida."""
+        if text == "voz_ao_vivo":
+            self.toggle_live_voice()
+            return
+        if text == "recortar_area":
+            self._start_screen_capture(interactive=True)
+            return
+        if text == "capturar_tela":
+            self._start_screen_capture(interactive=False)
+            return
+        if text == "analisar_copiado":
+            self.entry.set_text("\U0001f4cb Analisar conteúdo da área de transferência")
+            self.prompt_bar.submit(self.entry)
+            return
+        self.entry.set_text(text)
+        self.prompt_bar.submit(self.entry)
 
-        sep = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
-        sep.set_margin_top(4)
-        sep.set_margin_bottom(4)
-        vbox.append(sep)
+    # ------------------------------------------------------------------
+    # Ciclo de uma mensagem
+    # ------------------------------------------------------------------
+    def _on_plan_ready(
+        self, plan: ActionPlan, prompt_text: str = "", attached_image: bytes | None = None
+    ) -> bool:
+        """Recebe o plano gerado pela IA e substitui o indicador de carregamento pelo resultado."""
+        self._is_busy = False
+        self.prompt_bar.set_busy(False)
+        self.current_plan = plan
+        self.chat_stream.welcome_box.set_visible(False)
 
-        kill_btn = Gtk.Button(label="🛑 Parada de Emergência (Kill Switch)")
-        kill_btn.add_css_class("destructive-action")
-        kill_btn.add_css_class("pill")
-        kill_btn.connect("clicked", lambda _, pop=popover: self._on_toggle_kill_switch(pop))
-        vbox.append(kill_btn)
+        if self._pending_turn_box and self._pending_turn_box.get_parent() is self.chat_stream.stream_box:
+            self.chat_stream.stream_box.remove(self._pending_turn_box)
+            self._pending_turn_box = None
 
-        popover.set_child(vbox)
-        self.fence_menu_btn.set_popover(popover)
+        explanation_text = plan.thought.strip()
+        if not explanation_text and plan.actions:
+            explanation_text = "Executei a ação solicitada no desktop."
 
-    def _on_select_fence_monitor(self, monitor_idx: int, popover: Gtk.Popover) -> None:
-        popover.popdown()
-        ok = self.fence.set_active_monitor(monitor_idx)
-        if ok:
-            mon = self.fence.get_active_monitor()
-            name = mon.name if mon else f"Monitor {monitor_idx}"
-            self.fence_lbl.set_text(name)
-            if self.live_client:
-                self.live_client.fence = self.fence
-                self.live_client.input_driver.fence = self.fence
-            self.show_toast(f"🖥️ Cerca espacial fixada em: {name}")
+        # O plano é gravado no turno para que os botões de ação continuem
+        # disponíveis depois de um `rebuild()` (troca de tópico, undo) e após
+        # reabrir o app — não apenas enquanto for a última resposta.
+        turn = self.session.record_turn(prompt=prompt_text, answer=explanation_text, plan=plan)
+        self._save_current_session()
+        self._update_pin_ui()
 
-    def _on_select_all_monitors(self, popover: Gtk.Popover) -> None:
-        popover.popdown()
-        self.fence.set_all_monitors()
-        self.fence_lbl.set_text("Todas as Telas")
-        if self.live_client:
-            self.live_client.fence = self.fence
-            self.live_client.input_driver.fence = self.fence
-        self.show_toast("🌐 Cerca espacial expandida para todas as telas.")
+        self.chat_stream.stream_box.append(
+            self.chat_stream.create_turn_widget(turn, plan=plan, image_bytes=attached_image)
+        )
 
-    def _on_toggle_kill_switch(self, popover: Gtk.Popover) -> None:
-        popover.popdown()
-        if self.fence.is_emergency_stopped:
-            self.fence.reset_emergency_stop()
-            mon = self.fence.get_active_monitor()
-            self.fence_lbl.set_text(mon.name if mon else "AOC 27\"")
-            self.show_toast("✓ Parada de emergência desativada.")
-        else:
-            self.fence.trigger_emergency_stop()
-            self.fence_lbl.set_text("🛑 BLOQUEADO")
-            self.show_toast("🛑 KILL SWITCH ATIVADO: Automações suspensas.")
+        if self.session.title:
+            self.window_title.set_subtitle(self.session.title)
 
+        self.sidebar.populate(filter_query=self.sidebar.search.get_text().strip())
+        self.chat_stream.scroll_to_bottom()
+        self.entry.grab_focus()
+
+        # Consumo de tokens acumulado nesta resposta (item #2 e #9).
+        self.header.refresh_token_usage()
+        self.status_bar.refresh_tokens()
+        return GLib.SOURCE_REMOVE
+
+    def _on_copy_answer(self, _btn: Gtk.Button) -> None:
+        text = self._raw_answer_text or self.answer_label.get_text()
+        if not text:
+            return
+        display = Gdk.Display.get_default()
+        if display:
+            display.get_clipboard().set(text)
+            self.show_toast("✓ Resposta copiada para a área de transferência!")
+
+    def _on_copy_ocr_text(self, _btn: Gtk.Button) -> None:
+        ocr_text = getattr(self, "_current_ocr_text", None)
+        if not ocr_text:
+            return
+        from ..core.clipboard import ClipboardService
+        if ClipboardService.set_text(ocr_text):
+            self.show_toast("Texto copiado para a área de transferência!")
+
+    # ------------------------------------------------------------------
+    # Desfazer ações (Ctrl+Z)
+    # ------------------------------------------------------------------
+    def execute_plan_with_undo(
+        self,
+        plan: ActionPlan,
+        *,
+        ui_key: str | None = None,
+        on_undone=None,
+    ) -> list[ExecutionReport]:
+        """Executa o plano e oferece desfazer se alguma ação for reversível.
+
+        Compara o topo da pilha por identidade, não por tamanho: com a pilha
+        cheia um `push` descarta a mais antiga e o tamanho não muda.
+        """
+        stack = getattr(self.executor, "undo_stack", None)
+        if stack is None:
+            # Executor sem suporte a desfazer (ou substituído por um duplo em
+            # teste): executa normalmente, só não oferece o botão.
+            return self.executor.execute_plan(plan, dry_run=False)
+
+        top_before = stack.peek()
+        reports = self.executor.execute_plan(plan, dry_run=False)
+        top_after = stack.peek()
+
+        if top_after is not None and top_after is not top_before:
+            top_after.ui_key = ui_key
+            top_after.on_undone = on_undone
+            self._offer_undo(top_after)
+        return reports
+
+    def _offer_undo(self, entry: UndoEntry) -> None:
+        """Toast com botão "Desfazer" — o jeito GTK de não interromper o fluxo."""
+        toast = Adw.Toast.new(f"✓ {entry.label}")
+        toast.set_button_label("Desfazer")
+        # Mais tempo que o padrão: decidir se quer desfazer leva alguns segundos.
+        toast.set_timeout(10)
+        toast.connect("button-clicked", lambda *_: self.undo_last_action())
+        self.toast_overlay.add_toast(toast)
+
+    def undo_last_action(self, *_args) -> None:
+        """Reverte a ação reversível mais recente e avisa o resultado."""
+        stack = getattr(self.executor, "undo_stack", None)
+        if stack is None or not len(stack):
+            self.show_toast("Nada para desfazer.")
+            return
+
+        ok, message, entry = stack.undo()
+        if entry is not None and entry.ui_key and entry.on_undone is None:
+            # Sem hook de repintura, o histórico ainda assim fica correto.
+            self.chat_stream.outcomes.record(
+                entry.ui_key, ActionOutcome(success=ok, message=message, undone=ok)
+            )
+        self.show_toast(f"{'↩' if ok else '✗'} {message}")
+
+    def _on_undo_shortcut(self, *_args) -> bool:
+        """`Ctrl+Z` desfaz a ação — mas não rouba o undo de texto do campo.
+
+        Devolve False com o foco num campo editável, deixando o evento seguir
+        para o widget (mesma regra do Ctrl+K).
+        """
+        focus = self.get_focus()
+        if isinstance(focus, (Gtk.Editable, Gtk.TextView)):
+            return False
+        self.undo_last_action()
+        return True
+
+    # ------------------------------------------------------------------
+    # Exportação da conversa (Markdown)
+    # ------------------------------------------------------------------
+    def _export_metadata(self) -> tuple[str, str]:
+        """(provedor, modelo) ativos, para o frontmatter do arquivo exportado."""
+        config = self.config
+        provider = getattr(config, "provider", "") or ""
+        model = {
+            "gemini": getattr(config, "gemini_model", ""),
+            "ollama": getattr(config, "ollama_model", ""),
+            "openai": getattr(config, "openai_model", ""),
+        }.get(provider, "")
+        return provider, (model or "")
+
+    def build_conversation_markdown(self) -> str:
+        """Texto Markdown da conversa atual ("" se não houver nada a exportar)."""
+        provider, model = self._export_metadata()
+        return render_conversation_markdown(
+            self.session, provider=provider, model=model
+        )
+
+    def export_conversation(self, *_args) -> None:
+        """Abre o diálogo "salvar como" e grava a conversa em `.md`.
+
+        O `Gtk.FileDialog` é assíncrono e não bloqueia a interface — diferente do
+        antigo `Gtk.FileChooserDialog`, que travava o loop principal.
+        """
+        if not exportable_turns(self.session):
+            self.show_toast("Nada para exportar: a conversa está vazia.")
+            return
+
+        dialog = Gtk.FileDialog()
+        dialog.set_title("Exportar conversa como Markdown")
+        dialog.set_initial_name(suggest_filename(self.session))
+
+        md_filter = Gtk.FileFilter()
+        md_filter.set_name("Markdown (*.md)")
+        md_filter.add_pattern("*.md")
+        dialog.set_default_filter(md_filter)
+
+        dialog.save(self, None, self._on_export_target_chosen, None)
+
+    def _on_export_target_chosen(
+        self, dialog: Gtk.FileDialog, result: Gio.AsyncResult
+    ) -> None:
+        """Conclusão do diálogo de salvar: escreve o arquivo escolhido."""
+        try:
+            target = dialog.save_finish(result)
+        except GLib.Error as err:
+            if _is_dialog_dismissed(err):
+                return
+            logger.warning("Falha ao escolher destino da exportação: %s", err)
+            self.show_toast("Não foi possível escolher onde salvar o arquivo.")
+            return
+
+        if target is None:
+            return
+
+        markdown = self.build_conversation_markdown()
+        if not markdown:
+            self.show_toast("Nada para exportar: a conversa está vazia.")
+            return
+
+        path = target.get_path()
+        try:
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(markdown)
+        except OSError as err:
+            logger.warning("Falha ao gravar a exportação em %s: %s", path, err)
+            self.show_toast("Não foi possível gravar o arquivo.")
+            return
+
+        self.show_toast(f"✓ Conversa exportada para {os.path.basename(path)}")
+
+    # ------------------------------------------------------------------
+    # Anexos (arrastar e soltar)
+    # ------------------------------------------------------------------
+    def attach_files(self, paths: list[str]) -> None:
+        """Anexa arquivos soltos na janela.
+
+        Imagens vão para o canal multimodal (há um slot só, como na captura de
+        tela); texto e PDF entram como contexto do prompt, com chip removível.
+        """
+        from dataclasses import replace as _replace
+
+        resolved = load_attachments(paths)
+        images = [a for a in resolved if a.ok and a.kind is AttachmentKind.IMAGE]
+        docs = [a for a in resolved if a.ok and a.kind in (AttachmentKind.TEXT, AttachmentKind.PDF)]
+        rejected = [a for a in resolved if not a.ok]
+
+        # Soltar o mesmo arquivo duas vezes duplicaria o bloco de contexto — e o
+        # usuário não teria como saber. Chips repetidos são o bug, não o recurso.
+        known = {os.path.realpath(a.path) for a in self.attachments}
+        fresh: list[Attachment] = []
+        for att in docs:
+            key = os.path.realpath(att.path)
+            if key in known:
+                rejected.append(_replace(att, error="já anexado"))
+                continue
+            known.add(key)
+            fresh.append(att)
+
+        if fresh:
+            self.attachments.extend(fresh)
+
+        image = images[0] if images else None
+        if image is not None:
+            self._attach_image_file(image)
+            for extra in images[1:]:
+                rejected.append(_replace(extra, error="só uma imagem por vez"))
+
+        self.attachment_bar.refresh()
+        self.show_toast(self._describe_attachments(fresh, image, rejected))
+
+    def _attach_image_file(self, att: Attachment) -> None:
+        """Coloca a imagem solta no mesmo slot multimodal da captura de tela."""
+        if not att.data:
+            return
+        self._active_image_bytes = att.data
+        self._active_image_is_area = False
+        self._active_image_is_clipboard = False
+        self.vision.render_thumbnail(
+            att.data,
+            is_area=False,
+            is_clipboard=False,
+            label=f"\U0001f5bc️ Imagem anexada: {att.name}",
+        )
+        self.entry.set_placeholder_text(
+            "Faça uma pergunta sobre esta imagem ou pressione Enter..."
+        )
+
+    @staticmethod
+    def _describe_attachments(
+        docs: list[Attachment], image: Attachment | None, rejected: list[Attachment]
+    ) -> str:
+        """Frase do toast. Nomeia o primeiro problema: erro genérico não ajuda."""
+        parts = []
+        if image is not None:
+            parts.append(f"imagem {image.name} anexada")
+        if docs:
+            n = len(docs)
+            parts.append(f"{n} arquivo{'s' if n > 1 else ''} de texto anexado{'s' if n > 1 else ''}")
+        if rejected:
+            n = len(rejected)
+            first = rejected[0]
+            detail = f" ({first.error})" if n == 1 else ""
+            parts.append(f"{n} ignorado{'s' if n > 1 else ''}: {first.name}{detail}")
+        if not parts:
+            return "Nada para anexar."
+        return "✓ " + " · ".join(parts)
+
+    def clear_attachments(self, *_args) -> None:
+        """Remove todos os anexos de texto/PDF (não mexe na imagem ativa)."""
+        if not self.attachments:
+            self.show_toast("Nenhum anexo para remover.")
+            return
+        count = len(self.attachments)
+        self.attachments.clear()
+        self.attachment_bar.refresh()
+        self.show_toast(f"{count} anexo{'s' if count > 1 else ''} removido{'s' if count > 1 else ''}.")
+
+    # ------------------------------------------------------------------
+    # Sessão e histórico
+    # ------------------------------------------------------------------
+    def _save_current_session(self) -> None:
+        """Persiste a sessão atual no SQLite (auto-save estilo Gemini)."""
+        if not self.session.turns:
+            return
+        self.engine.memory.save_chat_topic(
+            topic_id=self.session.id,
+            title=self.session.title
+            or (self.session.turns[0].prompt[:50] if self.session.turns else "Nova Conversa"),
+            turns=[t.to_dict() for t in self.session.turns],
+            is_pinned=True,
+            created_at=self.session.created_at,
+        )
+
+    def _resume_topic(self, topic_id: str) -> None:
+        """Carrega e retoma uma conversa histórica com todo o seu fluxo de mensagens."""
+        if self.session.turns:
+            self._save_current_session()
+
+        topic_data = self.engine.memory.get_chat_topic(topic_id)
+        if not topic_data:
+            return
+
+        self.session.load_from_dict(topic_data)
+        self.window_title.set_subtitle(self.session.title or "Conversa retomada")
+        self.chat_stream.rebuild()
+        self.sidebar.populate(filter_query=self.sidebar.search.get_text().strip())
+        self.entry.grab_focus()
+        self.show_toast(f'Conversa "{self.session.title}" aberta!')
+
+    def _update_pin_ui(self) -> None:
+        """Atualiza estado visual da fixação de tópicos."""
+
+    def _on_toggle_pin(self, _btn: Gtk.Button | None = None) -> None:
+        """Alterna a fixação da conversa."""
+        self.session.toggle_pin()
+        if self.session.turns:
+            self._save_current_session()
+        self.sidebar.populate(filter_query=self.sidebar.search.get_text().strip())
+        self.show_toast("Conversa fixada no topo.")
+
+    def _on_new_topic(self, _btn: Gtk.Button | None = None) -> None:
+        """Inicia uma nova conversa limpa (Ctrl+N / Estilo Gemini)."""
+        if self.session.turns:
+            self._save_current_session()
+        self.session.reset_new()
+        self.vision.clear()
+        self.window_title.set_subtitle("Assistente Inteligente")
+        self.chat_stream.rebuild()
+        self.sidebar.populate(filter_query=self.sidebar.search.get_text().strip())
+        self.entry.set_text("")
+        self.entry.grab_focus()
+        self.show_toast("✨ Nova conversa iniciada!")
+
+    def _build_history_popover(self) -> None:
+        """Método de compatibilidade para histórico."""
+
+    def _populate_history_list(self) -> None:
+        """Método de compatibilidade."""
+        self.sidebar.populate()
+
+    # ------------------------------------------------------------------
+    # Voz ao vivo (Gemini Live)
+    # ------------------------------------------------------------------
     def toggle_live_voice(self, as_pill: bool = False) -> None:
-        """Alterna a ativação do modo de conversa de voz ao vivo."""
+        """Alterna a ativação do modo de conversa de voz ao vivo (Gemini Live)."""
         if self.live_client and self.live_client.is_active():
             self.stop_live_voice()
         else:
             self.start_live_voice(as_pill=as_pill)
 
-    def start_live_voice(self, as_pill: bool = False) -> None:
-        """Inicia o chat de voz contínua (Local Soberana ou Nuvem) em modo Pílula ou Janela Completa."""
+    def start_live_voice(self, initial_command: str = "", as_pill: bool = False) -> None:
+        """Inicia o chat de voz ao vivo com o Gemini Live ou Voz Local Soberana.
+
+        ``initial_command`` (Fase 4A): comando capturado junto à wake word,
+        enviado como primeiro turno de texto assim que a sessão conectar.
+        ``as_pill``: exibe em janela pílula estilo Dynamic Island em vez do HUD completo.
+        """
         use_local = (
             self.config.provider in ("local", "ollama", "hybrid")
             or not self.config.gemini_api_key.strip()
         )
 
-        if not use_local and not self.config.gemini_api_key.strip():
-            self.show_toast("Chave de API do Google Gemini necessária para voz em nuvem. Configure em ⚙️.")
-            self._open_settings(self.voice_call_btn)
-            return
-
-        if not self.live_client:
-            if use_local:
+        if use_local:
+            try:
                 self.live_client = LocalLiveVoiceClient(
                     config=self.config,
                     executor=self.executor,
                     memory=self.engine.memory,
-                    engine=self.engine,
                 )
                 toast_msg = "🎙️ Voz Local Soberana iniciada! Pode falar..."
-            else:
+            except Exception as exc:
+                if not self.config.gemini_api_key.strip():
+                    self.show_toast(f"Falha ao iniciar voz local: {exc}")
+                    return
+                use_local = False
+
+        if not use_local:
+            if not self.config.gemini_api_key.strip():
+                self.show_toast("Chave de API do Google Gemini necessária para voz ao vivo. Configure em ⚙️.")
+                self._open_settings()
+                return
+
+            if not self.live_client or not isinstance(self.live_client, GeminiLiveClient):
                 self.live_client = GeminiLiveClient(
                     config=self.config,
                     executor=self.executor,
                     memory=self.engine.memory,
                 )
-                toast_msg = "🎙️ Conversa ao vivo iniciada! Pode falar..."
-        else:
-            toast_msg = "🎙️ Conversa por voz iniciada! Pode falar..."
+            toast_msg = "🎙️ Conversa ao vivo iniciada! Pode falar..."
 
-        self.live_client.rag = self.rag
-        self.live_client.fence = self.fence
+        if hasattr(self.live_client, "rag"):
+            self.live_client.rag = self.rag
+        if hasattr(self.live_client, "fence"):
+            self.live_client.fence = self.fence
         if hasattr(self.live_client, "input_driver") and self.live_client.input_driver:
             self.live_client.input_driver.fence = self.fence
+        if initial_command and hasattr(self.live_client, "queue_initial_text"):
+            self.live_client.queue_initial_text(initial_command)
 
         if as_pill:
-            # Modo Pílula Flutuante Minimalista (Dynamic Island)
             if not self.voice_pill_window:
                 self.voice_pill_window = VoicePillWindow(
                     application=self.get_application(),
@@ -377,28 +1182,28 @@ class CopilotWindow(Adw.ApplicationWindow):
 
             self.voice_pill_window.present()
             self.live_client.start()
+            if self.wake_word_engine is not None:
+                self.wake_word_engine.pause()
             self.show_toast(toast_msg)
             return
 
-        # Modo Janela Completa (HUD)
         if self.voice_pill_window:
             self.voice_pill_window.set_visible(False)
 
-        if not self.live_voice_widget:
-            self.live_voice_widget = LiveVoiceWidget(
-                live_client=self.live_client,
-                on_close=self.stop_live_voice,
-            )
-            self.live_voice_revealer.set_child(self.live_voice_widget)
-        else:
-            self.live_voice_widget.live_client = self.live_client
-            self.live_voice_widget._connect_client_events()
-
+        self.live_voice_widget = LiveVoiceWidget(
+            live_client=self.live_client,
+            on_close=self.stop_live_voice,
+        )
+        self.live_voice_revealer.set_child(self.live_voice_widget)
         self.live_voice_revealer.set_reveal_child(True)
-        self.voice_call_btn.add_css_class("suggested-action")
-        self.bottom_voice_btn.add_css_class("suggested-action")
-        self.welcome_box.set_visible(False)
+        self.header.voice_call_btn.add_css_class("suggested-action")
+        self.prompt_bar.bottom_voice_btn.add_css_class("suggested-action")
+        self.chat_stream.welcome_box.set_visible(False)
         self.live_client.start()
+        # O microfone passa a ser do Gemini Live (pw-record): pausa a wake word
+        # para evitar conflito de captura e detecções espúrias da própria voz da IA.
+        if self.wake_word_engine is not None:
+            self.wake_word_engine.pause()
         self.show_toast(toast_msg)
 
     def _expand_from_pill(self) -> None:
@@ -417,9 +1222,9 @@ class CopilotWindow(Adw.ApplicationWindow):
             self.live_voice_widget._connect_client_events()
 
         self.live_voice_revealer.set_reveal_child(True)
-        self.voice_call_btn.add_css_class("suggested-action")
-        self.bottom_voice_btn.add_css_class("suggested-action")
-        self.welcome_box.set_visible(False)
+        self.header.voice_call_btn.add_css_class("suggested-action")
+        self.prompt_bar.bottom_voice_btn.add_css_class("suggested-action")
+        self.chat_stream.welcome_box.set_visible(False)
 
     def stop_live_voice(self) -> None:
         """Encerra a chamada de voz ao vivo e consolida a interação no chat ativo."""
@@ -428,36 +1233,40 @@ class CopilotWindow(Adw.ApplicationWindow):
         summary = self.live_client.get_session_summary() if self.live_client else {}
         if self.live_client:
             self.live_client.stop()
+        # Libera o microfone e volta a ouvir a palavra de ativação.
+        if self.wake_word_engine is not None:
+            self.wake_word_engine.resume()
         self.live_voice_revealer.set_reveal_child(False)
-        self.voice_call_btn.remove_css_class("suggested-action")
-        self.bottom_voice_btn.remove_css_class("suggested-action")
+        self.header.voice_call_btn.remove_css_class("suggested-action")
+        self.prompt_bar.bottom_voice_btn.remove_css_class("suggested-action")
 
-        # Se houve atividade durante a chamada, registra no fluxo da conversa ativa
         if summary.get("has_activity"):
             duration = summary.get("duration_sec", 0)
             actions = summary.get("actions_executed", [])
-            lines = [f"**🎙️ Sessão de Voz ao Vivo (Gemini Live)** • {duration}s de chamada\n"]
+            lines = [f"**\U0001f399️ Sessão de Voz ao Vivo (Gemini Live)** • {duration}s de chamada\n"]
             if actions:
                 lines.append("**Ações executadas no sistema:**")
                 for act in actions:
                     t_name = act.get("tool", "")
                     t_args = act.get("args", {})
                     if t_name == "launch_app":
-                        lines.append(f"- 🚀 Abriu o aplicativo **{t_args.get('app_name', '')}**")
+                        lines.append(f"- \U0001f680 Abriu o aplicativo **{t_args.get('app_name', '')}**")
                     elif t_name == "system_control":
-                        lines.append(f"- ⚙️ Controle do sistema: **{t_args.get('action', '')}** ({t_args.get('value', '')})")
+                        lines.append(
+                            f"- ⚙️ Controle do sistema: **{t_args.get('action', '')}** ({t_args.get('value', '')})"
+                        )
                     elif t_name == "open_url":
-                        lines.append(f"- 🌐 Abriu link: `{t_args.get('url', '')}`")
+                        lines.append(f"- \U0001f310 Abriu link: `{t_args.get('url', '')}`")
                     elif t_name == "capture_screen":
-                        lines.append("- 📸 Capturou a tela para inspeção visual")
+                        lines.append("- \U0001f4f8 Capturou a tela para inspeção visual")
                     elif t_name == "web_search":
-                        lines.append(f"- 🔍 Pesquisa na web: *{t_args.get('query', '')}*")
+                        lines.append(f"- \U0001f50d Pesquisa na web: *{t_args.get('query', '')}*")
                     elif t_name == "media_control":
-                        lines.append(f"- 🎵 Controle de mídia: **{t_args.get('action', '')}**")
+                        lines.append(f"- \U0001f3b5 Controle de mídia: **{t_args.get('action', '')}**")
                     elif t_name == "write_document":
-                        lines.append(f"- 📝 Salvou documento: `{t_args.get('filename', '')}`")
+                        lines.append(f"- \U0001f4dd Salvou documento: `{t_args.get('filename', '')}`")
                     elif t_name == "organize_directory":
-                        lines.append(f"- 📁 Organizou pasta: `{t_args.get('directory', 'Downloads')}`")
+                        lines.append(f"- \U0001f4c1 Organizou pasta: `{t_args.get('directory', 'Downloads')}`")
                     else:
                         lines.append(f"- ⚡ Executou ferramenta: `{t_name}`")
                 lines.append("")
@@ -466,24 +1275,29 @@ class CopilotWindow(Adw.ApplicationWindow):
 
             if summary.get("video_streamed"):
                 frames = summary.get("video_frames", 0)
-                lines.append(f"**🎥 Live Video:** Compartilhamento de tela contínuo ativo ({frames} frames analisados).\n")
+                lines.append(
+                    f"**\U0001f3a5 Live Video:** Compartilhamento de tela contínuo ativo "
+                    f"({frames} frames analisados).\n"
+                )
 
-            summary_text = "\n".join(lines).strip()
-            prompt_label = "🎙️🎥 Chamada de Voz e Tela ao Vivo" if summary.get("video_streamed") else "🎙️ Conversa de Voz ao Vivo"
-
-            turn = self.session.record_turn(prompt=prompt_label, answer=summary_text)
+            prompt_label = (
+                "\U0001f399️\U0001f3a5 Chamada de Voz e Tela ao Vivo"
+                if summary.get("video_streamed")
+                else "\U0001f399️ Conversa de Voz ao Vivo"
+            )
+            turn = self.session.record_turn(prompt=prompt_label, answer="\n".join(lines).strip())
             self._save_current_session()
             self._update_pin_ui()
 
-            # Renderiza o turno no fluxo de mensagens
-            self.welcome_box.set_visible(False)
-            turn_widget = self._create_turn_widget(turn)
-            self.chat_stream_box.append(turn_widget)
-            self._populate_sidebar_history()
-            self._scroll_to_bottom()
+            self.chat_stream.welcome_box.set_visible(False)
+            self.chat_stream.stream_box.append(
+                self.chat_stream.create_turn_widget(turn)
+            )
+            self.sidebar.populate()
+            self.chat_stream.scroll_to_bottom()
         else:
             if not self.session.turns:
-                self.welcome_box.set_visible(True)
+                self.chat_stream.welcome_box.set_visible(True)
 
         self.entry.grab_focus()
         self.show_toast("Conversa de voz encerrada.")
@@ -493,1629 +1307,10 @@ class CopilotWindow(Adw.ApplicationWindow):
             self.summon_hud()
 
     def trigger_direct_crop(self) -> None:
-        """Dispara imediatamente o recorte de área da tela a partir de atalho global (Super+Shift+S)."""
+        """Dispara o recorte de área da tela a partir do atalho global (Super+Shift+S)."""
         if self.get_visible():
             self.set_visible(False)
-        self._start_screen_capture(interactive=True, direct_mode=True)
-
-    def _clear_active_vision(self, _btn: Gtk.Button | None = None) -> None:
-        """Descarta o contexto visual ativo, retornando o chat para modo puramente textual."""
-        self._active_image_bytes = None
-        self._active_image_is_area = False
-        self._active_image_is_clipboard = False
-        self._current_ocr_text = None
-        self.vision_preview_box.set_visible(False)
-        self.entry.set_placeholder_text("Peça ao Zorin Copilot ou digite um comando...")
-        self.show_toast("Contexto visual descartado.")
-
-    def _render_active_vision_thumbnail(self, image_bytes: bytes, is_area: bool = True, is_clipboard: bool = False) -> None:
-        """Renderiza a miniatura visual no card de anexo acima da barra de entrada."""
-        try:
-            gbytes = GLib.Bytes.new(image_bytes)
-            texture = Gdk.Texture.new_from_bytes(gbytes)
-            self.vision_thumbnail.set_paintable(texture)
-            if is_clipboard:
-                header_label = "<b>📋 Imagem da Área de Transferência Anexada</b>"
-            elif is_area:
-                header_label = "<b>✂️ Recorte de Tela Anexado</b>"
-            else:
-                header_label = "<b>🖥️ Captura de Tela Inteira Anexada</b>"
-            self.vision_hdr_lbl.set_markup(header_label)
-            self.vision_active_badge.set_visible(True)
-            self.vision_preview_box.set_visible(True)
-        except Exception:
-            self.vision_preview_box.set_visible(False)
-
-    def _build_ui(self) -> None:
-        self.toolbar_view = Adw.ToolbarView()
-
-        # ---------------------------------------------------------------------
-        # HeaderBar nativa do Zorin OS / GNOME
-        # ---------------------------------------------------------------------
-        header = Adw.HeaderBar()
-        self.window_title = Adw.WindowTitle(title="Zorin Copilot", subtitle="Assistente Inteligente")
-        header.set_title_widget(self.window_title)
-
-        # Botão para alternar a barra lateral (Ctrl+H)
-        self.sidebar_toggle_btn = Gtk.Button.new_from_icon_name("sidebar-show-symbolic")
-        self.sidebar_toggle_btn.set_tooltip_text("Alternar barra lateral de conversas (Ctrl+H)")
-        self.sidebar_toggle_btn.add_css_class("flat")
-        self.sidebar_toggle_btn.add_css_class("circular")
-        self.sidebar_toggle_btn.add_css_class("glass-icon-btn")
-        self.sidebar_toggle_btn.connect("clicked", self.toggle_sidebar)
-        header.pack_start(self.sidebar_toggle_btn)
-
-        # Botão de Nova Conversa (Ctrl+N)
-        self.new_chat_btn = Gtk.Button.new_from_icon_name("list-add-symbolic")
-        self.new_chat_btn.set_tooltip_text("Nova Conversa (Ctrl+N)")
-        self.new_chat_btn.add_css_class("flat")
-        self.new_chat_btn.add_css_class("circular")
-        self.new_chat_btn.add_css_class("glass-icon-btn")
-        self.new_chat_btn.connect("clicked", lambda _: self._on_new_topic())
-        header.pack_start(self.new_chat_btn)
-
-        # Botão de Configurações
-        settings_btn = Gtk.Button.new_from_icon_name("preferences-system-symbolic")
-        settings_btn.set_tooltip_text("Configurações do Assistente e Chaves de IA")
-        settings_btn.add_css_class("flat")
-        settings_btn.add_css_class("circular")
-        settings_btn.add_css_class("glass-icon-btn")
-        settings_btn.connect("clicked", self._open_settings)
-
-        # Botão de Conversa por Voz ao Vivo (Header)
-        self.voice_call_btn = Gtk.Button.new_from_icon_name("audio-input-microphone-symbolic")
-        self.voice_call_btn.set_tooltip_text("Conversa por Voz ao Vivo (Gemini Live / Ctrl+M)")
-        self.voice_call_btn.add_css_class("flat")
-        self.voice_call_btn.add_css_class("circular")
-        self.voice_call_btn.add_css_class("glass-icon-btn")
-        self.voice_call_btn.connect("clicked", lambda _: self.toggle_live_voice())
-
-        # Botão indicador de IA no HeaderBar (clicável para abrir preferências)
-        self.status_badge_btn = Gtk.Button()
-        self.status_badge_btn.add_css_class("flat")
-        self.status_badge_btn.add_css_class("pill")
-        self.status_badge_btn.add_css_class("glass-pill")
-        self.status_badge_btn.set_tooltip_text("Clique para alterar modelo ou provedor de IA")
-        self.status_badge_btn.connect("clicked", self._open_settings)
-
-        self.status_badge = Gtk.Label()
-        self.status_badge.add_css_class("caption")
-        self.status_badge_btn.set_child(self.status_badge)
-
-        # Seletor de Cerca de Monitor / Tela Ativa (HeaderBar)
-        self.fence_menu_btn = Gtk.MenuButton()
-        self.fence_menu_btn.add_css_class("flat")
-        self.fence_menu_btn.add_css_class("pill")
-        self.fence_menu_btn.add_css_class("glass-pill")
-        self.fence_menu_btn.set_tooltip_text("Cerca Espacial: Monitor ativo para automações")
-
-        fence_btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        fence_icon = Gtk.Image.new_from_icon_name("video-display-symbolic")
-        fence_icon.set_pixel_size(14)
-        active_mon = self.fence.get_active_monitor()
-        mon_name_init = active_mon.name if active_mon else "AOC 27\""
-        self.fence_lbl = Gtk.Label(label=mon_name_init)
-        self.fence_lbl.add_css_class("caption")
-        fence_btn_box.append(fence_icon)
-        fence_btn_box.append(self.fence_lbl)
-        self.fence_menu_btn.set_child(fence_btn_box)
-        self._build_fence_popover()
-
-        # Ordem pack_end
-        header.pack_end(settings_btn)
-        header.pack_end(self.voice_call_btn)
-        header.pack_end(self.fence_menu_btn)
-        header.pack_end(self.status_badge_btn)
-
-        self.toolbar_view.add_top_bar(header)
-
-        # Atributos de compatibilidade
-        self.history_btn = Gtk.MenuButton()
-        self.history_popover = Gtk.Popover()
-        self.topic_revealer = Gtk.Revealer()
-        self.topic_info_lbl = Gtk.Label()
-        self.pin_btn = Gtk.Button()
-        self.pin_btn_label = Gtk.Label()
-        self.pin_btn_icon = Gtk.Image()
-        self.answer_group = Adw.PreferencesGroup()
-        self.answer_group.set_visible(False)
-        self.actions_group = Adw.PreferencesGroup()
-        self.actions_group.set_visible(False)
-        self.actions_box = Gtk.Box()
-        self.exec_status = Gtk.Label()
-        self.exec_all_btn = Gtk.Button()
-        self.copy_btn = Gtk.Button()
-        self.answer_label = Gtk.Label()
-
-        # Controlador de atalhos de teclado
-        key_ctrl = Gtk.EventControllerKey()
-        def on_key_pressed(_ctrl, keyval, _keycode, state):
-            is_ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
-            if is_ctrl and keyval in (Gdk.KEY_q, Gdk.KEY_Q):
-                app = self.get_application()
-                if app:
-                    app.quit()
-                return True
-            if is_ctrl and keyval in (Gdk.KEY_m, Gdk.KEY_M):
-                self.toggle_live_voice()
-                return True
-            if is_ctrl and keyval in (Gdk.KEY_h, Gdk.KEY_H):
-                self.toggle_sidebar()
-                return True
-            if is_ctrl and keyval in (Gdk.KEY_n, Gdk.KEY_N):
-                self._on_new_topic()
-                return True
-            if is_ctrl and keyval in (Gdk.KEY_p, Gdk.KEY_P):
-                self._on_toggle_pin()
-                return True
-            if keyval == Gdk.KEY_Escape:
-                if self.live_client and getattr(self.live_client, "video_streaming", False):
-                    self.live_client.panic_stop_video()
-                    if self.live_voice_widget:
-                        self.live_voice_widget._update_video_ui(False)
-                        self.live_voice_widget.subtitle_lbl.set_text("🛑 Transmissão de vídeo interrompida (Modo Pânico - Esc).")
-                    return True
-                if self.live_client and self.live_client.is_active():
-                    self.stop_live_voice()
-                    return True
-                if self.entry.get_text():
-                    self.entry.set_text("")
-                    return True
-                elif self.sidebar_search.get_text():
-                    self.sidebar_search.set_text("")
-                    return True
-                else:
-                    self.set_visible(False)
-                    return True
-            return False
-        key_ctrl.connect("key-pressed", on_key_pressed)
-        self.add_controller(key_ctrl)
-
-        # ---------------------------------------------------------------------
-        # Layout Principal Dividido: Barra Lateral (Esquerda) + Chat (Direita)
-        # ---------------------------------------------------------------------
-        self.split_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
-
-        # =====================================================================
-        # 1. BARRA LATERAL ESTILO GEMINI (Collapsible Sidebar)
-        # =====================================================================
-        self.sidebar_revealer = Gtk.Revealer()
-        self.sidebar_revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_RIGHT)
-        self.sidebar_revealer.set_transition_duration(200)
-        self.sidebar_revealer.set_reveal_child(True)
-
-        sidebar_panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        sidebar_panel.add_css_class("sidebar-panel")
-        sidebar_panel.set_size_request(260, -1)
-        sidebar_panel.set_hexpand(False)
-
-        # Topo da Sidebar: Título e Botão de Recolher
-        s_top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        s_title = Gtk.Label(label="<b>Conversas</b>", use_markup=True, xalign=0)
-        s_title.add_css_class("heading")
-        s_title.set_hexpand(True)
-        s_top.append(s_title)
-
-        s_close_btn = Gtk.Button.new_from_icon_name("pan-start-symbolic")
-        s_close_btn.set_tooltip_text("Recolher barra lateral (Ctrl+H)")
-        s_close_btn.add_css_class("flat")
-        s_close_btn.add_css_class("circular")
-        s_close_btn.add_css_class("glass-icon-btn")
-        s_close_btn.connect("clicked", self.toggle_sidebar)
-        s_top.append(s_close_btn)
-        sidebar_panel.append(s_top)
-
-        # Botão + Nova conversa com alto destaque
-        sidebar_new_btn = Gtk.Button()
-        sidebar_new_btn.add_css_class("card")
-        sidebar_new_btn.add_css_class("pill")
-        sidebar_new_btn.add_css_class("glass-card")
-        sidebar_new_btn.set_tooltip_text("Iniciar nova conversa limpa (Ctrl+N)")
-        sidebar_new_btn.connect("clicked", lambda _: self._on_new_topic())
-
-        s_new_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        s_new_box.set_margin_start(10)
-        s_new_box.set_margin_end(10)
-        s_new_box.set_margin_top(6)
-        s_new_box.set_margin_bottom(6)
-        s_new_icon = Gtk.Image.new_from_icon_name("list-add-symbolic")
-        s_new_icon.set_pixel_size(16)
-        s_new_box.append(s_new_icon)
-        s_new_lbl = Gtk.Label(label="<b>Nova conversa</b>", use_markup=True, xalign=0)
-        s_new_box.append(s_new_lbl)
-        sidebar_new_btn.set_child(s_new_box)
-        sidebar_panel.append(sidebar_new_btn)
-
-        # Campo de busca para filtrar conversas salvas
-        self.sidebar_search = Gtk.SearchEntry()
-        self.sidebar_search.set_placeholder_text("Pesquisar conversas...")
-        self.sidebar_search.connect("search-changed", self._on_sidebar_search_changed)
-        sidebar_panel.append(self.sidebar_search)
-
-        # Lista rolável de conversas
-        self.history_scrolled = Gtk.ScrolledWindow()
-        self.history_scrolled.set_vexpand(True)
-        self.history_scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-
-        self.history_listbox = Gtk.ListBox()
-        self.history_listbox.set_selection_mode(Gtk.SelectionMode.NONE)
-        self.history_listbox.connect("row-activated", self._on_history_row_activated)
-        self.history_scrolled.set_child(self.history_listbox)
-        sidebar_panel.append(self.history_scrolled)
-
-        # Rodapé da sidebar: Limpar histórico
-        self.clear_history_btn = Gtk.Button()
-        self.clear_history_btn.add_css_class("flat")
-        self.clear_history_btn.add_css_class("destructive-action")
-        self.clear_history_btn.set_tooltip_text("Limpar todas as conversas gravadas")
-        self.clear_history_btn.connect("clicked", self._on_clear_all_history)
-        cl_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        cl_box.set_halign(Gtk.Align.CENTER)
-        cl_icon = Gtk.Image.new_from_icon_name("user-trash-symbolic")
-        cl_icon.set_pixel_size(14)
-        cl_box.append(cl_icon)
-        cl_lbl = Gtk.Label(label="Limpar Histórico")
-        cl_lbl.add_css_class("caption")
-        cl_box.append(cl_lbl)
-        self.clear_history_btn.set_child(cl_box)
-        sidebar_panel.append(self.clear_history_btn)
-
-        sidebar_wrap = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
-        sidebar_wrap.set_hexpand(False)
-        sidebar_wrap.append(sidebar_panel)
-        sidebar_wrap.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
-        self.sidebar_revealer.set_child(sidebar_wrap)
-        self.sidebar_revealer.set_hexpand(False)
-        self.split_box.append(self.sidebar_revealer)
-
-        # =====================================================================
-        # 2. ÁREA CENTRAL DO CHAT (Fluxo de Diálogo + Barra de Resposta Abaixo)
-        # =====================================================================
-        chat_main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        chat_main_box.set_hexpand(True)
-
-        # Painel de Voz ao Vivo (Gemini Live) retrátil no topo do chat
-        self.live_voice_revealer = Gtk.Revealer()
-        self.live_voice_revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_DOWN)
-        self.live_voice_revealer.set_transition_duration(200)
-        self.live_voice_revealer.set_reveal_child(False)
-        chat_main_box.append(self.live_voice_revealer)
-
-        # ---------------------------------------------------------------------
-        # 2.1 Fluxo de Conversa Rolável (Multi-turn Chat Stream)
-        # ---------------------------------------------------------------------
-        self.chat_scrolled = Gtk.ScrolledWindow()
-        self.chat_scrolled.set_vexpand(True)
-        self.chat_scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-
-        clamp_chat = Adw.Clamp(maximum_size=820)
-        clamp_chat.set_vexpand(True)
-        self.chat_stream_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
-        self.chat_stream_box.set_vexpand(True)
-        self.chat_stream_box.set_margin_start(16)
-        self.chat_stream_box.set_margin_end(16)
-        self.chat_stream_box.set_margin_top(16)
-        self.chat_stream_box.set_margin_bottom(16)
-
-        # Slot Central para o cluster de entrada na tela inicial
-        self.center_input_slot = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        self.center_input_slot.set_hexpand(True)
-        self.center_input_slot.set_size_request(660, -1)
-
-        # Tela de Boas-vindas quando o chat está limpo (Sem mensagens)
-        self.welcome_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
-        self.welcome_box.set_valign(Gtk.Align.CENTER)
-        self.welcome_box.set_halign(Gtk.Align.CENTER)
-        self.welcome_box.set_vexpand(True)
-        self.welcome_box.set_hexpand(True)
-        self.welcome_box.set_margin_start(16)
-        self.welcome_box.set_margin_end(16)
-        self.welcome_box.set_margin_top(16)
-        self.welcome_box.set_margin_bottom(16)
-
-        header_welcome = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        header_welcome.set_halign(Gtk.Align.CENTER)
-
-        # Emblema de centelha inteligente em vidro (Hero AI Sparkle Badge)
-        avatar_badge = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        avatar_badge.add_css_class("welcome-avatar-badge")
-        avatar_badge.set_halign(Gtk.Align.CENTER)
-        welcome_icon = Gtk.Image.new_from_icon_name("starred-symbolic")
-        welcome_icon.set_pixel_size(30)
-        avatar_badge.append(welcome_icon)
-        header_welcome.append(avatar_badge)
-
-        self.welcome_title = Gtk.Label(label=get_dynamic_greeting(), use_markup=True)
-        self.welcome_title.add_css_class("title-2")
-        self.welcome_title.add_css_class("welcome-title")
-        header_welcome.append(self.welcome_title)
-
-        welcome_desc = Gtk.Label(label="Peça tarefas no desktop, consulte seus projetos ou converse por voz")
-        welcome_desc.add_css_class("caption")
-        welcome_desc.add_css_class("welcome-subtitle")
-        header_welcome.append(welcome_desc)
-        self.welcome_box.append(header_welcome)
-
-        # Barra de Entrada integrada no centro da tela de boas-vindas
-        self.welcome_box.append(self.center_input_slot)
-
-        # Grid de sugestões rápidas (3 colunas x 2 linhas)
-        grid = Gtk.Grid()
-        grid.set_column_spacing(10)
-        grid.set_row_spacing(10)
-        grid.set_halign(Gtk.Align.CENTER)
-        grid.set_margin_top(6)
-
-        suggestions = [
-            ("audio-input-microphone-symbolic", "Voz ao Vivo (Gemini Live)", "voz_ao_vivo", 0, 0),
-            ("edit-cut-symbolic", "Recortar Área da Tela", "recortar_area", 1, 0),
-            ("edit-paste-symbolic", "Analisar Copiado", "analisar_copiado", 2, 0),
-            ("folder-symbolic", "Organizar Downloads", "organizar_downloads", 0, 1),
-            ("system-search-symbolic", "Buscar em Documentos", "buscar_documentos", 1, 1),
-            ("utilities-system-monitor-symbolic", "Consumo do Sistema", "consumo_sistema", 2, 1),
-        ]
-
-        for icon_name, label_text, prompt_val, col, row in suggestions:
-            btn = Gtk.Button()
-            btn.add_css_class("card")
-            btn.add_css_class("pill")
-            btn.add_css_class("glass-chip")
-
-            chip_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-            chip_box.set_halign(Gtk.Align.CENTER)
-            chip_icon = Gtk.Image.new_from_icon_name(icon_name)
-            chip_icon.set_pixel_size(16)
-            chip_box.append(chip_icon)
-
-            chip_lbl = Gtk.Label(label=label_text)
-            chip_box.append(chip_lbl)
-            btn.set_child(chip_box)
-
-            def make_chip_click(p=prompt_val):
-                return lambda _: self._trigger_prompt(p)
-            btn.connect("clicked", make_chip_click())
-            grid.attach(btn, col, row, 1, 1)
-
-        self.welcome_box.append(grid)
-        self.chat_stream_box.append(self.welcome_box)
-
-        clamp_chat.set_child(self.chat_stream_box)
-        self.chat_scrolled.set_child(clamp_chat)
-        chat_main_box.append(self.chat_scrolled)
-
-        # ---------------------------------------------------------------------
-        # 2.2 Barra de Resposta e Entrada Fixada Abaixo do Chat (Estilo Gemini)
-        # ---------------------------------------------------------------------
-        self.clamp_bottom = Adw.Clamp(maximum_size=820)
-        self.bottom_container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        self.bottom_container.set_margin_start(16)
-        self.bottom_container.set_margin_end(16)
-        self.bottom_container.set_margin_bottom(10)
-        self.bottom_container.set_margin_top(4)
-
-        self.bottom_input_slot = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        self.bottom_input_slot.set_hexpand(True)
-        self.bottom_container.append(self.bottom_input_slot)
-
-        self.clamp_bottom.set_child(self.bottom_container)
-        chat_main_box.append(self.clamp_bottom)
-
-        # Barra dinâmica de detecção de aplicativos instalados (abre acima da entrada)
-        self.app_preview_revealer = Gtk.Revealer()
-        self.app_preview_revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_UP)
-        self.app_preview_revealer.set_transition_duration(180)
-        self.app_preview_revealer.set_reveal_child(False)
-
-        self.app_preview_card = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        self.app_preview_card.add_css_class("card")
-        self.app_preview_card.add_css_class("glass-card")
-        self.app_preview_card.set_margin_bottom(4)
-
-        self.app_preview_icon = Gtk.Image()
-        self.app_preview_icon.set_pixel_size(24)
-        self.app_preview_icon.set_margin_start(10)
-        self.app_preview_icon.set_margin_top(6)
-        self.app_preview_icon.set_margin_bottom(6)
-        self.app_preview_card.append(self.app_preview_icon)
-
-        app_info_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        app_info_box.set_hexpand(True)
-        app_info_box.set_valign(Gtk.Align.CENTER)
-
-        app_title_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        self.app_preview_title = Gtk.Label(xalign=0)
-        self.app_preview_title.add_css_class("heading")
-        app_title_row.append(self.app_preview_title)
-
-        self.app_preview_badge = Gtk.Label(xalign=0)
-        self.app_preview_badge.add_css_class("caption")
-        app_title_row.append(self.app_preview_badge)
-
-        self.app_preview_launch_btn = Gtk.Button(label="Abrir")
-        self.app_preview_launch_btn.add_css_class("suggested-action")
-        self.app_preview_launch_btn.add_css_class("pill")
-        self.app_preview_launch_btn.set_valign(Gtk.Align.CENTER)
-        self.app_preview_launch_btn.connect("clicked", self._on_quick_launch_app)
-        app_title_row.append(self.app_preview_launch_btn)
-
-        app_info_box.append(app_title_row)
-
-        self.app_preview_subtitle = Gtk.Label(xalign=0)
-        self.app_preview_subtitle.add_css_class("caption")
-        self.app_preview_subtitle.add_css_class("dim-label")
-        app_info_box.append(self.app_preview_subtitle)
-
-        self.app_preview_card.append(app_info_box)
-        self.app_preview_revealer.set_child(self.app_preview_card)
-
-        # Card de prévia da imagem capturada/anexada (aparece acima da barra)
-        self.vision_preview_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        self.vision_preview_box.add_css_class("card")
-        self.vision_preview_box.add_css_class("glass-card")
-        self.vision_preview_box.set_margin_bottom(4)
-        self.vision_preview_box.set_margin_start(2)
-        self.vision_preview_box.set_margin_end(2)
-        self.vision_preview_box.set_visible(False)
-
-        vision_hdr = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        vision_hdr.set_margin_start(10)
-        vision_hdr.set_margin_end(8)
-        vision_hdr.set_margin_top(6)
-
-        self.vision_hdr_lbl = Gtk.Label(label="<b>Recorte de Tela Ativo</b>", use_markup=True, xalign=0)
-        self.vision_hdr_lbl.add_css_class("caption")
-        self.vision_hdr_lbl.set_hexpand(True)
-        vision_hdr.append(self.vision_hdr_lbl)
-
-        vision_dismiss_btn = Gtk.Button.new_from_icon_name("window-close-symbolic")
-        vision_dismiss_btn.set_tooltip_text("Descartar anexo de imagem")
-        vision_dismiss_btn.add_css_class("flat")
-        vision_dismiss_btn.add_css_class("circular")
-        vision_dismiss_btn.add_css_class("glass-icon-btn")
-        vision_dismiss_btn.connect("clicked", self._clear_active_vision)
-        vision_hdr.append(vision_dismiss_btn)
-        self.vision_preview_box.append(vision_hdr)
-
-        self.vision_thumbnail = Gtk.Picture()
-        self.vision_thumbnail.set_can_shrink(True)
-        self.vision_thumbnail.set_content_fit(Gtk.ContentFit.CONTAIN)
-        self.vision_thumbnail.set_size_request(-1, 100)
-        self.vision_thumbnail.set_margin_start(10)
-        self.vision_thumbnail.set_margin_end(10)
-        self.vision_thumbnail.set_margin_bottom(6)
-        self.vision_preview_box.append(self.vision_thumbnail)
-
-        self.vision_active_badge = Gtk.Label(
-            label="👁️ <i>Próxima mensagem usará esta imagem como contexto</i>",
-            use_markup=True,
-            xalign=0,
-        )
-        self.vision_active_badge.add_css_class("dim-label")
-        self.vision_active_badge.add_css_class("caption")
-        self.vision_active_badge.set_margin_start(10)
-        self.vision_active_badge.set_margin_bottom(6)
-        self.vision_preview_box.append(self.vision_active_badge)
-
-        self.ocr_btn = Gtk.Button()
-        self.ocr_btn_label = Gtk.Label(label="Copiar Texto da Imagem")
-        self.ocr_btn.set_visible(False)
-        self.vision_preview_box.append(self.ocr_btn)
-
-        # O Card Principal da Barra de Prompt (Floating Pill)
-        self.prompt_bar_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        self.prompt_bar_box.add_css_class("prompt-bar-card")
-
-        # Botão de Visão (Anexar / Recortar Tela)
-        self.vision_btn = Gtk.MenuButton(valign=Gtk.Align.CENTER)
-        self.vision_btn.set_icon_name("camera-photo-symbolic")
-        self.vision_btn.set_tooltip_text("Visão Computacional: Ler ou recortar a tela com IA")
-        self.vision_btn.add_css_class("flat")
-        self.vision_btn.add_css_class("circular")
-        self.vision_btn.add_css_class("glass-icon-btn")
-
-        vision_popover = Gtk.Popover()
-        vision_pop_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        vision_pop_box.set_margin_top(6)
-        vision_pop_box.set_margin_bottom(6)
-        vision_pop_box.set_margin_start(6)
-        vision_pop_box.set_margin_end(6)
-
-        # Item 1: Recortar Área
-        area_btn = Gtk.Button()
-        area_btn.add_css_class("flat")
-        area_btn.add_css_class("glass-menu-item")
-        area_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        area_box.set_margin_start(6)
-        area_box.set_margin_end(6)
-        area_box.set_margin_top(4)
-        area_box.set_margin_bottom(4)
-        area_ic = Gtk.Image.new_from_icon_name("edit-cut-symbolic")
-        area_ic.set_pixel_size(16)
-        area_box.append(area_ic)
-        area_l = Gtk.Label(label="<b>Recortar Área da Tela</b>", use_markup=True, xalign=0)
-        area_box.append(area_l)
-        area_btn.set_child(area_box)
-        area_btn.connect("clicked", lambda _: (vision_popover.popdown(), self._start_screen_capture(interactive=True)))
-        vision_pop_box.append(area_btn)
-
-        # Item 2: Tela Inteira
-        full_btn = Gtk.Button()
-        full_btn.add_css_class("flat")
-        full_btn.add_css_class("glass-menu-item")
-        full_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        full_box.set_margin_start(6)
-        full_box.set_margin_end(6)
-        full_box.set_margin_top(4)
-        full_box.set_margin_bottom(4)
-        full_ic = Gtk.Image.new_from_icon_name("zoom-fit-best-symbolic")
-        full_ic.set_pixel_size(16)
-        full_box.append(full_ic)
-        full_l = Gtk.Label(label="<b>Capturar Tela Inteira</b>", use_markup=True, xalign=0)
-        full_box.append(full_l)
-        full_btn.set_child(full_box)
-        full_btn.connect("clicked", lambda _: (vision_popover.popdown(), self._start_screen_capture(interactive=False)))
-        vision_pop_box.append(full_btn)
-
-        vision_popover.set_child(vision_pop_box)
-        self.vision_btn.set_popover(vision_popover)
-        self.prompt_bar_box.append(self.vision_btn)
-
-        # Botão de Clipboard Inteligente
-        self.clipboard_btn = Gtk.MenuButton(valign=Gtk.Align.CENTER)
-        self.clipboard_btn.set_icon_name("edit-paste-symbolic")
-        self.clipboard_btn.set_tooltip_text("Clipboard Inteligente: Analisar texto ou imagem copiada")
-        self.clipboard_btn.add_css_class("flat")
-        self.clipboard_btn.add_css_class("circular")
-        self.clipboard_btn.add_css_class("glass-icon-btn")
-
-        clipboard_popover = Gtk.Popover()
-        clip_pop_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        clip_pop_box.set_margin_top(6)
-        clip_pop_box.set_margin_bottom(6)
-        clip_pop_box.set_margin_start(6)
-        clip_pop_box.set_margin_end(6)
-
-        def make_clip_row(title: str, prompt_text: str, icon_name: str) -> Gtk.Button:
-            btn = Gtk.Button()
-            btn.add_css_class("flat")
-            btn.add_css_class("glass-menu-item")
-            box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-            box.set_margin_start(6)
-            box.set_margin_end(6)
-            box.set_margin_top(4)
-            box.set_margin_bottom(4)
-            ic = Gtk.Image.new_from_icon_name(icon_name)
-            ic.set_pixel_size(16)
-            box.append(ic)
-            lbl = Gtk.Label(label=title, xalign=0)
-            box.append(lbl)
-            btn.set_child(box)
-            btn.connect("clicked", lambda _: (clipboard_popover.popdown(), self._trigger_prompt(prompt_text)))
-            return btn
-
-        clip_pop_box.append(make_clip_row("Explicar Código Copiado", "explique o código que acabei de copiar", "utilities-terminal-symbolic"))
-        clip_pop_box.append(make_clip_row("Traduzir para Inglês", "traduza o texto selecionado para o inglês", "preferences-desktop-locale-symbolic"))
-        clip_pop_box.append(make_clip_row("Resumir Conteúdo Copiado", "resuma o que acabei de copiar", "view-list-bullet-symbolic"))
-        clip_pop_box.append(make_clip_row("Analisar Copiado Geral", "analisar copiado", "system-search-symbolic"))
-        clipboard_popover.set_child(clip_pop_box)
-        self.clipboard_btn.set_popover(clipboard_popover)
-        self.prompt_bar_box.append(self.clipboard_btn)
-
-        # Entrada de Texto Principal
-        self.entry = Gtk.Entry()
-        self.entry.add_css_class("flat")
-        self.entry.set_placeholder_text("Peça ao Zorin Copilot ou digite um comando...")
-        self.entry.set_hexpand(True)
-        self.entry.connect("activate", self._on_submit)
-        self.entry.connect("changed", self._on_entry_changed)
-        self.prompt_bar_box.append(self.entry)
-
-        # Botão de Microfone / Gemini Live
-        self.bottom_voice_btn = Gtk.Button.new_from_icon_name("audio-input-microphone-symbolic")
-        self.bottom_voice_btn.set_tooltip_text("Conversa por Voz ao Vivo (Gemini Live / Ctrl+M)")
-        self.bottom_voice_btn.add_css_class("flat")
-        self.bottom_voice_btn.add_css_class("circular")
-        self.bottom_voice_btn.add_css_class("glass-icon-btn")
-        self.bottom_voice_btn.connect("clicked", lambda _: self.toggle_live_voice())
-        self.prompt_bar_box.append(self.bottom_voice_btn)
-
-        # Spinner de carregamento
-        self.spinner = Gtk.Spinner(valign=Gtk.Align.CENTER)
-        self.prompt_bar_box.append(self.spinner)
-
-        # Botão de Envio (Pedir)
-        self.submit_btn = Gtk.Button(valign=Gtk.Align.CENTER)
-        self.submit_btn.add_css_class("suggested-action")
-        self.submit_btn.add_css_class("circular")
-        self.submit_btn.add_css_class("glass-submit-btn")
-        self.submit_btn.set_tooltip_text("Enviar (Enter)")
-        submit_icon = Gtk.Image.new_from_icon_name("pan-end-symbolic")
-        submit_icon.set_pixel_size(16)
-        self.submit_btn.set_child(submit_icon)
-        self.submit_btn.connect("clicked", self._on_submit)
-        self.prompt_bar_box.append(self.submit_btn)
-
-        # Cluster Integrado de Entrada (Prévia de App + Recorte Ativo + Barra de Prompt + Legenda)
-        self.input_cluster = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        self.input_cluster.set_hexpand(True)
-        self.input_cluster.append(self.app_preview_revealer)
-        self.input_cluster.append(self.vision_preview_box)
-        self.input_cluster.append(self.prompt_bar_box)
-
-        # Legenda discreta abaixo da barra de resposta
-        self.disclaimer_lbl = Gtk.Label(
-            label="<span size='small' alpha='65%'>O Zorin Copilot é um assistente com IA e pode cometer erros. Verifique informações importantes.</span>",
-            use_markup=True,
-            xalign=0.5,
-        )
-        self.disclaimer_lbl.add_css_class("disclaimer-caption")
-        self.input_cluster.append(self.disclaimer_lbl)
-
-        # Inicializa o cluster no slot central da tela inicial
-        self.center_input_slot.append(self.input_cluster)
-
-        self.split_box.append(chat_main_box)
-
-        self.toast_overlay = Adw.ToastOverlay()
-        self.toast_overlay.set_child(self.split_box)
-        self.toolbar_view.set_content(self.toast_overlay)
-        self.set_content(self.toolbar_view)
-
-    def _update_input_position(self) -> None:
-        """Posiciona dinamicamente a barra de entrada no centro (se vazia) ou no rodapé (se houver mensagens)."""
-        is_empty = len(self.session.turns) == 0 and not getattr(self, "_is_busy", False) and self._pending_turn_box is None
-        target_slot = self.center_input_slot if is_empty else self.bottom_input_slot
-
-        current_parent = self.input_cluster.get_parent()
-        if current_parent != target_slot:
-            if current_parent is not None:
-                current_parent.remove(self.input_cluster)
-            target_slot.append(self.input_cluster)
-
-        if is_empty:
-            self.clamp_bottom.set_visible(False)
-            self.welcome_box.set_visible(True)
-        else:
-            self.clamp_bottom.set_visible(True)
-            self.welcome_box.set_visible(False)
-
-    def show_toast(self, message: str) -> None:
-        """Exibe uma notificação flutuante elegante na janela."""
-        toast = Adw.Toast.new(message)
-        self.toast_overlay.add_toast(toast)
-
-    def _update_provider_badge(self) -> None:
-        if self.config.is_configured():
-            prov_name = {
-                "gemini": f"Gemini ({self.config.gemini_model})",
-                "workbuddy": f"WorkBuddy ({getattr(self.config, 'workbuddy_model', 'hy4-preview')})",
-                "ollama": f"Ollama ({self.config.ollama_model})",
-                "openai": f"API ({self.config.openai_model})",
-            }.get(self.config.provider, "IA Ativa")
-            self.status_badge.set_text(f"● {prov_name}")
-        else:
-            self.status_badge.set_text("○ IA não configurada (⚙️)")
-
-    def _open_settings(self, _btn: Gtk.Button) -> None:
-        dialog = PreferencesDialog(self, on_saved=self._on_config_saved)
-        dialog.present(self)
-
-    def _on_config_saved(self, new_config: CopilotConfig) -> None:
-        self.config = new_config
-        self.engine.reload_config(new_config)
-        self._update_provider_badge()
-
-    def _trigger_prompt(self, text: str) -> None:
-        """Dispara um prompt ou ação a partir de um chip de sugestão rápida."""
-        if text == "voz_ao_vivo":
-            self.toggle_live_voice()
-            return
-        if text == "recortar_area":
-            self._start_screen_capture(interactive=True)
-            return
-        if text == "capturar_tela":
-            self._start_screen_capture(interactive=False)
-            return
-        if text == "analisar_copiado":
-            self.entry.set_text("📋 Analisar conteúdo da área de transferência")
-            self._on_submit(self.entry)
-            return
-        if text == "organizar_downloads":
-            self.entry.set_text("Organizar os arquivos na pasta Downloads")
-            self._on_submit(self.entry)
-            return
-        if text == "buscar_documentos":
-            self.entry.set_text("Pesquisar nos meus documentos indexados")
-            self._on_submit(self.entry)
-            return
-        if text == "consumo_sistema":
-            self.entry.set_text("Como está o consumo de memória RAM e processador?")
-            self._on_submit(self.entry)
-            return
-        self.entry.set_text(text)
-        self._on_submit(self.entry)
-
-    def _on_entry_changed(self, entry: Gtk.Entry) -> None:
-        """Monitora a digitação em tempo real para verificar se o app está instalado."""
-        if self._search_debounce_timer:
-            GLib.source_remove(self._search_debounce_timer)
-            self._search_debounce_timer = None
-
-        text = entry.get_text().strip()
-        if not text:
-            self.app_preview_revealer.set_reveal_child(False)
-            self._matched_preview_app = None
-            return
-
-        if len(text) < 2:
-            self.app_preview_revealer.set_reveal_child(False)
-            self._matched_preview_app = None
-            return
-
-        def check_app():
-            self._search_debounce_timer = None
-            self._update_app_preview(text)
-            return GLib.SOURCE_REMOVE
-
-        self._search_debounce_timer = GLib.timeout_add(120, check_app)
-
-    def _update_app_preview(self, text: str) -> None:
-        """Verifica se há um app correspondente e atualiza a barra de prévia dinâmica."""
-        is_launch, target_name = AppManager.is_app_launch_intent(text)
-        if not is_launch or not target_name:
-            self.app_preview_revealer.set_reveal_child(False)
-            self._matched_preview_app = None
-            return
-
-        app, friendly_name = AppManager.find_app(target_name)
-        if app:
-            self._matched_preview_app = app
-            if app.get_icon():
-                self.app_preview_icon.set_from_gicon(app.get_icon())
-            else:
-                self.app_preview_icon.set_from_icon_name("application-x-executable-symbolic")
-
-            self.app_preview_title.set_markup(f"<b>{html.escape(friendly_name)}</b>")
-            subtitle = get_app_subtitle(app)
-            self.app_preview_subtitle.set_text(subtitle)
-
-            self.app_preview_badge.set_markup("<span foreground='#2ec27e'><b>✓ Instalado</b></span>")
-            self.app_preview_launch_btn.set_visible(True)
-            self.app_preview_launch_btn.set_tooltip_text(f"Abrir {friendly_name} agora")
-            self.app_preview_revealer.set_reveal_child(True)
-        else:
-            self._matched_preview_app = None
-            # Se for pedido explícito de abertura (ex: "abrir discord") e não estiver instalado:
-            if any(text.lower().startswith(p) for p in ("abrir ", "abre ", "iniciar ", "inicia ", "rodar ", "executar ", "open ")):
-                self.app_preview_icon.set_from_icon_name("dialog-warning-symbolic")
-                self.app_preview_title.set_markup(f"<b>{html.escape(target_name)}</b> não encontrado")
-                self.app_preview_subtitle.set_text("Nenhum aplicativo com este nome foi detectado no sistema.")
-                self.app_preview_badge.set_markup("<span foreground='#e5a50a'><b>⚠️ Não instalado</b></span>")
-                self.app_preview_launch_btn.set_visible(False)
-                self.app_preview_revealer.set_reveal_child(True)
-            else:
-                self.app_preview_revealer.set_reveal_child(False)
-
-    def _on_quick_launch_app(self, _btn: Gtk.Button) -> None:
-        """Executa imediatamente o app detectado na barra de prévia sem precisar da IA."""
-        if not self._matched_preview_app:
-            return
-
-        app = self._matched_preview_app
-        ok, msg = AppManager.launch(app)
-        self.exec_status.set_text(f"{'✓' if ok else '✗'} {msg}")
-        self.engine.memory.log_action(
-            prompt=self.entry.get_text().strip(),
-            action_type=ActionType.LAUNCH_APP.value,
-            target=app.get_name(),
-            params={"app_id": app.get_id(), "executable": app.get_executable()},
-            success=ok,
-            message=msg,
-        )
-        self.app_preview_revealer.set_reveal_child(False)
-
-    def _start_screen_capture(self, interactive: bool = True, direct_mode: bool = False) -> None:
-        """Inicia a captura de tela (recorte ou tela cheia) ocultando temporariamente o Copilot."""
-        if self._is_busy:
-            return
-
-        # Oculta a janela para não obstruir o que o usuário quer recortar/analisar
-        self.set_visible(False)
-
-        prompt_typed = self.entry.get_text().strip() if not direct_mode else ""
-
-        def capture_worker():
-            # Aguarda 200ms para que o compositor Wayland conclua a remoção visual da janela
-            time.sleep(0.2)
-            success, img_bytes, mode = ScreenCaptureService.capture(interactive=interactive)
-            GLib.idle_add(self._on_capture_finished, success, img_bytes, mode, prompt_typed, interactive, direct_mode)
-
-        threading.Thread(target=capture_worker, daemon=True).start()
-
-    def _on_capture_finished(
-        self,
-        success: bool,
-        image_bytes: bytes | None,
-        mode: str,
-        prompt_typed: str,
-        is_area: bool,
-        direct_mode: bool = False,
-    ) -> bool:
-        """Restaura a janela e anexa a captura visual acima da barra de entrada."""
-        if not success or not image_bytes:
-            if direct_mode:
-                return False
-            self.set_visible(True)
-            self.present()
-            self.show_toast("Captura de tela cancelada.")
-            return False
-
-        self.set_visible(True)
-        self.present()
-        self.entry.grab_focus()
-
-        # Guarda a imagem no contexto ativo para Visão Contínua (turnos subsequentes)
-        self._active_image_bytes = image_bytes
-        self._active_image_is_area = is_area
-        self._active_image_is_clipboard = False
-
-        # Renderiza a miniatura visual imediatamente no anexo flutuante
-        self._render_active_vision_thumbnail(image_bytes, is_area=is_area, is_clipboard=False)
-
-        if prompt_typed:
-            self.entry.set_text(prompt_typed)
-            self._on_submit(self.entry)
-        else:
-            self.entry.set_placeholder_text("Faça uma pergunta sobre esta imagem ou pressione Enter...")
-            self.show_toast("📸 Imagem anexada! Digite sua pergunta e envie.")
-
-        return False
-
-    def _on_submit(self, _widget: Gtk.Widget) -> None:
-        """Processa a mensagem do usuário, adiciona ao fluxo rolável e despacha para a IA."""
-        if self._search_debounce_timer:
-            GLib.source_remove(self._search_debounce_timer)
-            self._search_debounce_timer = None
-        self.app_preview_revealer.set_reveal_child(False)
-
-        text = self.entry.get_text().strip()
-        active_img = getattr(self, "_active_image_bytes", None)
-        active_is_area = getattr(self, "_active_image_is_area", False)
-
-        if not text and not active_img:
-            return
-        if self._is_busy:
-            return
-
-        if not text and active_img:
-            text = "Analise o recorte da tela e explique o que está visível." if active_is_area else "Analise esta captura de tela."
-
-        low = text.lower()
-        if any(w in low for w in ["copiad", "copiei", "clipboard", "área de transferência", "area de transferencia"]):
-            kind, img_data = ClipboardService.get_content()
-            if kind == "image" and isinstance(img_data, bytes):
-                self._active_image_bytes = img_data
-                self._active_image_is_area = False
-                self._active_image_is_clipboard = True
-                active_img = img_data
-                self._render_active_vision_thumbnail(img_data, is_area=False, is_clipboard=True)
-
-        self._is_busy = True
-        self.spinner.start()
-        self.entry.set_sensitive(False)
-        self.submit_btn.set_sensitive(False)
-        self.vision_btn.set_sensitive(False)
-        self.clipboard_btn.set_sensitive(False)
-        self.bottom_voice_btn.set_sensitive(False)
-
-        if self.welcome_box.get_parent() == self.chat_stream_box:
-            self.chat_stream_box.remove(self.welcome_box)
-        self.welcome_box.set_visible(False)
-        self._update_input_position()
-
-        # Limpa o texto da barra de entrada imediatamente (estilo Gemini)
-        self.entry.set_text("")
-        self.vision_preview_box.set_visible(False)
-
-        # Adiciona o turno pendente imediatamente ao fluxo da conversa
-        temp_turn = ChatTurn(prompt=text, answer="")
-        self._pending_turn_box = self._create_turn_widget(
-            temp_turn,
-            image_bytes=active_img,
-            is_pending=True,
-        )
-        self.chat_stream_box.append(self._pending_turn_box)
-        self._scroll_to_bottom()
-
-        def parse_thread():
-            try:
-                history = self.session.get_history_for_llm()
-                plan = self.engine.parse(
-                    text,
-                    history=history,
-                    image_bytes=active_img,
-                    is_area_capture=active_is_area,
-                )
-            except Exception as exc:
-                logger.error(f"Erro durante execução da IA em segundo plano: {exc}", exc_info=True)
-                plan = ActionPlan(
-                    thought=f"Ocorreu um erro ao processar sua solicitação: {exc}",
-                    actions=[],
-                )
-            GLib.idle_add(self._on_plan_ready, plan, text, active_img)
-
-        threading.Thread(target=parse_thread, daemon=True).start()
-
-    def _on_plan_ready(self, plan: ActionPlan, prompt_text: str = "", attached_image: bytes | None = None) -> bool:
-        """Recebe o plano gerado pela IA e substitui o indicador de carregamento pelo resultado final."""
-        self._is_busy = False
-        self.spinner.stop()
-        self.entry.set_sensitive(True)
-        self.submit_btn.set_sensitive(True)
-        self.vision_btn.set_sensitive(True)
-        self.clipboard_btn.set_sensitive(True)
-        self.bottom_voice_btn.set_sensitive(True)
-        self.current_plan = plan
-
-        try:
-            explanation_text = (plan.thought or "").strip() if plan else ""
-            if not explanation_text and plan and plan.actions:
-                explanation_text = "Executei a ação solicitada no desktop."
-            elif not explanation_text:
-                explanation_text = "Não foi possível obter uma resposta do assistente. Por favor, tente novamente."
-
-            # Registra no histórico do tópico e auto-salva no SQLite
-            turn = self.session.record_turn(prompt=prompt_text, answer=explanation_text)
-            if not turn:
-                turn = ChatTurn(prompt=prompt_text, answer=explanation_text)
-
-            # Renderiza o turno consolidado no fluxo de mensagens ANTES de remover o pendente
-            turn_widget = self._create_turn_widget(turn, plan=plan, image_bytes=attached_image)
-            self.chat_stream_box.append(turn_widget)
-
-            # Remove com segurança o widget pendente SOMENTE após o novo estar na tela
-            if self._pending_turn_box and self._pending_turn_box.get_parent() == self.chat_stream_box:
-                self.chat_stream_box.remove(self._pending_turn_box)
-                self._pending_turn_box = None
-
-            if self.welcome_box.get_parent() == self.chat_stream_box:
-                self.chat_stream_box.remove(self.welcome_box)
-            self.welcome_box.set_visible(False)
-            self._update_input_position()
-
-            # Auto-save e pin UI protegidos
-            try:
-                self._save_current_session()
-                self._update_pin_ui()
-            except Exception as exc_save:
-                logger.error(f"Erro ao salvar sessão: {exc_save}")
-
-            # Atualiza o subtítulo da janela com o título da conversa
-            if self.session.title:
-                self.window_title.set_subtitle(self.session.title)
-
-            # Atualiza a lista lateral para colocar a conversa no topo
-            try:
-                self._populate_sidebar_history(filter_query=self.sidebar_search.get_text().strip())
-            except Exception as exc_side:
-                logger.error(f"Erro ao atualizar barra lateral: {exc_side}")
-
-        except Exception as exc:
-            logger.error(f"Erro crítico ao processar resposta da IA: {exc}", exc_info=True)
-            if self._pending_turn_box and self._pending_turn_box.get_parent() == self.chat_stream_box:
-                self.chat_stream_box.remove(self._pending_turn_box)
-                self._pending_turn_box = None
-
-            err_turn = ChatTurn(
-                prompt=prompt_text or "...",
-                answer=f"⚠️ Ocorreu um erro ao processar a resposta: {exc}",
-            )
-            err_widget = self._create_turn_widget(err_turn, plan=plan, image_bytes=attached_image)
-            self.chat_stream_box.append(err_widget)
-
-        # Rola suavemente até o final
-        self._scroll_to_bottom()
-        self.entry.grab_focus()
-        return GLib.SOURCE_REMOVE
-
-    def _create_turn_widget(
-        self,
-        turn: ChatTurn,
-        plan: ActionPlan | None = None,
-        image_bytes: bytes | None = None,
-        is_pending: bool = False,
-    ) -> Gtk.Widget:
-        """Constrói o widget de um turno completo de conversa (Pergunta do usuário + Resposta do assistente)."""
-        turn_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-
-        # ---------------------------------------------------------------------
-        # 1. Mensagem do Usuário (Alinhada à direita em balão com avatar)
-        # ---------------------------------------------------------------------
-        user_wrap = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-        user_wrap.set_halign(Gtk.Align.END)
-        user_wrap.set_hexpand(True)
-
-        user_bubble = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        user_bubble.add_css_class("user-chat-bubble")
-
-        u_hdr = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        u_icon = Gtk.Image.new_from_icon_name("avatar-default-symbolic")
-        u_icon.set_pixel_size(14)
-        u_hdr.append(u_icon)
-
-        u_name = Gtk.Label(label="<b>Você</b>", use_markup=True, xalign=0)
-        u_name.add_css_class("caption")
-        u_hdr.append(u_name)
-        user_bubble.append(u_hdr)
-
-        if image_bytes:
-            try:
-                pic = Gtk.Picture()
-                pic.set_can_shrink(True)
-                pic.set_content_fit(Gtk.ContentFit.CONTAIN)
-                pic.set_size_request(-1, 120)
-                pic.set_paintable(Gdk.Texture.new_from_bytes(GLib.Bytes.new(image_bytes)))
-                user_bubble.append(pic)
-            except Exception:
-                pass
-
-        prompt_txt = (turn.prompt if turn else "...") or "..."
-        prompt_lbl = Gtk.Label(label=prompt_txt, xalign=0)
-        prompt_lbl.set_wrap(True)
-        prompt_lbl.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
-        prompt_lbl.set_selectable(True)
-        user_bubble.append(prompt_lbl)
-
-        user_wrap.append(user_bubble)
-        turn_box.append(user_wrap)
-
-        # ---------------------------------------------------------------------
-        # 2. Resposta do Assistente (Card Glassmorphic com Markdown e Ações)
-        # ---------------------------------------------------------------------
-        assistant_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        assistant_card.add_css_class("card")
-        assistant_card.add_css_class("assistant-message-card")
-
-        a_hdr = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        a_icon = Gtk.Image.new_from_icon_name("starred-symbolic")
-        a_icon.set_pixel_size(18)
-        a_hdr.append(a_icon)
-
-        a_name = Gtk.Label(label="<b>Zorin Copilot</b>", use_markup=True, xalign=0)
-        a_name.add_css_class("heading")
-        a_hdr.append(a_name)
-
-        if self.config.provider == "gemini":
-            prov_str = self.config.gemini_model
-        elif self.config.provider == "workbuddy":
-            prov_str = f"WorkBuddy ({getattr(self.config, 'workbuddy_model', 'hy4-preview')})"
-        else:
-            prov_str = self.config.provider
-        a_badge = Gtk.Label(label=f"● {prov_str}", xalign=0)
-        a_badge.add_css_class("caption")
-        a_badge.add_css_class("dim-label")
-        a_badge.set_hexpand(True)
-        a_hdr.append(a_badge)
-
-        ans_txt = (turn.answer if turn else "") or ""
-
-        if not is_pending:
-            copy_b = Gtk.Button.new_from_icon_name("edit-copy-symbolic")
-            copy_b.set_tooltip_text("Copiar Resposta")
-            copy_b.add_css_class("flat")
-            copy_b.add_css_class("circular")
-            copy_b.add_css_class("glass-icon-btn")
-            txt_to_copy = ans_txt
-
-            def on_copy(_b, t=txt_to_copy, btn=copy_b):
-                disp = Gdk.Display.get_default()
-                if disp:
-                    disp.get_clipboard().set(t)
-                    btn.set_icon_name("emblem-ok-symbolic")
-                    self.show_toast("✓ Resposta copiada!")
-                    GLib.timeout_add(2000, lambda: (btn.set_icon_name("edit-copy-symbolic"), GLib.SOURCE_REMOVE)[1])
-
-            copy_b.connect("clicked", on_copy)
-            a_hdr.append(copy_b)
-
-        assistant_card.append(a_hdr)
-
-        if is_pending:
-            spin_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-            spin_box.set_margin_top(8)
-            spin_box.set_margin_bottom(8)
-            sp = Gtk.Spinner()
-            sp.start()
-            spin_box.append(sp)
-            spin_lbl = Gtk.Label(label="Pensando...", xalign=0)
-            spin_lbl.add_css_class("dim-label")
-            spin_box.append(spin_lbl)
-            assistant_card.append(spin_box)
-        else:
-            markup = format_markdown_to_markup(ans_txt)
-            ans_lbl = Gtk.Label(xalign=0, yalign=0)
-            ans_lbl.set_wrap(True)
-            ans_lbl.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
-            ans_lbl.set_selectable(True)
-            try:
-                ans_lbl.set_use_markup(True)
-                ans_lbl.set_markup(markup)
-            except Exception:
-                ans_lbl.set_use_markup(False)
-                ans_lbl.set_text(ans_txt)
-            ans_lbl.set_margin_top(2)
-            ans_lbl.set_margin_bottom(4)
-            assistant_card.append(ans_lbl)
-
-            self.answer_label = ans_lbl
-            self._raw_answer_text = ans_txt
-
-            # Renderiza ações executáveis se presentes no plano
-            if plan and plan.actions:
-                executable = [a for a in plan.actions if a.action_type != ActionType.ANSWER]
-                if executable:
-                    acts_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-                    acts_box.set_margin_top(8)
-
-                    acts_title = Gtk.Label(label=f"<b>Ações Propostas ({len(executable)}):</b>", use_markup=True, xalign=0)
-                    acts_title.add_css_class("caption")
-                    acts_title.add_css_class("dim-label")
-                    acts_box.append(acts_title)
-
-                    for act in executable:
-                        row = self._create_action_row(act)
-                        acts_box.append(row)
-
-                    if len(executable) > 1:
-                        exec_all = Gtk.Button(label=f"Executar Todas as {len(executable)} Ações")
-                        exec_all.add_css_class("suggested-action")
-                        exec_all.add_css_class("pill")
-                        exec_all.set_halign(Gtk.Align.START)
-                        exec_all.set_margin_top(4)
-
-                        def make_exec_all(p=plan, btn=exec_all, p_text=turn.prompt):
-                            def on_exec_all(_):
-                                btn.set_sensitive(False)
-                                btn.set_label("Executando...")
-                                reports = self.executor.execute_plan(p, dry_run=False)
-                                for r in reports:
-                                    self.engine.memory.log_action(
-                                        prompt=p_text,
-                                        action_type=r.action.action_type.value,
-                                        target=r.action.target,
-                                        params=r.action.params,
-                                        success=r.success,
-                                        message=r.message,
-                                    )
-                                btn.set_label("Todas Executadas ✓")
-                                self.show_toast(f"✓ {len(reports)} ações executadas com sucesso!")
-                            return on_exec_all
-
-                        exec_all.connect("clicked", make_exec_all())
-                        acts_box.append(exec_all)
-
-                    assistant_card.append(acts_box)
-
-            # Botão de cópia rápida para Smart OCR se houver texto ou código identificado
-            ocr_text = (plan.extracted_text if plan else None) or getattr(self, "_current_ocr_text", None)
-            if ocr_text:
-                ocr_btn = Gtk.Button()
-                ocr_btn.add_css_class("flat")
-                ocr_btn.add_css_class("pill")
-                ocr_btn.add_css_class("glass-pill")
-                ocr_btn.set_halign(Gtk.Align.START)
-                ocr_btn.set_margin_top(4)
-
-                ocr_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-                ocr_ic = Gtk.Image.new_from_icon_name("edit-copy-symbolic")
-                ocr_ic.set_pixel_size(14)
-                ocr_box.append(ocr_ic)
-                ocr_lbl = Gtk.Label(label="Copiar Texto/Código Extraído")
-                ocr_lbl.add_css_class("caption")
-                ocr_box.append(ocr_lbl)
-                ocr_btn.set_child(ocr_box)
-
-                def on_copy_ocr(_b, ot=ocr_text, ol=ocr_lbl):
-                    ClipboardService.set_text(ot)
-                    ol.set_text("✓ Conteúdo Copiado!")
-                    self.show_toast("Texto copiado para a área de transferência!")
-                    GLib.timeout_add(2000, lambda: (ol.set_text("Copiar Texto/Código Extraído"), GLib.SOURCE_REMOVE)[1])
-
-                ocr_btn.connect("clicked", on_copy_ocr)
-                assistant_card.append(ocr_btn)
-
-        turn_box.append(assistant_card)
-        return turn_box
-
-    def _create_action_row(self, action: DesktopAction) -> Gtk.Widget:
-        """Renderiza uma linha de ação proposta com ícone semântico e botão direto de execução."""
-        badge_desc = {
-            ActionType.LAUNCH_APP: "abrir aplicativo",
-            ActionType.OPEN_URL: "abrir link web",
-            ActionType.SYSTEM_CONTROL: "configuração do sistema",
-            ActionType.CLICK: "interação acessível",
-            ActionType.NOTIFY: "notificação",
-            ActionType.CAPTURE_SCREEN: "visão da tela",
-            ActionType.FIX_COMMAND: "auto-cura do sistema",
-            ActionType.SMART_OCR: "smart ocr",
-            ActionType.MEDIA_CONTROL: "controle de mídia",
-            ActionType.WRITE_FILE: "salvar documento",
-            ActionType.ORGANIZE_FILES: "organização de arquivos",
-            ActionType.OPEN_DOCUMENT: "abrir documento",
-            ActionType.READ_PAGE: "leitura web",
-            ActionType.DEEP_RESEARCH: "pesquisa web",
-        }.get(action.action_type, action.action_type.value)
-
-        if action.action_type == ActionType.FIX_COMMAND:
-            cmd_show = action.params.get("command") or action.target
-            row = Adw.ActionRow(
-                title=f"<b>⚡ Auto-Cura: {html.escape(action.target)}</b>",
-                subtitle=f"Comando: <tt><b>{html.escape(cmd_show)}</b></tt>",
-            )
-            row.set_use_markup(True)
-            exec_label = "Executar Correção"
-        elif action.action_type == ActionType.SMART_OCR:
-            preview_txt = (action.target[:42] + "...") if len(action.target) > 42 else action.target
-            row = Adw.ActionRow(
-                title=f"<b>📋 Smart OCR: {html.escape(action.describe())}</b>",
-                subtitle=f"Texto: {html.escape(preview_txt)}",
-            )
-            row.set_use_markup(True)
-            exec_label = "Copiar Conteúdo"
-        elif action.action_type == ActionType.WRITE_FILE:
-            dest_dir = action.params.get("directory") or "~/Documentos/Relatorios"
-            row = Adw.ActionRow(
-                title=f"<b>📝 Salvar: {html.escape(action.describe())}</b>",
-                subtitle=f"Destino: <tt>{html.escape(dest_dir)}</tt>",
-            )
-            row.set_use_markup(True)
-            exec_label = "Salvar Arquivo"
-        elif action.action_type == ActionType.ORGANIZE_FILES:
-            target_dir = action.params.get("directory") or "~/Downloads"
-            row = Adw.ActionRow(
-                title=f"<b>📁 Organizar: {html.escape(action.describe())}</b>",
-                subtitle=f"Pasta: <tt>{html.escape(target_dir)}</tt> (Lixeira reversível)",
-            )
-            row.set_use_markup(True)
-            exec_label = "Organizar Agora"
-        elif action.action_type == ActionType.MEDIA_CONTROL:
-            row = Adw.ActionRow(
-                title=f"<b>🎵 Mídia: {html.escape(action.describe())}</b>",
-                subtitle="Spotify / Reprodutor ativo MPRIS2",
-            )
-            row.set_use_markup(True)
-            exec_label = "Controlar"
-        elif action.action_type == ActionType.OPEN_DOCUMENT:
-            p_num = action.params.get("page_number", 1)
-            row = Adw.ActionRow(
-                title=f"<b>📄 Abrir: {html.escape(action.describe())}</b>",
-                subtitle=f"Arquivo: <tt>{html.escape(action.target)}</tt> (Pág. {p_num})",
-            )
-            row.set_use_markup(True)
-            exec_label = "Abrir Documento"
-        elif action.action_type == ActionType.READ_PAGE:
-            row = Adw.ActionRow(
-                title=f"<b>🌐 Ler Página: {html.escape(action.describe())}</b>",
-                subtitle=f"URL: <tt>{html.escape(action.target)}</tt>",
-            )
-            row.set_use_markup(True)
-            exec_label = "Ler Conteúdo"
-        elif action.action_type == ActionType.DEEP_RESEARCH:
-            row = Adw.ActionRow(
-                title=f"<b>🔍 Pesquisa Web: {html.escape(action.describe())}</b>",
-                subtitle=f"Tema: <tt>{html.escape(action.target)}</tt>",
-            )
-            row.set_use_markup(True)
-            exec_label = "Pesquisar"
-        else:
-            row = Adw.ActionRow(
-                title=html.escape(action.describe()),
-                subtitle=f"Tipo: {html.escape(badge_desc)}",
-            )
-            exec_label = "Recortar Agora" if (action.action_type == ActionType.CAPTURE_SCREEN and action.target == "area") else "Executar"
-
-        row.add_css_class("card")
-        row.add_css_class("glass-row")
-
-        icon_name = "camera-photo-symbolic" if action.action_type == ActionType.CAPTURE_SCREEN else get_action_icon(action)
-        prefix_icon = Gtk.Image.new_from_icon_name(icon_name)
-        prefix_icon.set_pixel_size(20)
-        row.add_prefix(prefix_icon)
-
-        exec_btn = Gtk.Button(label=exec_label)
-        exec_btn.add_css_class("suggested-action")
-        exec_btn.add_css_class("pill")
-        exec_btn.set_valign(Gtk.Align.CENTER)
-
-        if action.action_type == ActionType.CAPTURE_SCREEN:
-            is_area_target = (action.target == "area")
-            exec_btn.connect("clicked", lambda _, a=is_area_target: self._start_screen_capture(interactive=a))
-        else:
-            def make_exec_handler(act: DesktopAction, btn: Gtk.Button):
-                def handler(_):
-                    btn.set_sensitive(False)
-                    btn.set_label("Executando...")
-                    single_plan = ActionPlan(
-                        thought=self.current_plan.thought if self.current_plan else "",
-                        actions=[act],
-                    )
-                    reports = self.executor.execute_plan(single_plan, dry_run=False)
-                    rep = reports[0] if reports else None
-                    prompt_text = self.entry.get_text().strip()
-                    if rep and rep.success:
-                        btn.set_label("Executado ✓")
-                        btn.remove_css_class("suggested-action")
-                        btn.add_css_class("flat")
-                        self.show_toast(f"✓ {rep.message}")
-                    else:
-                        err = rep.message if rep else "Erro"
-                        btn.set_label("Falha ✗")
-                        self.show_toast(f"✗ {err}")
-
-                    if rep:
-                        self.engine.memory.log_action(
-                            prompt=prompt_text,
-                            action_type=act.action_type.value,
-                            target=act.target,
-                            params=act.params,
-                            success=rep.success,
-                            message=rep.message,
-                        )
-                return handler
-            exec_btn.connect("clicked", make_exec_handler(action, exec_btn))
-
-        row.add_suffix(exec_btn)
-        return row
-
-    def _rebuild_chat_stream(self) -> None:
-        """Reconstrói todo o fluxo de conversa a partir dos turnos da sessão ativa."""
-        while child := self.chat_stream_box.get_first_child():
-            self.chat_stream_box.remove(child)
-
-        if not self.session.turns:
-            if hasattr(self, "welcome_title"):
-                self.welcome_title.set_label(get_dynamic_greeting())
-            self.chat_stream_box.append(self.welcome_box)
-            self.welcome_box.set_visible(True)
-            self._update_input_position()
-            return
-
-        self.welcome_box.set_visible(False)
-        self._update_input_position()
-        for i, turn in enumerate(self.session.turns):
-            is_last = (i == len(self.session.turns) - 1)
-            plan_to_use = self.current_plan if is_last else None
-            turn_widget = self._create_turn_widget(turn, plan=plan_to_use)
-            self.chat_stream_box.append(turn_widget)
-
-        self._scroll_to_bottom()
-
-    def _scroll_to_bottom(self) -> None:
-        """Rola o fluxo rolável de mensagens até o fim com fluidez."""
-        def _do_scroll():
-            adj = self.chat_scrolled.get_vadjustment()
-            if adj:
-                adj.set_value(adj.get_upper() - adj.get_page_size())
-            return GLib.SOURCE_REMOVE
-
-        GLib.idle_add(_do_scroll)
-        GLib.timeout_add(60, _do_scroll)
-
-    def _populate_sidebar_history(self, filter_query: str = "") -> None:
-        """Preenche o ListBox lateral com os tópicos de chat recuperados do SQLite."""
-        while row := self.history_listbox.get_first_child():
-            self.history_listbox.remove(row)
-
-        topics = self.engine.memory.list_chat_topics(limit=60)
-        if filter_query:
-            q = filter_query.lower().strip()
-            topics = [
-                t for t in topics
-                if q in (t.get("title") or "").lower() or q in (t.get("preview") or "").lower()
-            ]
-
-        if not topics:
-            empty_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-            empty_box.set_valign(Gtk.Align.CENTER)
-            empty_box.set_margin_top(30)
-            empty_box.set_margin_bottom(30)
-
-            empty_icon = Gtk.Image.new_from_icon_name("document-open-recent-symbolic")
-            empty_icon.set_pixel_size(28)
-            empty_icon.add_css_class("dim-label")
-            empty_box.append(empty_icon)
-
-            empty_lbl = Gtk.Label(
-                label="<span size='small' alpha='70%'>Nenhuma conversa encontrada</span>" if filter_query else "<span size='small' alpha='70%'>Nenhuma conversa salva ainda</span>",
-                use_markup=True,
-                justify=Gtk.Justification.CENTER,
-            )
-            empty_box.append(empty_lbl)
-            self.history_listbox.append(empty_box)
-            self.clear_history_btn.set_visible(False)
-            return
-
-        self.clear_history_btn.set_visible(True)
-
-        for topic in topics:
-            row = Gtk.ListBoxRow()
-            row.add_css_class("sidebar-chat-row")
-            is_active = (self.session.id == topic["id"])
-            if is_active:
-                row.add_css_class("active")
-
-            item_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-            item_box.set_margin_top(4)
-            item_box.set_margin_bottom(4)
-            item_box.set_margin_start(4)
-            item_box.set_margin_end(4)
-
-            # Indicador / Ícone de conversa
-            chat_icon = Gtk.Image.new_from_icon_name("user-available-symbolic" if is_active else "chat-message-new-symbolic")
-            chat_icon.set_pixel_size(14)
-            item_box.append(chat_icon)
-
-            # Informações de título e data
-            info_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-            info_box.set_hexpand(True)
-
-            clean_title = topic["title"] or "Conversa Sem Título"
-            title_lbl = Gtk.Label(label=clean_title, xalign=0)
-            title_lbl.set_ellipsize(Pango.EllipsizeMode.END)
-            title_lbl.set_max_width_chars(24)
-            info_box.append(title_lbl)
-
-            time_str = format_relative_timestamp(topic.get("updated_at", ""))
-            turns_num = topic.get("turn_count", 0)
-            sub_str = f"{time_str} • {turns_num} msg{'s' if turns_num != 1 else ''}"
-            sub_lbl = Gtk.Label(label=sub_str, xalign=0)
-            sub_lbl.add_css_class("caption")
-            sub_lbl.add_css_class("dim-label")
-            info_box.append(sub_lbl)
-
-            item_box.append(info_box)
-
-            # Botão de exclusão da conversa
-            del_btn = Gtk.Button.new_from_icon_name("user-trash-symbolic")
-            del_btn.add_css_class("flat")
-            del_btn.add_css_class("circular")
-            del_btn.add_css_class("glass-icon-btn")
-            del_btn.add_css_class("sidebar-del-btn")
-            del_btn.set_tooltip_text("Excluir conversa")
-            del_btn.set_valign(Gtk.Align.CENTER)
-            tid = topic["id"]
-            del_btn.connect("clicked", lambda _b, t_id=tid: self._on_delete_topic(t_id))
-            item_box.append(del_btn)
-
-            row.set_child(item_box)
-            row._topic_id = topic["id"]
-            self.history_listbox.append(row)
-
-    def _on_sidebar_search_changed(self, entry: Gtk.SearchEntry) -> None:
-        """Filtra a lista lateral de conversas dinamicamente durante a digitação."""
-        query = entry.get_text().strip()
-        self._populate_sidebar_history(filter_query=query)
-
-    def _on_history_row_activated(self, _listbox, row) -> None:
-        """Abre uma conversa selecionada na barra lateral."""
-        topic_id = getattr(row, "_topic_id", None)
-        if not topic_id:
-            return
-        self._resume_topic(topic_id)
-
-    def _resume_topic(self, topic_id: str) -> None:
-        """Carrega e retoma uma conversa histórica com todo o seu fluxo de mensagens."""
-        if self.session.turns:
-            self._save_current_session()
-
-        topic_data = self.engine.memory.get_chat_topic(topic_id)
-        if not topic_data:
-            return
-
-        self.session.load_from_dict(topic_data)
-        self.window_title.set_subtitle(self.session.title or "Conversa retomada")
-        self._rebuild_chat_stream()
-        self._populate_sidebar_history(filter_query=self.sidebar_search.get_text().strip())
-        self.entry.grab_focus()
-        self.show_toast(f'Conversa "{self.session.title}" aberta!')
-
-    def _save_current_session(self) -> None:
-        """Persiste a sessão atual no SQLite (auto-save estilo Gemini)."""
-        if not self.session.turns:
-            return
-        self.engine.memory.save_chat_topic(
-            topic_id=self.session.id,
-            title=self.session.title or (self.session.turns[0].prompt[:50] if self.session.turns else "Nova Conversa"),
-            turns=[t.to_dict() for t in self.session.turns],
-            is_pinned=True,
-            created_at=self.session.created_at,
-        )
-
-    def _on_delete_topic(self, topic_id: str) -> None:
-        """Exclui uma conversa do histórico SQLite."""
-        self.engine.memory.delete_chat_topic(topic_id)
-        if self.session.id == topic_id:
-            self._on_new_topic()
-        else:
-            self._populate_sidebar_history(filter_query=self.sidebar_search.get_text().strip())
-        self.show_toast("Conversa excluída.")
-
-    def _on_clear_all_history(self, _btn: Gtk.Button) -> None:
-        """Limpa todas as conversas do histórico SQLite."""
-        self.engine.memory.clear_all_chat_topics()
-        self.session.reset_new()
-        self.window_title.set_subtitle("Assistente Inteligente")
-        self._rebuild_chat_stream()
-        self._populate_sidebar_history()
-        self.show_toast("Histórico de conversas completamente limpo.")
-
-    def _update_pin_ui(self) -> None:
-        """Atualiza estado visual da fixação de tópicos."""
-        pass
-
-    def _on_toggle_pin(self, _btn: Gtk.Button | None = None) -> None:
-        """Alterna a fixação da conversa."""
-        self.session.toggle_pin()
-        if self.session.turns:
-            self._save_current_session()
-        self._populate_sidebar_history(filter_query=self.sidebar_search.get_text().strip())
-        self.show_toast("Conversa fixada no topo.")
-
-    def _on_new_topic(self, _btn: Gtk.Button | None = None) -> None:
-        """Inicia uma nova conversa limpa (Ctrl+N / Estilo Gemini)."""
-        if self.session.turns:
-            self._save_current_session()
-        self.session.reset_new()
-        self._clear_active_vision()
-        self.window_title.set_subtitle("Assistente Inteligente")
-        self._rebuild_chat_stream()
-        self._populate_sidebar_history(filter_query=self.sidebar_search.get_text().strip())
-        self.entry.set_text("")
-        self.entry.grab_focus()
-        self.show_toast("✨ Nova conversa iniciada!")
-
-    def _on_execute_all(self, _widget: Gtk.Widget) -> None:
-        if not self.current_plan:
-            return
-        prompt_text = self.entry.get_text().strip()
-        reports = self.executor.execute_plan(self.current_plan, dry_run=False)
-        for r in reports:
-            self.engine.memory.log_action(
-                prompt=prompt_text,
-                action_type=r.action.action_type.value,
-                target=r.action.target,
-                params=r.action.params,
-                success=r.success,
-                message=r.message,
-            )
-        msgs = [r.message for r in reports]
-        self.show_toast(" • ".join(msgs))
-
-    def _on_copy_answer(self, _btn: Gtk.Button) -> None:
-        text = self._raw_answer_text or self.answer_label.get_text()
-        if not text:
-            return
-        display = Gdk.Display.get_default()
-        if display:
-            clipboard = display.get_clipboard()
-            clipboard.set(text)
-            self.show_toast("✓ Resposta copiada para a área de transferência!")
-
-    def _on_copy_ocr_text(self, _btn: Gtk.Button) -> None:
-        ocr_text = getattr(self, "_current_ocr_text", None)
-        if not ocr_text:
-            return
-        ok = ClipboardService.set_text(ocr_text)
-        if ok:
-            self.show_toast("Texto copiado para a área de transferência!")
-
-    def _build_history_popover(self) -> None:
-        """Método de compatibilidade para histórico."""
-        pass
-
-    def _populate_history_list(self) -> None:
-        """Método de compatibilidade."""
-        self._populate_sidebar_history()
+        self.vision.start_capture(interactive=True, direct_mode=True)
 
 
 class ZorinCopilotApp(Adw.Application):
@@ -2127,49 +1322,33 @@ class ZorinCopilotApp(Adw.Application):
             flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE,
         )
         self.add_main_option(
-            "toggle",
-            ord("t"),
-            GLib.OptionFlags.NONE,
-            GLib.OptionArg.NONE,
-            "Alterna a visibilidade do HUD do Copilot",
-            None,
+            "toggle", ord("t"), GLib.OptionFlags.NONE, GLib.OptionArg.NONE,
+            "Alterna a visibilidade do HUD do Copilot", None,
         )
         self.add_main_option(
-            "crop",
-            ord("c"),
-            GLib.OptionFlags.NONE,
-            GLib.OptionArg.NONE,
-            "Dispara a seleção interativa de área da tela e analisa com IA",
-            None,
+            "crop", ord("c"), GLib.OptionFlags.NONE, GLib.OptionArg.NONE,
+            "Dispara a seleção interativa de área da tela e analisa com IA", None,
         )
         self.add_main_option(
-            "voice",
-            ord("v"),
-            GLib.OptionFlags.NONE,
-            GLib.OptionArg.NONE,
-            "Inicia imediatamente a conversa de voz ao vivo (Gemini Live)",
-            None,
+            "voice", ord("v"), GLib.OptionFlags.NONE, GLib.OptionArg.NONE,
+            "Inicia imediatamente a conversa de voz ao vivo (Gemini Live)", None,
         )
         self.add_main_option(
-            "background",
-            ord("b"),
-            GLib.OptionFlags.NONE,
-            GLib.OptionArg.NONE,
-            "Inicia o assistente em segundo plano para inicialização no boot/login",
-            None,
+            "background", 0, GLib.OptionFlags.NONE, GLib.OptionArg.NONE,
+            "Inicia o Copilot silenciosamente em segundo plano (autostart)", None,
         )
 
     def do_startup(self):
         Adw.Application.do_startup(self)
-        # Garante o registro dos atalhos de sistema configurados no GNOME (HUD e Recorte)
+        # Garante o registro dos atalhos de sistema configurados no GNOME (HUD, Recorte e Voz ao Vivo)
         try:
             cfg = CopilotConfig.load()
             if cfg.global_shortcut_enabled:
                 ShortcutManager.register(cfg.global_shortcut_key)
             if getattr(cfg, "crop_shortcut_enabled", True):
                 ShortcutManager.register_crop(getattr(cfg, "crop_shortcut_key", "<Super><Shift>s"))
-            if getattr(cfg, "voice_shortcut_enabled", True):
-                ShortcutManager.register_voice(getattr(cfg, "voice_shortcut_key", "<Super><Shift>v"))
+            if getattr(cfg, "live_voice_hotkey_enabled", True):
+                ShortcutManager.register_voice(getattr(cfg, "live_voice_hotkey", "<Super>v"))
         except Exception:
             pass
 
@@ -2179,29 +1358,36 @@ class ZorinCopilotApp(Adw.Application):
                 return win
         return CopilotWindow(self)
 
+    def do_shutdown(self):
+        # Encerra a thread de wake word junto com o processo (no close-request
+        # ela continua ativa de propósito — o modo HUD depende dela).
+        for win in self.get_windows():
+            if isinstance(win, CopilotWindow) and win.wake_word_engine is not None:
+                win.wake_word_engine.stop()
+        Adw.Application.do_shutdown(self)
+
     def do_activate(self):
         win = self._get_or_create_window()
         win.summon_hud()
 
     def do_command_line(self, command_line: Gio.ApplicationCommandLine) -> int:
         options = command_line.get_options_dict()
+        is_background = options.contains("background")
         is_toggle = options.contains("toggle")
         is_crop = options.contains("crop")
         is_voice = options.contains("voice")
-        is_bg = options.contains("background")
         args = command_line.get_arguments()
+        if "--background" in args:
+            is_background = True
         if "--toggle" in args or "-t" in args:
             is_toggle = True
         if "--crop" in args or "-c" in args or "--snippet" in args:
             is_crop = True
         if "--voice" in args or "-v" in args:
             is_voice = True
-        if "--background" in args or "-b" in args or "--daemon" in args or "--hidden" in args:
-            is_bg = True
 
         win = self._get_or_create_window()
-        if is_bg:
-            # Inicialização em segundo plano (boot/login): mantém janela oculta
+        if is_background:
             return 0
         elif is_voice:
             mode = getattr(win.config, "voice_overlay_mode", "pill")
@@ -2209,7 +1395,7 @@ class ZorinCopilotApp(Adw.Application):
                 win.toggle_live_voice(as_pill=True)
             else:
                 win.summon_hud()
-                win.start_live_voice(as_pill=False)
+                win.toggle_live_voice(as_pill=False)
         elif is_crop:
             win.trigger_direct_crop()
         elif is_toggle:

@@ -4,9 +4,12 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 class ActionType(str, Enum):
@@ -37,6 +40,25 @@ class DesktopAction:
     params: dict[str, Any] = field(default_factory=dict)
     description: str = ""
     requires_confirmation: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "action_type": self.action_type.value,
+            "target": self.target,
+            "params": self.params,
+            "description": self.description,
+            "requires_confirmation": self.requires_confirmation,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> DesktopAction:
+        return cls(
+            action_type=ActionType(data["action_type"]),
+            target=data.get("target", ""),
+            params=data.get("params") or {},
+            description=data.get("description", ""),
+            requires_confirmation=bool(data.get("requires_confirmation", False)),
+        )
 
     def describe(self) -> str:
         if self.description:
@@ -103,3 +125,33 @@ class ActionPlan:
     @property
     def has_high_risk_actions(self) -> bool:
         return any(a.requires_confirmation for a in self.actions)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "thought": self.thought,
+            "actions": [a.to_dict() for a in self.actions],
+            "raw_response": self.raw_response,
+            "extracted_text": self.extracted_text,
+            "extracted_kind": self.extracted_kind,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ActionPlan:
+        """Reconstrói um plano a partir do JSON da sessão.
+
+        Ações inválidas (enum desconhecido, formato corrompido) são descartadas
+        em vez de derrubar a leitura do histórico: melhor reabrir uma conversa
+        sem os botões de ação do que não conseguir reabri-la.
+        """
+        plan = cls(
+            thought=data.get("thought", ""),
+            raw_response=data.get("raw_response", ""),
+            extracted_text=data.get("extracted_text"),
+            extracted_kind=data.get("extracted_kind", "text"),
+        )
+        for raw in data.get("actions") or []:
+            try:
+                plan.actions.append(DesktopAction.from_dict(raw))
+            except (ValueError, TypeError, KeyError, AttributeError):
+                logger.debug("Ação ignorada ao recarregar plano: %r", raw)
+        return plan

@@ -11,9 +11,11 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
 
 from ..ai.providers import (
+    DEFAULT_GEMINI_MODEL,
+    GEMINI_MODEL_CHOICES,
     GeminiProvider,
     HybridProvider,
     OllamaProvider,
@@ -23,6 +25,16 @@ from ..ai.providers import (
 from ..core.config import CopilotConfig
 from ..core.memory import MemoryManager
 from ..core.shortcuts import AutostartManager, ShortcutManager
+
+# Ícones das abas de provedor. O fallback existe porque o Zorin OS pode usar um
+# tema de ícones diferente do Adwaita padrão.
+PROVIDER_ICONS: dict[str, str] = {
+    "gemini": "network-server-symbolic",
+    "ollama": "computer-symbolic",
+    "openai": "preferences-system-network-symbolic",
+}
+FALLBACK_ICON = "application-x-executable-symbolic"
+VALID_PROVIDERS = ("gemini", "ollama", "openai")
 
 
 class PreferencesDialog(Adw.PreferencesDialog):
@@ -43,24 +55,31 @@ class PreferencesDialog(Adw.PreferencesDialog):
         self.add(page)
 
         # ---------------------------------------------------------------------
-        # Grupo: Seleção de Provedor
+        # Seleção de provedor: abas (ViewSwitcher) em vez de um dropdown, para que
+        # as três opções fiquem visíveis de imediato — antes era preciso abrir o
+        # combo para descobrir que Ollama/OpenAI eram suportados.
         # ---------------------------------------------------------------------
-        provider_group = Adw.PreferencesGroup(title="Provedor Ativo")
-        
-        self.provider_model = Gtk.StringList.new([
-            "Híbrido Inteligente (Gemini + Auto-Failover Local GPU)",
-            "Google Gemini (Nuvem / AI Studio)",
-            "WorkBuddy AI (Tencent HY4 / Hunyuan)",
-            "Ollama (100% Local Offline / RX 7600 GPU)",
-            "OpenAI / Compatível (Groq, OpenRouter)",
-        ])
-        self.provider_row = Adw.ComboRow(
-            title="Motor de IA",
-            subtitle="Híbrido prioriza Gemini e comuta para Ollama local se a cota esgotar",
-            model=self.provider_model,
+        self.provider_buttons: dict[str, Gtk.ToggleButton] = {}
+        provider_group = Adw.PreferencesGroup(
+            title="Provedor Ativo",
+            description="Escolha onde suas perguntas serão processadas.",
         )
-        self.provider_row.connect("notify::selected", self._on_provider_changed)
-        provider_group.add(self.provider_row)
+        segmented = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        segmented.add_css_class("linked")
+        segmented.set_halign(Gtk.Align.CENTER)
+        segmented.set_margin_top(6)
+        segmented.set_margin_bottom(6)
+
+        for key, label in (
+            ("gemini", "Gemini"),
+            ("ollama", "Ollama"),
+            ("openai", "OpenAI"),
+        ):
+            btn = self._make_provider_button(key, label)
+            self.provider_buttons[key] = btn
+            segmented.append(btn)
+
+        provider_group.add(segmented)
         page.add(provider_group)
 
         # ---------------------------------------------------------------------
@@ -74,18 +93,13 @@ class PreferencesDialog(Adw.PreferencesDialog):
         self.gemini_key_row = Adw.PasswordEntryRow(title="Chave de API (Gemini)")
         self.gemini_group.add(self.gemini_key_row)
 
-        self.gemini_models_list = [
-            "gemini-3.8-flash",
-            "gemini-3.6-flash",
-            "gemini-3.5-flash",
-            "gemini-3.5-flash-lite",
-            "gemini-flash-latest",
-            "gemini-2.5-pro",
-            "Outro (Personalizado)",
-        ]
+        # A lista vem de `ai.providers` para não divergir do que o provedor
+        # realmente aceita. "Outro (Personalizado)" fica sempre no fim — o
+        # código de leitura/escrita abaixo depende dessa posição.
+        self.gemini_models_list: list[str] = [*GEMINI_MODEL_CHOICES, "Outro (Personalizado)"]
         self.gemini_model_row = Adw.ComboRow(
             title="Modelo Gemini",
-            subtitle="gemini-3.8-flash (geração 3.8 / ultrarrápido) ou selecione outro",
+            subtitle=f"{GEMINI_MODEL_CHOICES[0]} acompanha a versão estável atual; fixe uma versão se preferir",
             model=Gtk.StringList.new(self.gemini_models_list),
         )
         self.gemini_model_row.connect("notify::selected", self._on_gemini_model_changed)
@@ -103,7 +117,6 @@ class PreferencesDialog(Adw.PreferencesDialog):
         )
         link_row.add_suffix(link_btn)
         self.gemini_group.add(link_row)
-        page.add(self.gemini_group)
 
         # ---------------------------------------------------------------------
         # Grupo: WorkBuddy AI (Tencent HY4)
@@ -151,10 +164,8 @@ class PreferencesDialog(Adw.PreferencesDialog):
 
         self.ollama_model_row = Adw.EntryRow(title="Modelo de Texto (ex: qwen2.5:7b, mistral)")
         self.ollama_group.add(self.ollama_model_row)
-
         self.ollama_vision_model_row = Adw.EntryRow(title="Modelo de Visão / Recortes (ex: minicpm-v, llava)")
         self.ollama_group.add(self.ollama_vision_model_row)
-        page.add(self.ollama_group)
 
         # ---------------------------------------------------------------------
         # Grupo: OpenAI / Compatível
@@ -171,6 +182,10 @@ class PreferencesDialog(Adw.PreferencesDialog):
 
         self.openai_model_row = Adw.EntryRow(title="Nome do Modelo")
         self.openai_group.add(self.openai_model_row)
+
+        # Cada provedor é um grupo independente; somente o ativo fica visível
+        page.add(self.gemini_group)
+        page.add(self.ollama_group)
         page.add(self.openai_group)
 
         # ---------------------------------------------------------------------
@@ -282,6 +297,8 @@ class PreferencesDialog(Adw.PreferencesDialog):
         crop_group.add(crop_info_row)
         page.add(crop_group)
 
+        self._build_wake_word_group(page)
+
         # ---------------------------------------------------------------------
         # Grupo: Atalho Global de Conversa por Voz (Live Voice)
         # ---------------------------------------------------------------------
@@ -354,6 +371,88 @@ class PreferencesDialog(Adw.PreferencesDialog):
         autostart_group.add(self.autostart_switch_row)
         page.add(autostart_group)
 
+    def _build_wake_word_group(self, page: Adw.PreferencesPage) -> None:
+        """Grupo de wake word ("palavra de ativação") — invocação hands-free.
+
+        As frases são definidas/editáveis aqui (separadas por vírgula). Como o
+        STT offline (Vosk) transcreve e comparamos por substring, qualquer frase
+        funciona — o usuário pode trocar/adicionar a qualquer momento.
+        """
+        wake_group = Adw.PreferencesGroup(
+            title="Palavra de Ativação (Wake Word)",
+            description="Invoque o Copilot por voz, sem tocar no teclado. A detecção é 100% local e offline (Vosk) — nenhum áudio sai do computador.",
+        )
+
+        self.wake_word_switch_row = Adw.SwitchRow(
+            title="Ativar Palavra de Ativação",
+            subtitle="Mantém o microfone ouvindo as frases abaixo quando o app está aberto",
+        )
+        wake_group.add(self.wake_word_switch_row)
+
+        self.wake_phrases_row = Adw.EntryRow(title="Frases de Ativação (separadas por vírgula)")
+        wake_group.add(self.wake_phrases_row)
+
+        self.wake_model_row = Adw.EntryRow(title="Caminho do Modelo Vosk (ex.: ~/modelos/vosk-pt)")
+        wake_group.add(self.wake_model_row)
+
+        wake_info_row = Adw.ActionRow(
+            title="Como Funciona a Palavra de Ativação",
+            subtitle="Diga uma das frases (ex.: \"ok copilot\") para iniciar a conversa por voz. "
+            "Você pode definir e alterar as frases livremente. Requer o pacote 'vosk' e um modelo "
+            "de linguagem (ex.: pt-BR) — sem eles, o recurso permanece desativado.",
+        )
+        wake_info_row.set_subtitle_lines(4)
+        wake_group.add(wake_info_row)
+        page.add(wake_group)
+
+    def _make_provider_button(self, key: str, label: str) -> Gtk.ToggleButton:
+        """Cria um botão do controle segmentado de provedores."""
+        btn = Gtk.ToggleButton()
+        btn.set_hexpand(True)
+        btn.set_child(Adw.ButtonContent(icon_name=self._resolve_icon(key), label=label))
+        btn.connect("toggled", self._on_provider_toggled, key)
+        return btn
+
+    def _on_provider_toggled(self, button: Gtk.ToggleButton, key: str) -> None:
+        """Mantém exatamente um provedor ativo e sincroniza os grupos visíveis."""
+        if button.get_active():
+            for other_key, other in self.provider_buttons.items():
+                if other_key != key and other.get_active():
+                    other.set_active(False)
+        self._update_visibility()
+
+    def active_provider(self) -> str:
+        """Retorna o provedor atualmente selecionado (padrão: gemini)."""
+        for key, btn in self.provider_buttons.items():
+            if btn.get_active():
+                return key
+        return "gemini"
+
+    def _update_visibility(self) -> None:
+        """Exibe apenas o grupo de configuração do provedor ativo."""
+        active = self.active_provider()
+        self.gemini_group.set_visible(active == "gemini")
+        self.ollama_group.set_visible(active == "ollama")
+        self.openai_group.set_visible(active == "openai")
+
+    def set_active_provider(self, provider: str) -> None:
+        """Seleciona o provedor informado, caindo para gemini se for inválido."""
+        if provider not in VALID_PROVIDERS:
+            provider = "gemini"
+        btn = self.provider_buttons.get(provider)
+        if btn is not None:
+            btn.set_active(True)
+
+    @staticmethod
+    def _resolve_icon(provider: str) -> str:
+        """Devolve o ícone do provedor, caindo para um genérico se o tema não o tiver."""
+        icon = PROVIDER_ICONS.get(provider, FALLBACK_ICON)
+        display = Gdk.Display.get_default()
+        if display is None:
+            return icon
+        theme = Gtk.IconTheme.get_for_display(display)
+        return icon if theme.has_icon(icon) else FALLBACK_ICON
+
     def _build_documents_privacy_page(self) -> None:
         page = Adw.PreferencesPage(title="Documentos & Privacidade", icon_name="security-high-symbolic")
         self.add(page)
@@ -385,18 +484,18 @@ class PreferencesDialog(Adw.PreferencesDialog):
 
         self.mask_pii_switch_row = Adw.SwitchRow(
             title="Mascarar Dados Sensíveis (PII)",
-            subtitle="Substitui automaticamente CPFs, cartões e chaves de API por marcadores anônimos antes do envio à nuvem",
+            subtitle="Remove CPFs, e-mails e chaves privadas antes de enviar consultas para nuvem",
         )
         privacy_group.add(self.mask_pii_switch_row)
 
         self.rag_local_only_switch_row = Adw.SwitchRow(
-            title="RAG Local Estrito (Ollama Offline)",
-            subtitle="Responde sobre documentos locais exclusivamente via modelo local offline (nenhum dado sai do computador)",
+            title="Forçar RAG Exclusivamente Local",
+            subtitle="Garante que documentos locais nunca sejam lidos por provedores externos",
         )
         privacy_group.add(self.rag_local_only_switch_row)
 
         self.ignored_patterns_entry_row = Adw.EntryRow(
-            title="Padrões Ignorados (.copilotignore)",
+            title="Padrões Ignorados (.env, *.key, senhas)",
         )
         privacy_group.add(self.ignored_patterns_entry_row)
 
@@ -492,9 +591,8 @@ class PreferencesDialog(Adw.PreferencesDialog):
         self.add_toast(toast)
 
     def _load_values(self) -> None:
-        # Define provedor ativo no ComboRow
-        prov_map = {"hybrid": 0, "gemini": 1, "workbuddy": 2, "ollama": 3, "openai": 4}
-        self.provider_row.set_selected(prov_map.get(self.config.provider, 0))
+        # Define provedor ativo no controle segmentado
+        self.set_active_provider(self.config.provider)
 
         # Gemini
         self.gemini_key_row.set_text(self.config.gemini_api_key)
@@ -553,6 +651,12 @@ class PreferencesDialog(Adw.PreferencesDialog):
                 break
         self.crop_shortcut_combo_row.set_selected(matching_crop_idx)
 
+        # Wake word ("palavra de ativação")
+        self.wake_word_switch_row.set_active(getattr(self.config, "wake_word_enabled", False))
+        phrases = getattr(self.config, "wake_phrases", None) or ["ok copilot", "olá copilot"]
+        self.wake_phrases_row.set_text(", ".join(phrases))
+        self.wake_model_row.set_text(getattr(self.config, "wake_word_model_path", ""))
+
         # Atalho Global de Conversa por Voz
         self.voice_shortcut_switch_row.set_active(getattr(self.config, "voice_shortcut_enabled", True))
         matching_voice_idx = 0
@@ -601,36 +705,19 @@ class PreferencesDialog(Adw.PreferencesDialog):
         is_custom = self.workbuddy_model_row.get_selected() == len(self.workbuddy_models_list) - 1
         self.workbuddy_custom_model_row.set_visible(is_custom)
 
-    def _on_provider_changed(self, *_args) -> None:
-        self._update_visibility()
-
-    def _update_visibility(self) -> None:
-        sel = self.provider_row.get_selected()
-        # 0: Híbrido (exibe Gemini + Ollama para que o usuário veja ambas configurações)
-        # 1: Gemini (apenas Gemini)
-        # 2: WorkBuddy (apenas WorkBuddy)
-        # 3: Ollama (apenas Ollama)
-        # 4: OpenAI (apenas OpenAI)
-        self.gemini_group.set_visible(sel in (0, 1))
-        self.workbuddy_group.set_visible(sel == 2)
-        self.ollama_group.set_visible(sel in (0, 3))
-        self.openai_group.set_visible(sel == 4)
-
     def _collect_current_config(self) -> CopilotConfig:
         cfg = CopilotConfig()
-        sel = self.provider_row.get_selected()
-        prov_rev = {0: "hybrid", 1: "gemini", 2: "workbuddy", 3: "ollama", 4: "openai"}
-        cfg.provider = prov_rev.get(sel, "hybrid")
+        cfg.provider = self.active_provider()
 
         # Gemini
         cfg.gemini_api_key = self.gemini_key_row.get_text().strip()
         g_idx = self.gemini_model_row.get_selected()
         if g_idx == len(self.gemini_models_list) - 1:
-            cfg.gemini_model = self.gemini_custom_model_row.get_text().strip() or "gemini-3.8-flash"
+            cfg.gemini_model = self.gemini_custom_model_row.get_text().strip() or DEFAULT_GEMINI_MODEL
         elif g_idx < len(self.gemini_models_list):
             cfg.gemini_model = self.gemini_models_list[g_idx]
         else:
-            cfg.gemini_model = "gemini-3.8-flash"
+            cfg.gemini_model = DEFAULT_GEMINI_MODEL
 
         # WorkBuddy
         cfg.workbuddy_api_key = self.workbuddy_key_row.get_text().strip()
@@ -671,6 +758,13 @@ class PreferencesDialog(Adw.PreferencesDialog):
             cfg.crop_shortcut_key = self.crop_shortcut_options[sel_crop][0]
         else:
             cfg.crop_shortcut_key = "<Super><Shift>s"
+
+        # Wake word ("palavra de ativação")
+        cfg.wake_word_enabled = self.wake_word_switch_row.get_active()
+        raw_phrases = self.wake_phrases_row.get_text()
+        phrases = [p.strip() for p in raw_phrases.split(",") if p.strip()]
+        cfg.wake_phrases = phrases or ["ok copilot", "olá copilot"]
+        cfg.wake_word_model_path = self.wake_model_row.get_text().strip()
 
         # Atalho Global de Conversa por Voz
         cfg.voice_shortcut_enabled = self.voice_shortcut_switch_row.get_active()
@@ -773,4 +867,13 @@ class PreferencesDialog(Adw.PreferencesDialog):
             self.on_saved(cfg)
         toast = Adw.Toast.new("Configurações salvas com sucesso!")
         self.add_toast(toast)
-        GLib.timeout_add(700, lambda: (self.close(), GLib.SOURCE_REMOVE)[1])
+
+        # Fecha depois de o toast aparecer. Antes era
+        # `lambda: (self.close(), GLib.SOURCE_REMOVE)[1]` — a tupla servia só
+        # para enfiar duas coisas numa lambda, e lia-se como se o retorno fosse
+        # o resultado de close().
+        def close_after_toast() -> bool:
+            self.close()
+            return GLib.SOURCE_REMOVE
+
+        GLib.timeout_add(700, close_after_toast)

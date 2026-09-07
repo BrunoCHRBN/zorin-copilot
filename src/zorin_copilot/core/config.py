@@ -53,6 +53,15 @@ class CopilotConfig:
     voice_shortcut_enabled: bool = True
     voice_shortcut_key: str = "<Super><Shift>v"
 
+    # Atalho Global de Voz ao Vivo (Fase 3, parte B)
+    live_voice_hotkey_enabled: bool = True
+    live_voice_hotkey: str = "<Super>v"
+
+    # Wake word ("palavra de ativação") — detecção offline e hands-free
+    wake_word_enabled: bool = False
+    wake_phrases: list = field(default_factory=lambda: ["ok copilot", "olá copilot"])
+    wake_word_model_path: str = ""  # caminho do modelo Vosk (ex.: pt-BR)
+
     # Configurações de Voz Local (Piper TTS + faster-whisper)
     piper_voice_model: str = "pt_BR-faber-medium"
     whisper_model: str = "small"
@@ -80,7 +89,6 @@ class CopilotConfig:
     rag_local_only: bool = False
     mask_pii: bool = True
     max_file_size_mb: int = 40
-    
     # Prompt de sistema customizável
     system_prompt: str = (
         "Você é o Zorin Copilot, assistente inteligente do sistema operacional Zorin OS 18 Core "

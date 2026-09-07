@@ -23,6 +23,7 @@ from ..core.files import FileManager
 from ..core.media import MediaPlayerManager
 from ..core.memory import MemoryManager
 from ..core.rag import LocalDocumentRAG
+from ..core.usage import TokenUsageTracker
 from ..core.web_search import WebSearchClient
 
 logger = logging.getLogger(__name__)
@@ -101,11 +102,16 @@ class IntentEngine:
         self.search_client = search_client or WebSearchClient()
         self.rag = rag or LocalDocumentRAG(memory=self.memory)
         self.llm_provider: BaseLLMProvider = get_llm_provider(self.config)
+        # Tracker de tokens por sessão (uma janela). Ligado ao provedor para que
+        # cada resposta de modelo acumule seu consumo automaticamente.
+        self.usage_tracker = TokenUsageTracker()
+        self.llm_provider.usage_tracker = self.usage_tracker
 
     def reload_config(self, config: CopilotConfig | None = None) -> None:
         """Recarrega a configuração e reinicializa o provedor de LLM."""
         self.config = config or CopilotConfig.load()
         self.llm_provider = get_llm_provider(self.config)
+        self.llm_provider.usage_tracker = self.usage_tracker
 
     def _get_situational_context(self) -> str:
         """Coleta contexto situacional silencioso do desktop (janela ativa, horário, mídia tocando)."""

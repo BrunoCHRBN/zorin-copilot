@@ -125,14 +125,25 @@ class GeminiUILayoutTest(unittest.TestCase):
 
     def test_fence_header_selector(self):
         """Verifica se o botão de cerca espacial no HeaderBar está presente e permite alternar telas."""
+        from zorin_copilot.core.fence import MonitorInfo
+
+        # Injeta monitores conhecidos: o teste não pode depender do inventário
+        # da máquina onde roda (nem de existir mais de um monitor).
+        self.win.fence._monitors = [
+            MonitorInfo(index=0, name="Escrivaninha", model="X", x=0, y=0, width=1920, height=1080, is_primary=True),
+            MonitorInfo(index=1, name="Estante", model="Y", x=1920, y=0, width=1280, height=1024, is_primary=False),
+        ]
+        self.win.fence.set_active_monitor(0)
+        self.win.header.refresh_fence_label()
+
         self.assertIsNotNone(self.win.fence_menu_btn)
         self.assertIsNotNone(self.win.fence_lbl)
-        self.assertIn("AOC", self.win.fence_lbl.get_text())
+        self.assertEqual(self.win.fence_lbl.get_text(), "Escrivaninha")
 
         # Alterna para monitor secundário
         popover = self.win.fence_menu_btn.get_popover()
         self.win._on_select_fence_monitor(1, popover)
-        self.assertIn("VIE", self.win.fence_lbl.get_text())
+        self.assertEqual(self.win.fence_lbl.get_text(), "Estante")
 
         # Alterna para todas as telas
         self.win._on_select_all_monitors(popover)
@@ -148,52 +159,58 @@ class GeminiUILayoutTest(unittest.TestCase):
         self.assertFalse(self.win.fence.is_emergency_stopped)
 
 
-    def test_on_plan_ready_renders_and_persists_turn(self):
-        """Garante que _on_plan_ready adiciona o turno ao chat_stream_box e persiste no histórico sem sumir."""
-        plan = ActionPlan(thought="Olá! Como posso ajudar você hoje no Zorin OS?")
-        self.win._on_plan_ready(plan, prompt_text="oi", attached_image=None)
+class TurnPlanRebuildTest(unittest.TestCase):
+    """Os botões de ação têm de sobreviver a uma reconstrução do fluxo.
 
-        # 1. Turno registrado na sessão
-        self.assertEqual(len(self.win.session.turns), 1)
-        self.assertEqual(self.win.session.turns[0].prompt, "oi")
-        self.assertEqual(self.win.session.turns[0].answer, "Olá! Como posso ajudar você hoje no Zorin OS?")
+    Regressão: `rebuild()` passava `ctx.current_plan` só para o último turno,
+    então as respostas anteriores perdiam seus botões de ação.
+    """
 
-        # 2. Widget consolidado no fluxo de chat
-        self.assertFalse(self.win.welcome_box.get_visible())
-        self.assertIsNotNone(self.win.chat_stream_box.get_first_child())
-        self.assertIsNone(self.win._pending_turn_box)
+    @classmethod
+    def setUpClass(cls):
+        cls.app = Adw.Application(application_id="org.zorin.copilot.test.turn_plan")
 
-        # 3. Histórico lateral populado
-        topics = self.win.engine.memory.list_chat_topics()
-        self.assertGreaterEqual(len(topics), 1)
-        self.assertEqual(topics[0]["id"], self.win.session.id)
+    def setUp(self):
+        self.win = CopilotWindow(self.app)
 
-    def test_action_rows_for_new_action_types(self):
-        """Verifica se _create_action_row renderiza sem erros OPEN_DOCUMENT, READ_PAGE e DEEP_RESEARCH."""
-        actions = [
-            DesktopAction(ActionType.OPEN_DOCUMENT, "/home/user/doc.pdf", {"page_number": 2}),
-            DesktopAction(ActionType.READ_PAGE, "https://zorin.com"),
-            DesktopAction(ActionType.DEEP_RESEARCH, "IA no Linux"),
-        ]
-        for act in actions:
-            row = self.win._create_action_row(act)
-            self.assertIsNotNone(row)
-            self.assertIsInstance(row, Adw.ActionRow)
+    @staticmethod
+    def _action_blocks(widget) -> list[str]:
+        found = []
+        stack = [widget]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, Gtk.Label) and node.get_text().startswith("Ações Propostas"):
+                found.append(node.get_text())
+            child = node.get_first_child()
+            while child:
+                stack.append(child)
+                child = child.get_next_sibling()
+        return found
 
-    def test_centered_input_slot_on_empty_chat(self):
-        """Garante que a barra de entrada fica no centro no estado vazio da conversa."""
+    def test_rebuild_keeps_actions_of_earlier_turns(self):
+        from zorin_copilot.ai.actions import ActionPlan, ActionType, DesktopAction
+
+        # A última resposta é puramente informativa: se o plano não estivesse
+        # gravado no turno, nenhum bloco apareceria e o teste pegaria o bug.
+        self.win.session.record_turn(
+            "abrir o firefox",
+            "certo",
+            plan=ActionPlan(thought="x", actions=[DesktopAction(ActionType.LAUNCH_APP, "Firefox")]),
+        )
+        self.win.session.record_turn(
+            "abrir o terminal",
+            "certo",
+            plan=ActionPlan(thought="y", actions=[DesktopAction(ActionType.LAUNCH_APP, "Terminal")]),
+        )
+        self.win.session.record_turn("obrigado", "de nada")  # sem plano
+
         self.win._rebuild_chat_stream()
-        self.assertTrue(self.win.welcome_box.get_visible())
-        self.assertFalse(self.win.clamp_bottom.get_visible())
-        self.assertEqual(self.win.input_cluster.get_parent(), self.win.center_input_slot)
+        self.assertEqual(self._action_blocks(self.win.chat_stream.stream_box), ["Ações Propostas (1):"] * 2)
 
-    def test_docked_input_slot_when_conversation_has_turns(self):
-        """Garante que a barra de entrada migra para o rodapé quando há mensagens."""
-        self.win.session.record_turn("Como usar Docker?", "Use docker run.")
+    def test_rebuild_without_plans_renders_no_actions(self):
+        self.win.session.record_turn("oi", "olá")
         self.win._rebuild_chat_stream()
-        self.assertFalse(self.win.welcome_box.get_visible())
-        self.assertTrue(self.win.clamp_bottom.get_visible())
-        self.assertEqual(self.win.input_cluster.get_parent(), self.win.bottom_input_slot)
+        self.assertEqual(self._action_blocks(self.win.chat_stream.stream_box), [])
 
 
 if __name__ == "__main__":

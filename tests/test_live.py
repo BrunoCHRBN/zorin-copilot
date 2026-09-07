@@ -9,6 +9,7 @@ from zorin_copilot.ai.live import (
     LiveVoiceState,
 )
 from zorin_copilot.core.config import CopilotConfig
+from zorin_copilot.ui.live_view import live_model_label
 
 
 class LiveVoiceClientTest(unittest.TestCase):
@@ -105,18 +106,28 @@ class LiveVoiceClientTest(unittest.TestCase):
 
     @patch("zorin_copilot.core.files.FileManager.write_document")
     def test_dispatch_tool_write_document(self, mock_write):
-        """Testa despacho de criação de arquivo na chamada de voz."""
+        """Criação de arquivo é ação de risco: exige confirmação antes de executar."""
         mock_write.return_value = (True, "Arquivo salvo", "/home/bruno/doc.md")
-        res = self.client._dispatch_tool("write_document", {"filename": "doc.md", "content": "olá mundo"})
+        blocked = self.client._dispatch_tool("write_document", {"filename": "doc.md", "content": "olá mundo"})
+        self.assertFalse(blocked["success"])
+        self.assertTrue(blocked["requires_confirmation"])
+        res = self.client._dispatch_tool(
+            "confirm_action", {"confirmation_id": blocked["confirmation_id"], "approve": True}
+        )
         self.assertTrue(res["success"])
         self.assertEqual(res["path"], "/home/bruno/doc.md")
         mock_write.assert_called_once_with("doc.md", "olá mundo", directory=None)
 
     @patch("zorin_copilot.core.files.FileManager.organize_directory")
     def test_dispatch_tool_organize_directory(self, mock_org):
-        """Testa despacho de organização de pasta na chamada de voz."""
+        """Organização de pasta é ação de risco: exige confirmação antes de executar."""
         mock_org.return_value = (True, "Organizado com sucesso", {"Imagens": 2})
-        res = self.client._dispatch_tool("organize_directory", {"directory": "~/Downloads", "dry_run": False})
+        blocked = self.client._dispatch_tool("organize_directory", {"directory": "~/Downloads", "dry_run": False})
+        self.assertFalse(blocked["success"])
+        self.assertTrue(blocked["requires_confirmation"])
+        res = self.client._dispatch_tool(
+            "confirm_action", {"confirmation_id": blocked["confirmation_id"], "approve": True}
+        )
         self.assertTrue(res["success"])
         self.assertIn("Imagens", res["stats"])
         mock_org.assert_called_once_with(directory="~/Downloads", dry_run=False)
@@ -194,11 +205,16 @@ class LiveVoiceClientTest(unittest.TestCase):
         self.assertEqual(res_lookup["contacts"][0]["email"], "lucas@dev.com")
 
     def test_dispatch_tool_email_compose(self):
-        """Testa composição de e-mail com contato resolvido."""
+        """Composição de e-mail é ação de risco: exige confirmação antes de executar."""
         self.client.memory.save_contact("Carlos Contador", "carlos@contabilidade.com", aliases=["contador"])
-        res = self.client._dispatch_tool(
+        blocked = self.client._dispatch_tool(
             "email_compose",
             {"recipient": "contador", "subject": "Balanço Mensal", "body": "Segue relatório."},
+        )
+        self.assertFalse(blocked["success"])
+        self.assertTrue(blocked["requires_confirmation"])
+        res = self.client._dispatch_tool(
+            "confirm_action", {"confirmation_id": blocked["confirmation_id"], "approve": True}
         )
         self.assertTrue(res["success"])
         self.assertIn("carlos@contabilidade.com", res["message"])
@@ -261,6 +277,26 @@ class LiveVoiceClientTest(unittest.TestCase):
                 {"file_path": str(sample_file), "page_number": 1},
             )
             self.assertTrue(res_open["success"])
+
+
+class LiveModelLabelTest(unittest.TestCase):
+    """O rótulo do modelo na UI de voz acompanha o modelo configurado."""
+
+    def test_strips_path_and_suffixes(self):
+        self.assertEqual(
+            live_model_label("models/gemini-2.5-flash-native-audio-latest"), "Gemini 2.5"
+        )
+        self.assertEqual(live_model_label("models/gemini-3.1-flash-live-preview"), "Gemini 3.1")
+
+    def test_without_gemini_prefix_returns_the_id(self):
+        self.assertEqual(live_model_label("models/meu-modelo"), "meu-modelo")
+
+    def test_empty_falls_back_to_gemini(self):
+        self.assertEqual(live_model_label(""), "Gemini")
+        self.assertEqual(live_model_label(None), "Gemini")
+
+    def test_default_config_produces_2_5(self):
+        self.assertEqual(live_model_label(CopilotConfig().gemini_live_model), "Gemini 2.5")
 
 
 if __name__ == "__main__":

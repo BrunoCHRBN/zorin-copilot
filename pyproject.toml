@@ -29,6 +29,15 @@ dependencies = [
     "faster-whisper>=1.0.0",
 ]
 
+# Pillow fica de fora de `dependencies`: `core/vision.py` e `core/clipboard.py`
+# a importam dentro de try/except e degradam sem ela. Mas os testes exercem os
+# caminhos que dependem da biblioteca, então ela é obrigatória para rodar a suíte.
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0",
+    "Pillow>=9.0",
+]
+
 [project.scripts]
 zorin-copilot = "zorin_copilot.ui.app:main"
 zorin-copilot-cli = "zorin_copilot.cli:main"
@@ -36,3 +45,7 @@ hy4 = "zorin_copilot.hy4:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# A folha de estilo precisa viajar dentro do pacote, senão o app sobe sem tema.
+[tool.setuptools.package-data]
+"zorin_copilot.data" = ["*.css"]

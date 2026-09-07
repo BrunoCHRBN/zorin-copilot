@@ -8,12 +8,13 @@ import json
 import logging
 import re
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Final
 
 import requests
 
 from .actions import ActionType, DesktopAction
 from ..core.config import CopilotConfig
+from ..core.usage import TokenUsage, TokenUsageTracker, usage_from_gemini, usage_from_ollama, usage_from_openai
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +93,15 @@ Você DEVE responder EXCLUSIVAMENTE em formato JSON com o seguinte esquema:
 
 
 class BaseLLMProvider(ABC):
+    # Preenchido pelo `IntentEngine` com o tracker da sessão. `None` significa
+    # "não rastrear" — útil para chamadas avulsas fora da janela.
+    usage_tracker: TokenUsageTracker | None = None
+
+    def _record_usage(self, usage: TokenUsage | None, *, provider: str, model: str) -> None:
+        """Acumula o consumo de uma resposta no tracker da sessão, se houver."""
+        if self.usage_tracker is not None and usage is not None:
+            self.usage_tracker.record(usage, provider=provider, model=model)
+
     @abstractmethod
     def is_configured(self) -> bool:
         """Indica se as credenciais ou endpoints necessários estão configurados."""
@@ -247,12 +257,63 @@ class BaseLLMProvider(ABC):
             return raw_text, fallback_actions
 
 
+#: Aliases "flutuantes" mantidos pelo Google: apontam sempre para a versão
+#: estável mais recente da família. São a escolha durável — continuam válidos
+#: quando uma versão fixa é descontinuada (foi o caso do Gemini 2.0, desligado
+#: em 2026), e por isso vêm primeiro.
+GEMINI_ALIASES: Final[tuple[str, ...]] = (
+    "gemini-flash-latest",
+    "gemini-flash-lite-latest",
+)
+
+#: Versões fixas (pinned), para quem precisa de comportamento reprodutível.
+#: Listadas da mais nova para a mais antiga; nenhuma delas está descontinuada.
+GEMINI_PINNED_MODELS: Final[tuple[str, ...]] = (
+    "gemini-3.8-flash",
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+)
+
+#: Fonte única de verdade dos modelos oferecidos na interface. Antes esta lista
+#: era replicada em `preferences.py` (com o default apontando para outro modelo
+#: que não o anunciado como recomendado) e as cadeias de fallback do provedor
+#: citavam uma terceira combinação. Agora tudo deriva daqui.
+GEMINI_MODEL_CHOICES: Final[list[str]] = [*GEMINI_ALIASES, *GEMINI_PINNED_MODELS]
+
+#: Ordem de fallback: alias mais estável primeiro, depois versões fixas.
+GEMINI_FALLBACK_MODELS: Final[tuple[str, ...]] = (
+    "gemini-flash-latest",
+    "gemini-flash-lite-latest",
+    "gemini-3.8-flash",
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+)
+
+#: Alias em vez de versão fixa: o app roda instalado no desktop do usuário e não
+#: recebe atualizações com frequência, então um modelo fixo viraria erro 404
+#: silencioso daqui a alguns meses. O alias acompanha a versão estável atual.
+DEFAULT_GEMINI_MODEL: Final[str] = "gemini-flash-latest"
+
+
+def _with_fallbacks(model: str) -> list[str]:
+    """Modelo escolhido primeiro, depois os fallbacks, sem repetição."""
+    ordered = [model]
+    for candidate in GEMINI_FALLBACK_MODELS:
+        if candidate not in ordered:
+            ordered.append(candidate)
+    return ordered
+
+
 class GeminiProvider(BaseLLMProvider):
     """Provedor oficial Google Gemini via REST API."""
 
-    def __init__(self, api_key: str, model: str = "gemini-2.5-flash"):
+    def __init__(self, api_key: str, model: str = DEFAULT_GEMINI_MODEL):
         self.api_key = api_key.strip()
-        self.model = model.strip() or "gemini-2.5-flash"
+        self.model = model.strip() or DEFAULT_GEMINI_MODEL
 
     def is_configured(self) -> bool:
         return bool(self.api_key)
@@ -260,8 +321,7 @@ class GeminiProvider(BaseLLMProvider):
     def test_connection(self) -> tuple[bool, str]:
         if not self.is_configured():
             return False, "Chave de API do Gemini não informada."
-        
-        models_to_test = [self.model, "gemini-flash-latest"] if self.model != "gemini-flash-latest" else [self.model]
+        models_to_test = _with_fallbacks(self.model)
         last_error = ""
         for m in models_to_test:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={self.api_key}"
@@ -339,10 +399,7 @@ class GeminiProvider(BaseLLMProvider):
         }
 
         # Modelos com fallback em caso de alta demanda temporária (503 / 429 / 404)
-        models_to_try = [self.model]
-        for fallback in ["gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-flash-latest", "gemini-flash-lite-latest"]:
-            if fallback not in models_to_try:
-                models_to_try.append(fallback)
+        models_to_try = _with_fallbacks(self.model)
 
         last_error = ""
         for current_model in models_to_try:
@@ -356,6 +413,9 @@ class GeminiProvider(BaseLLMProvider):
                         content_parts = candidates[0].get("content", {}).get("parts", [])
                         if content_parts:
                             raw_text = content_parts[0].get("text", "")
+                            self._record_usage(
+                                usage_from_gemini(data), provider="gemini", model=current_model
+                            )
                             return self.parse_response_payload(raw_text)
 
                 last_error = f"Erro no modelo {current_model} ({resp.status_code}): {resp.text[:180]}"
@@ -467,6 +527,7 @@ class OllamaProvider(BaseLLMProvider):
                 return f"Erro no Ollama ({resp.status_code}): {err_text[:200]}", []
             data = resp.json()
             raw_text = data.get("message", {}).get("content", "")
+            self._record_usage(usage_from_ollama(data), provider="ollama", model=self.model)
             return self.parse_response_payload(raw_text)
         except Exception as exc:
             return f"Erro ao consultar Ollama local ({selected_model}): {exc}", []
@@ -553,6 +614,7 @@ class OpenAICompatProvider(BaseLLMProvider):
                 return f"Erro na API ({resp.status_code}): {resp.text[:200]}", []
             data = resp.json()
             raw_text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            self._record_usage(usage_from_openai(data), provider="openai", model=self.model)
             return self.parse_response_payload(raw_text)
         except Exception as exc:
             return f"Erro na requisição: {exc}", []
