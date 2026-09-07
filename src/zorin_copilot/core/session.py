@@ -125,8 +125,11 @@ class TopicSession:
             return cleaned
         return cleaned[:47].rstrip() + "..."
 
-    def record_turn(self, prompt: str, answer: str) -> None:
-        """Registra uma interação usuário/assistente na demanda ativa."""
+    def record_turn(self, prompt: str, answer: str) -> ChatTurn:
+        """Registra uma interação usuário/assistente na demanda ativa.
+
+        Retorna o turno criado para que a interface possa renderizá-lo imediatamente.
+        """
         clean_p = prompt.strip()
         clean_a = answer.strip()
         turn = ChatTurn(prompt=clean_p, answer=clean_a)
@@ -144,6 +147,8 @@ class TopicSession:
         else:
             # Guarda em memória temporária caso o usuário decida fixar logo em seguida
             self._last_unpinned_turn = turn
+
+        return turn
 
     def get_history_for_llm(self) -> list[dict[str, str]]:
         """Retorna o histórico formatado para envio aos provedores de IA (Gemini, Ollama, OpenAI)."""

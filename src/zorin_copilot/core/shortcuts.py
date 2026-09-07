@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+from dataclasses import dataclass
 from typing import Final
 
 import gi
@@ -17,6 +18,31 @@ gi.require_version("Gio", "2.0")
 from gi.repository import Gio  # noqa: E402
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class AppShortcut:
+    """Atalho interno da janela (escopo de aplicação).
+
+    Diferente dos atalhos globais de sistema (que vivem no GNOME via GSettings),
+    estes só têm efeito enquanto a janela do Copilot está aberta e focada.
+    """
+
+    name: str
+    accelerator: str
+    description: str
+
+
+#: Atalhos de aplicação declarados em um único lugar, para que possam ser
+#: reutilizados na instalação dos controllers e futuramente numa janela de
+#: referência ("cheatsheet") exibida ao usuário.
+APP_SHORTCUTS: Final[tuple[AppShortcut, ...]] = (
+    AppShortcut("app.quit", "<Control>q", "Sair do Zorin Copilot"),
+    AppShortcut("app.toggle-live-voice", "<Control>m", "Iniciar/encerrar conversa por voz"),
+    AppShortcut("app.toggle-sidebar", "<Control>h", "Mostrar/ocultar a barra de conversas"),
+    AppShortcut("app.new-topic", "<Control>n", "Iniciar uma nova conversa"),
+    AppShortcut("app.toggle-pin", "<Control>p", "Fixar a conversa atual no topo"),
+)
 
 MEDIA_KEYS_SCHEMA: Final = "org.gnome.settings-daemon.plugins.media-keys"
 CUSTOM_KEY_SCHEMA: Final = "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding"
