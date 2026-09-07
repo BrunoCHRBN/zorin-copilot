@@ -26,6 +26,7 @@ except ImportError:
     websockets = None
 
 from ..core.apps import AppManager
+from ..core.a11y import DesktopInspector
 from ..core.browser import BrowserManager
 from ..core.calendar import CalendarManager
 from ..core.config import CopilotConfig
@@ -454,6 +455,67 @@ LIVE_TOOLS_DECLARATION = [
                     "required": ["file_path"],
                 },
             },
+            {
+                "name": "get_ui_tree",
+                "description": "Obtém a árvore de acessibilidade (elementos interativos com UIDs [n.n]) do aplicativo em uso. CHAME ESTA PRIMEIRO para descobrir os UIDs antes de click_element/type_element. Sem UIDs, use mouse_click/keyboard_type como fallback.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "app_name": {
+                            "type": "STRING",
+                            "description": "Nome do aplicativo alvo (opcional). Se omitido, usa o app com foco no teclado no momento.",
+                        }
+                    },
+                },
+            },
+            {
+                "name": "click_element",
+                "description": "Clica/ativa um elemento da interface pelo seu UID obtido via get_ui_tree (ex: '0.1'). Interação semântica e precisa, sem depender de coordenadas de tela.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "uid": {
+                            "type": "STRING",
+                            "description": "UID do elemento retornado por get_ui_tree (ex: '0.1')",
+                        },
+                        "app_name": {
+                            "type": "STRING",
+                            "description": "Nome do aplicativo alvo (opcional, mas recomendado para estabilidade do UID).",
+                        },
+                    },
+                    "required": ["uid"],
+                },
+            },
+            {
+                "name": "type_element",
+                "description": "Digita texto em um campo da interface pelo seu UID obtido via get_ui_tree (ex: '0.0'). Inserção semântica via AT-SPI, com fallback para teclado virtual. Sem UID, use keyboard_type como fallback.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "uid": {
+                            "type": "STRING",
+                            "description": "UID do campo de texto retornado por get_ui_tree (ex: '0.0')",
+                        },
+                        "text": {
+                            "type": "STRING",
+                            "description": "Texto a ser digitado no campo",
+                        },
+                        "press_enter": {
+                            "type": "BOOLEAN",
+                            "description": "Se true, pressiona Enter após a digitação",
+                        },
+                        "append": {
+                            "type": "BOOLEAN",
+                            "description": "Se true, anexa ao texto existente em vez de substituir",
+                        },
+                        "app_name": {
+                            "type": "STRING",
+                            "description": "Nome do aplicativo alvo (opcional, mas recomendado para estabilidade do UID).",
+                        },
+                    },
+                    "required": ["uid", "text"],
+                },
+            },
         ]
     }
 ]
@@ -479,6 +541,7 @@ class GeminiLiveClient:
 
         self.fence = ScreenFenceManager()
         self.input_driver = VirtualInputDriver(fence=self.fence)
+        self.inspector = DesktopInspector()
         self.email_mgr = EmailManager(memory=self.memory)
         self.cal_mgr = CalendarManager(memory=self.memory)
         self.rag = LocalDocumentRAG(memory=self.memory)
@@ -683,6 +746,7 @@ class GeminiLiveClient:
                     f"Telas conectadas no desktop do usuário: [{monitors_desc}]. A tela ativa autorizada para ações no momento é '{active_mon_name}'. "
                     "Para alternar a tela autorizada de trabalho, use a ferramenta 'screen_fence_control'. "
                     "Para clicar ou digitar no desktop, use 'mouse_click', 'keyboard_type' e 'keyboard_hotkey'. Suas coordenadas serão validadas pela cerca espacial. "
+                    "Para interagir com a interface de um aplicativo específico de forma precisa e semântica, prefira primeiro 'get_ui_tree' para obter os elementos com UIDs [n.n], e então 'click_element(uid)' / 'type_element(uid, text)'. Use 'mouse_click'/'keyboard_type' apenas como fallback ou quando não houver UID. "
                     "Ao redigir ou iniciar e-mails, use 'email_compose'. NUNCA invente ou adivinhe endereços de e-mail; se não souber, use 'contact_lookup' ou pergunte ao usuário. "
                     "Para marcar compromissos ou consultar a agenda, use 'calendar_event'. "
                     "Para pesquisas na web, use 'browser_search' ou 'web_search'. "
@@ -1038,6 +1102,92 @@ class GeminiLiveClient:
                 keys = args.get("keys", [])
                 ok, msg = self.input_driver.hotkey(*keys)
                 return {"success": ok, "message": msg}
+
+            elif name == "get_ui_tree":
+                app_name = args.get("app_name")
+                root = self.inspector.get_ui_tree(app_name)
+                if root is None:
+                    return {
+                        "success": False,
+                        "message": "Árvore de acessibilidade indisponível (AT-SPI ausente ou nenhum app com foco). Use mouse_click/keyboard_type como fallback.",
+                    }
+                tree_text = root.to_summary()
+                MAX_TREE = 6000
+                truncated = len(tree_text) > MAX_TREE
+                if truncated:
+                    tree_text = tree_text[:MAX_TREE] + "\n... (árvore truncada)"
+                return {
+                    "success": True,
+                    "app": root.name,
+                    "app_name": app_name or root.name,
+                    "tree": tree_text,
+                    "truncated": truncated,
+                    "message": f"Árvore de '{root.name}' obtida. Use click_element(uid)/type_element(uid, text) com os UIDs [n.n].",
+                }
+
+            elif name == "click_element":
+                uid = str(args.get("uid", "")).strip()
+                if not uid:
+                    return {"success": False, "message": "UID do elemento é obrigatório."}
+                app_name = args.get("app_name")
+                root = self.inspector.get_ui_tree(app_name)
+                if root is None:
+                    return {"success": False, "message": "Árvore de acessibilidade indisponível (AT-SPI)."}
+                element = DesktopInspector.find_element_by_uid(root, uid)
+                if element is None:
+                    return {
+                        "success": False,
+                        "message": f"Elemento com UID '{uid}' não encontrado na árvore atual. Chame get_ui_tree novamente.",
+                    }
+                ok = self.inspector.do_action(element, 0)
+                return {
+                    "success": ok,
+                    "message": (
+                        f"Clique em '{element.name}' (UID {uid}) executado."
+                        if ok
+                        else f"Falha ao clicar em '{element.name}' (UID {uid})."
+                    ),
+                }
+
+            elif name == "type_element":
+                uid = str(args.get("uid", "")).strip()
+                text = args.get("text", "")
+                if not uid:
+                    return {"success": False, "message": "UID do elemento é obrigatório."}
+                if not text:
+                    return {"success": False, "message": "Texto a digitar é obrigatório."}
+                app_name = args.get("app_name")
+                root = self.inspector.get_ui_tree(app_name)
+                if root is None:
+                    return {"success": False, "message": "Árvore de acessibilidade indisponível (AT-SPI)."}
+                element = DesktopInspector.find_element_by_uid(root, uid)
+                if element is None:
+                    return {
+                        "success": False,
+                        "message": f"Elemento com UID '{uid}' não encontrado. Chame get_ui_tree novamente.",
+                    }
+                ok, msg = self.inspector.text_insert(
+                    element, text, append=bool(args.get("append", False))
+                )
+                if ok:
+                    return {
+                        "success": True,
+                        "message": f"Texto digitado em '{element.name}' (UID {uid}) via AT-SPI.",
+                    }
+                # Fallback: foca o campo e emite digitação por input virtual (ydotool/uinput)
+                self.inspector.focus_element(element)
+                ok2, msg2 = self.input_driver.type_text(
+                    text, press_enter=bool(args.get("press_enter", False))
+                )
+                if ok2:
+                    return {
+                        "success": True,
+                        "message": f"Texto digitado em '{element.name}' (UID {uid}) via input virtual (fallback).",
+                    }
+                return {
+                    "success": False,
+                    "message": f"Falha ao digitar: semântico=[{msg}] virtual=[{msg2}]",
+                }
 
             elif name == "contact_lookup":
                 q = args.get("query", "").strip()
