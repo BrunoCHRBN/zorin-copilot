@@ -67,7 +67,13 @@ class CopilotConfig:
     whisper_model: str = "small"
     voice_visualizer_style: str = "waves"  # "waves", "bars", "matrix", "orb"
     voice_overlay_mode: str = "pill"  # "pill" (Pílula Compacta Flutuante) ou "full" (Janela Completa)
-    
+
+    # Posicionamento e comportamento da pílula de voz (voice_overlay_mode="pill")
+    pill_monitor_idx: int = -1  # -1 = auto (monitor sob o cursor), senão índice Gdk.Display.get_monitors()
+    pill_corner: str = "top-center"  # "top-center", "top-right", "top-left", "bottom-center"
+    pill_pinned: bool = True  # manter acima de outras janelas (best-effort; X11-only)
+    pill_idle_timeout_sec: int = 8  # 0 = nunca esmaecer; fade ocioso para 30% de opacidade
+
     # Inicialização automática com o sistema (Autostart no boot/login)
     autostart_enabled: bool = False
 

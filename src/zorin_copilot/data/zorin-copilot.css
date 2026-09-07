@@ -733,3 +733,82 @@ window.light-glass .voice-pill-btn:hover {
     background-color: alpha(@accent_color, 0.12);
 }
 
+/* --- Voice Pill — probes de cor e estados dinâmicos --- */
+
+/* Probes invisíveis: usados pelo Python para ler cores por estado via get_color().
+   Não usar set_visible(False) — isso zera o estilo resolvido. set_opacity(0) preserva.
+   LISTENING reusa @accent_color para permitir re-tema do usuário; demais estados
+   têm suas próprias @define-color para que user.css possa trocar sem editar Python. */
+@define-color voice_pill_speaking_color #9140ab;
+@define-color voice_pill_thinking_color #f5c211;
+@define-color voice_pill_executing_color #2ec27e;
+@define-color voice_pill_error_color #e01b24;
+
+window.voice-pill-window .pill-probe {
+    min-width: 1px;
+    min-height: 1px;
+    opacity: 0;
+}
+window.voice-pill-window .pill-probe-listening  { color: @accent_color; }
+window.voice-pill-window .pill-probe-speaking   { color: @voice_pill_speaking_color; }
+window.voice-pill-window .pill-probe-thinking   { color: @voice_pill_thinking_color; }
+window.voice-pill-window .pill-probe-executing  { color: @voice_pill_executing_color; }
+window.voice-pill-window .pill-probe-error      { color: @voice_pill_error_color; }
+
+/* Estados do container — borda tingida sinaliza o modo atual */
+window.voice-pill-window .voice-pill-container.pill-muted {
+    border-color: alpha(#e01b24, 0.7);
+}
+window.voice-pill-window .voice-pill-container.pill-privacy {
+    border-color: alpha(#f5c211, 0.65);
+}
+window.voice-pill-window .voice-pill-container.pill-interrupting {
+    border-color: alpha(#e01b24, 0.85);
+    box-shadow: 0 12px 36px rgba(224, 27, 36, 0.45), 0 0 28px alpha(#e01b24, 0.5);
+}
+
+/* REC dot sobre o avatar quando o vídeo está ativo */
+window.voice-pill-window .pill-rec-dot {
+    color: #e01b24;
+    font-weight: bold;
+    background-color: alpha(#ffffff, 0.9);
+    border-radius: 9999px;
+    padding: 0 2px;
+}
+window.light-glass .voice-pill-window .pill-rec-dot {
+    background-color: alpha(@accent_color, 0.15);
+    color: #c01a22;
+}
+
+/* Chip de tool call — usa o status_lbl e adiciona classe */
+window.voice-pill-window .voice-pill-container.pill-chip-ok  .voice-pill-status {
+    color: #2ec27e;
+    font-weight: 600;
+}
+window.voice-pill-window .voice-pill-container.pill-chip-fail .voice-pill-status {
+    color: #e01b24;
+    font-weight: 600;
+}
+window.light-glass .voice-pill-window .voice-pill-container.pill-chip-ok  .voice-pill-status {
+    color: #1a7a4d;
+}
+window.light-glass .voice-pill-window .voice-pill-container.pill-chip-fail .voice-pill-status {
+    color: #b0161d;
+}
+
+/* Timer na title label */
+window.voice-pill-window .voice-pill-title-sep {
+    opacity: 0.5;
+    margin: 0 4px;
+}
+
+/* PopoverMenu herda tema libadwaita — só precisa de polimento mínimo */
+window.voice-pill-window .pill-popover {
+    background-color: alpha(@card_bg_color, 0.96);
+    border-radius: 12px;
+}
+
+/* Avatar com badge de privacidade (escudo) */
+window.voice-pill-window .voice-pill-avatar.pill-privacy-on {
+    box-shadow: 0 0 12px alpha(#f5c211, 0.55);
+}

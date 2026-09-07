@@ -1181,6 +1181,7 @@ class CopilotWindow(Adw.ApplicationWindow):
                 self.voice_pill_window._connect_client_events()
 
             self.voice_pill_window.present()
+            self.voice_pill_window.place_smart()
             self.live_client.start()
             if self.wake_word_engine is not None:
                 self.wake_word_engine.pause()
@@ -1188,6 +1189,7 @@ class CopilotWindow(Adw.ApplicationWindow):
             return
 
         if self.voice_pill_window:
+            self.voice_pill_window.save_geometry()
             self.voice_pill_window.set_visible(False)
 
         self.live_voice_widget = LiveVoiceWidget(
@@ -1209,6 +1211,7 @@ class CopilotWindow(Adw.ApplicationWindow):
     def _expand_from_pill(self) -> None:
         """Expande a conversa da pílula flutuante para a janela completa do Copilot."""
         if self.voice_pill_window:
+            self.voice_pill_window.save_geometry()
             self.voice_pill_window.set_visible(False)
         self.summon_hud()
         if not self.live_voice_widget:
@@ -1229,6 +1232,7 @@ class CopilotWindow(Adw.ApplicationWindow):
     def stop_live_voice(self) -> None:
         """Encerra a chamada de voz ao vivo e consolida a interação no chat ativo."""
         if self.voice_pill_window:
+            self.voice_pill_window.save_geometry()
             self.voice_pill_window.set_visible(False)
         summary = self.live_client.get_session_summary() if self.live_client else {}
         if self.live_client:
