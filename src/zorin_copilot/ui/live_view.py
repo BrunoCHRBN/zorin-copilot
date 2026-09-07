@@ -27,6 +27,19 @@ TRANSCRIPT_ROLE_ICONS = {
 }
 
 
+def live_model_label(model: str) -> str:
+    """Rótulo curto do modelo de voz, a partir do id da API.
+
+    A mensagem de conexão dizia "Gemini 2.5 Live" fixo, desmentindo a própria
+    tela de preferências quando o usuário escolhia outro modelo.
+    """
+    name = (model or "").rsplit("/", 1)[-1]  # "models/gemini-2.5-flash-..." -> "gemini-2.5-flash-..."
+    parts = name.split("-")
+    if len(parts) >= 2 and parts[0] == "gemini":
+        return f"Gemini {parts[1]}"
+    return name or "Gemini"
+
+
 class LiveVoiceWidget(Gtk.Box):
     """Widget de conversação por voz ao vivo com visualizador de áudio e registro da sessão."""
 
@@ -273,7 +286,8 @@ class LiveVoiceWidget(Gtk.Box):
         if state == LiveVoiceState.CONNECTING:
             self.status_dot.set_markup("<span foreground='#e5a50a'>●</span>")
             self.status_lbl.set_markup("<b>Zorin Copilot Live</b> • Conectando...")
-            self.subtitle_lbl.set_text("Estabelecendo conexão segura com Gemini 2.5 Live...")
+            model_label = live_model_label(getattr(self.live_client.config, "gemini_live_model", ""))
+            self.subtitle_lbl.set_text(f"Estabelecendo conexão segura com {model_label} Live...")
             self._start_timer()
         elif state == LiveVoiceState.LISTENING:
             self.status_dot.set_markup("<span foreground='#3584e4'>●</span>")
