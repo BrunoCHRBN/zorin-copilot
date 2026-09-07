@@ -516,6 +516,32 @@ LIVE_TOOLS_DECLARATION = [
                     "required": ["uid", "text"],
                 },
             },
+            {
+                "name": "locate_element",
+                "description": "Dado um ponto na tela, retorna o UID, nome e papel do elemento de interface ali presente. Use para FUNDIR o que você VÊ no vídeo ao vivo com a árvore semântica: passe as coordenadas do ponto que você observou e, em seguida, chame click_element/type_element com o UID retornado.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "x": {
+                            "type": "NUMBER",
+                            "description": "Coordenada horizontal (relativa [0,1] do frame de vídeo por padrão, ou pixel absoluto se is_relative=false)",
+                        },
+                        "y": {
+                            "type": "NUMBER",
+                            "description": "Coordenada vertical (relativa [0,1] do frame de vídeo por padrão, ou pixel absoluto se is_relative=false)",
+                        },
+                        "is_relative": {
+                            "type": "BOOLEAN",
+                            "description": "Se true (padrão), x/y são [0,1] do vídeo; se false, pixels absolutos de tela.",
+                        },
+                        "app_name": {
+                            "type": "STRING",
+                            "description": "Nome do aplicativo alvo (opcional).",
+                        },
+                    },
+                    "required": ["x", "y"],
+                },
+            },
         ]
     }
 ]
@@ -746,7 +772,7 @@ class GeminiLiveClient:
                     f"Telas conectadas no desktop do usuário: [{monitors_desc}]. A tela ativa autorizada para ações no momento é '{active_mon_name}'. "
                     "Para alternar a tela autorizada de trabalho, use a ferramenta 'screen_fence_control'. "
                     "Para clicar ou digitar no desktop, use 'mouse_click', 'keyboard_type' e 'keyboard_hotkey'. Suas coordenadas serão validadas pela cerca espacial. "
-                    "Para interagir com a interface de um aplicativo específico de forma precisa e semântica, prefira primeiro 'get_ui_tree' para obter os elementos com UIDs [n.n], e então 'click_element(uid)' / 'type_element(uid, text)'. Use 'mouse_click'/'keyboard_type' apenas como fallback ou quando não houver UID. "
+                    "Para interagir com a interface de um aplicativo específico de forma precisa e semântica, prefira primeiro 'get_ui_tree' para obter os elementos com UIDs [n.n] e geometria (@x,y w×h). Para agir em algo que você VÊ no vídeo mas só conhece pela aparência, use 'locate_element(x, y)' para converter o ponto visto em um UID semântico, e então 'click_element(uid)' / 'type_element(uid, text)'. Use 'mouse_click'/'keyboard_type' apenas como fallback ou quando não houver UID. "
                     "Ao redigir ou iniciar e-mails, use 'email_compose'. NUNCA invente ou adivinhe endereços de e-mail; se não souber, use 'contact_lookup' ou pergunte ao usuário. "
                     "Para marcar compromissos ou consultar a agenda, use 'calendar_event'. "
                     "Para pesquisas na web, use 'browser_search' ou 'web_search'. "
@@ -1111,7 +1137,8 @@ class GeminiLiveClient:
                         "success": False,
                         "message": "Árvore de acessibilidade indisponível (AT-SPI ausente ou nenhum app com foco). Use mouse_click/keyboard_type como fallback.",
                     }
-                tree_text = root.to_summary()
+                include_bounds = bool(args.get("include_bounds", True))
+                tree_text = root.to_summary(include_bounds=include_bounds)
                 MAX_TREE = 6000
                 truncated = len(tree_text) > MAX_TREE
                 if truncated:
@@ -1122,7 +1149,39 @@ class GeminiLiveClient:
                     "app_name": app_name or root.name,
                     "tree": tree_text,
                     "truncated": truncated,
-                    "message": f"Árvore de '{root.name}' obtida. Use click_element(uid)/type_element(uid, text) com os UIDs [n.n].",
+                    "message": (
+                        f"Árvore de '{root.name}' obtida"
+                        + (" com geometria (@x,y w×h)." if include_bounds else ".")
+                        + " Use click_element(uid)/type_element(uid, text) ou locate_element(x,y) com os UIDs [n.n]."
+                    ),
+                }
+
+            elif name == "locate_element":
+                x = float(args.get("x", 0.0))
+                y = float(args.get("y", 0.0))
+                is_rel = bool(args.get("is_relative", True))
+                if is_rel:
+                    x, y = self.fence.convert_relative_point(x, y)
+                app_name = args.get("app_name")
+                root = self.inspector.get_ui_tree(app_name)
+                if root is None:
+                    return {
+                        "success": False,
+                        "message": "Árvore de acessibilidade indisponível (AT-SPI).",
+                    }
+                el = DesktopInspector.element_at_point(root, int(x), int(y))
+                if el is None:
+                    return {
+                        "success": False,
+                        "message": f"Nenhum elemento encontrado nas coordenadas ({int(x)}, {int(y)}).",
+                    }
+                return {
+                    "success": True,
+                    "uid": el.uid,
+                    "name": el.name,
+                    "role": el.role,
+                    "bbox": list(el.bbox),
+                    "message": f"Elemento '{el.name}' (UID {el.uid}, {el.role}) nas coordenadas informadas.",
                 }
 
             elif name == "click_element":

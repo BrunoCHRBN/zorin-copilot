@@ -45,15 +45,22 @@ class UIElement:
             matches.extend(child.find(predicate))
         return matches
 
-    def to_summary(self, indent: int = 0) -> str:
-        """Gera uma representação textual compacta para enviar como contexto à IA."""
+    def to_summary(self, indent: int = 0, include_bounds: bool = False) -> str:
+        """Gera uma representação textual compacta para enviar como contexto à IA.
+
+        Quando `include_bounds` é True, cada linha traz a geometria (x, y, w, h) do
+        elemento, permitindo à IA fundir a árvore semântica com o frame de vídeo.
+        """
         prefix = "  " * indent
         actions_str = f" [ações: {', '.join(self.actions)}]" if self.actions else ""
         uid_str = f" [{self.uid}]" if self.uid else ""
-        text = f"{prefix}-{uid_str} {self.role}: '{self.name}'{actions_str}"
+        bounds_str = ""
+        if include_bounds and self.bbox != (0, 0, 0, 0):
+            bounds_str = f" @({self.bbox[0]},{self.bbox[1]} {self.bbox[2]}x{self.bbox[3]})"
+        text = f"{prefix}-{uid_str} {self.role}: '{self.name}'{bounds_str}{actions_str}"
         lines = [text]
         for child in self.children:
-            lines.append(child.to_summary(indent + 1))
+            lines.append(child.to_summary(indent + 1, include_bounds=include_bounds))
         return "\n".join(lines)
 
 
@@ -125,6 +132,19 @@ class DesktopInspector:
         except Exception:
             return UIElement(name="error", role="unknown")
 
+        # Geometria em coordenadas de tela (fusão vídeo + AT-SPI). Campo opcional:
+        # controles sem superfície (ex: menus virtuais) ou sem suporte retornam (0,0,0,0).
+        bbox = (0, 0, 0, 0)
+        try:
+            coord_type = getattr(self._atspi, "CoordType", None)
+            screen = getattr(coord_type, "SCREEN", None) if coord_type else None
+            if screen is not None and hasattr(node, "get_extents"):
+                ext = node.get_extents(screen)
+                if ext and len(ext) == 4:
+                    bbox = tuple(int(v) for v in ext)
+        except Exception:
+            bbox = (0, 0, 0, 0)
+
         actions: list[str] = []
         try:
             action_iface = node.get_action_iface()
@@ -157,6 +177,7 @@ class DesktopInspector:
             uid=uid,
             description=desc,
             actions=tuple(actions),
+            bbox=bbox,
             children=children,
             raw_ref=node,
         )
@@ -268,3 +289,26 @@ class DesktopInspector:
             if found:
                 return found
         return None
+
+    @staticmethod
+    def element_at_point(root: UIElement, x: int, y: int) -> UIElement | None:
+        """Dado um ponto em coordenadas de tela, devolve o elemento mais específico ali presente.
+
+        Fundamental para a fusão vídeo + AT-SPI: o modelo vê um ponto no frame de vídeo,
+        converte para coordenadas de tela e recebe o UID semântico do elemento.
+        Empata sempre pelo menor contorno (mais aninhado / mais específico).
+        """
+        candidates: list[UIElement] = []
+
+        def _walk(el: UIElement) -> None:
+            bx, by, bw, bh = el.bbox
+            if bw > 0 and bh > 0 and bx <= x <= bx + bw and by <= y <= by + bh:
+                candidates.append(el)
+            for child in el.children:
+                _walk(child)
+
+        _walk(root)
+        if not candidates:
+            return None
+        candidates.sort(key=lambda e: e.bbox[2] * e.bbox[3])
+        return candidates[0]

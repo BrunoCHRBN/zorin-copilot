@@ -278,6 +278,14 @@ Fase 1 (loop semântico ao vivo) — CONCLUÍDO
   [x] `get_ui_tree`/`get_focused_app` dão contexto do app em uso a voz e vídeo ao vivo
   [x] System prompt orienta o modelo a preferir ferramentas semânticas (UIDs) sobre coordenadas
   [x] Testes determinísticos (9 novos, GeminiLiveClient com inspector/driver falsos) + suíte 499 verde
+
+Fase 2 (fusão vídeo + AT-SPI) — CONCLUÍDO
+  [x] `core/a11y.py`: `_parse_node` extrai geometria (`bbox`) de cada elemento via `get_extents(SCREEN)`
+  [x] `UIElement.to_summary(include_bounds=True)` embute `@(x,y w×h)` para correlacionar com o frame de vídeo
+  [x] `DesktopInspector.element_at_point(x, y)`: resolve o ponto de tela no UID mais específico (menor área)
+  [x] `ai/live.py`: tool `locate_element(x, y)` converte coordenada vista no vídeo em UID semântico
+  [x] `get_ui_tree` agora retorna geometria por padrão; system prompt orienta a fusão vídeo + árvore
+  [x] Testes determinísticos (8 novos: bbox do parse, to_summary com bounds, element_at_point, get_ui_tree/locate_element) + suíte 507 verde
 ```
 
 ### Detalhe do Sprint 4 — por que estes cinco
