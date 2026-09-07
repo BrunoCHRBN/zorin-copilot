@@ -41,8 +41,11 @@ jobs:
           python3 -m venv --system-site-packages .venv
           .venv/bin/pip install --upgrade pip
           # --no-deps pelo mesmo motivo: PyGObject do pip não traz as typelibs.
+          # As dependências puramente Python entram na linha seguinte. Pillow
+          # está entre elas porque os testes cobrem os caminhos de visão e de
+          # área de transferência que dependem da biblioteca.
           .venv/bin/pip install -e . --no-deps
-          .venv/bin/pip install pytest requests beautifulsoup4 websockets
+          .venv/bin/pip install pytest Pillow requests beautifulsoup4 websockets
 
       - name: Roda a suíte
         # A interface precisa de um servidor gráfico; xvfb dá um sem hardware.
