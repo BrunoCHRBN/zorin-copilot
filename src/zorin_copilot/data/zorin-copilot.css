@@ -665,3 +665,16 @@ window.dark-glass .status-bar {
     font-size: 12px;
     opacity: 0.85;
 }
+
+/* --- Indicador de digitação (estilo iMessage) --- */
+.typing-indicator {
+    padding: 1px 2px;
+}
+
+.typing-dot {
+    background-color: alpha(@accent_color, 0.85);
+    border-radius: 9999px;
+    min-width: 7px;
+    min-height: 7px;
+    transition: opacity 200ms ease;
+}

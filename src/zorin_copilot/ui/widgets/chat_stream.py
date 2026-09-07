@@ -61,6 +61,41 @@ def get_action_icon(action: DesktopAction) -> str:
     return "system-run-symbolic"
 
 
+class TypingIndicator(Gtk.Box):
+    """Indicador de "digitando…" estilo iMessage: três pontos que pulsam em onda.
+
+    Usado na bolha pendente do assistente enquanto a IA processa. A animação roda
+    num ``GLib.timeout`` e se autocancela quando o widget é desrealizado (a bolha
+    pendente é removida assim que a resposta chega).
+    """
+
+    def __init__(self, n_dots: int = 3):
+        super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
+        self.add_css_class("typing-indicator")
+        self.dots: list[Gtk.Widget] = []
+        for _ in range(n_dots):
+            dot = Gtk.Box()
+            dot.add_css_class("typing-dot")
+            dot.set_opacity(0.3)
+            self.append(dot)
+            self.dots.append(dot)
+        self._step = 0
+        self._timer = GLib.timeout_add(300, self._tick)
+        self.connect("unrealize", self._on_unrealize)
+
+    def _tick(self) -> bool:
+        self._step = (self._step + 1) % (len(self.dots) + 1)
+        for i, dot in enumerate(self.dots):
+            # Onda da esquerda p/ direita, com uma pausa (step == n_dots) sem brilho.
+            dot.set_opacity(1.0 if self._step == i else 0.3)
+        return GLib.SOURCE_CONTINUE
+
+    def _on_unrealize(self, *_args) -> None:
+        if self._timer:
+            GLib.source_remove(self._timer)
+            self._timer = None
+
+
 @dataclass
 class ActionRowHandle:
     """Trio (linha, botão, chave) de uma ação proposta, para atualização após executar."""
@@ -284,19 +319,21 @@ class ChatStreamView:
 
         if not is_pending:
             a_hdr.append(self._build_copy_button(turn))
+            # Só faz sentido comparar quando há ao menos duas respostas na conversa.
+            n_answers = sum(1 for t in ctx.session.turns if t.answer and t.answer.strip())
+            if n_answers >= 2:
+                a_hdr.append(self._build_compare_button(turn))
         assistant_card.append(a_hdr)
 
         if is_pending:
-            spin_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-            spin_box.set_margin_top(8)
-            spin_box.set_margin_bottom(8)
-            sp = Gtk.Spinner()
-            sp.start()
-            spin_box.append(sp)
-            spin_lbl = Gtk.Label(label="Pensando...", xalign=0)
-            spin_lbl.add_css_class("dim-label")
-            spin_box.append(spin_lbl)
-            assistant_card.append(spin_box)
+            typing_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            typing_box.set_margin_top(8)
+            typing_box.set_margin_bottom(8)
+            typing_box.append(TypingIndicator())
+            typing_lbl = Gtk.Label(label="digitando…", xalign=0)
+            typing_lbl.add_css_class("dim-label")
+            typing_box.append(typing_lbl)
+            assistant_card.append(typing_box)
             return assistant_card
 
         markup = format_markdown_to_markup(turn.answer)
@@ -340,6 +377,15 @@ class ChatStreamView:
 
         copy_b.connect("clicked", on_copy)
         return copy_b
+
+    def _build_compare_button(self, turn: ChatTurn) -> Gtk.Button:
+        cmp_b = Gtk.Button(label="Comparar")
+        cmp_b.set_tooltip_text("Comparar esta resposta com outra da conversa")
+        cmp_b.add_css_class("flat")
+        cmp_b.add_css_class("pill")
+        cmp_b.add_css_class("glass-pill")
+        cmp_b.connect("clicked", lambda _: self.ctx._open_compare(turn))
+        return cmp_b
 
     @staticmethod
     def _restore_copy_icon(btn: Gtk.Button):
