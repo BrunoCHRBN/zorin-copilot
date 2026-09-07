@@ -769,9 +769,9 @@ class VoicePillWindow(Gtk.Window):
         self._anim_time += dt
         self._prev_target_level = self._target_audio_level
 
-        # Pulse do REC dot (0.5 Hz)
+        # Pulse do REC dot (4s breath — presença sutil, não sirene)
         if self._video_streaming and self.rec_dot.get_visible():
-            pulse = 0.55 + 0.45 * (0.5 + 0.5 * math.sin(self._anim_time * math.pi))
+            pulse = 0.85 + 0.15 * math.sin(self._anim_time * math.pi / 2.0)
             self.rec_dot.set_opacity(pulse)
 
         # Auto-hide ocioso

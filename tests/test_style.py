@@ -100,5 +100,73 @@ class AccentVariableTest(unittest.TestCase):
         self.assertLess(color.blue, 0.1)
 
 
+class NoLedEffectsTest(unittest.TestCase):
+    """Garantias anti-LED após o refactor de UI sóbria.
+
+    Regra: cor pode ser conteúdo (texto, ícone, fundo, visualizer), nunca chrome
+    (border ou glow de halo em volta de algo).
+    """
+
+    def test_no_focus_halo(self):
+        """Focus rings não podem ter box-shadow 0 0 0 Npx (halo de blur)."""
+        for lineno, line in enumerate(GLASS_CSS.splitlines(), start=1):
+            stripped = line.strip()
+            # aceita "0 0 0 0px" (sem halo), recusa qualquer blur > 0
+            self.assertNotRegex(
+                stripped,
+                r"box-shadow:\s*[^;]*\b0\s+0\s+0\s+[1-9]",
+                f"linha {lineno}: focus halo proibido (0 0 0 Npx com N>0): {stripped}",
+            )
+
+    def test_pill_has_no_glow(self):
+        """Pílula não pode ter box-shadow com 0 0 Npx (glow), nem border-color em estados."""
+        import re
+        # extrai cada bloco de regra de .voice-pill-container* e checa box-shadow
+        block_re = re.compile(
+            r"(\.voice-pill-container[^{]*\{[^}]*\}|\.pill-(?:muted|privacy|interrupting)[^{]*\{[^}]*\}"
+            r"|\.voice-pill-avatar\.pill-privacy-on[^{]*\{[^}]*\})",
+            re.DOTALL,
+        )
+        for m in block_re.finditer(GLASS_CSS):
+            block = m.group(0)
+            for lineno, line in enumerate(block.splitlines(), start=1):
+                stripped = line.strip()
+                if "box-shadow" in stripped and "none" not in stripped:
+                    self.assertNotRegex(
+                        stripped,
+                        r"box-shadow:\s*[^;]*\b0\s+0\s+\d+px",
+                        f"glow proibido em {m.group(0).split('{')[0].strip()}: {stripped}",
+                    )
+
+    def test_pill_state_uses_tint_not_border(self):
+        """Estados pill-muted/privacy/interrupting usam background-image, não border-color."""
+        import re
+        for cls in ("pill-muted", "pill-privacy", "pill-interrupting"):
+            block_re = re.compile(
+                rf"(\.voice-pill-container\.{cls}[^{{]*\{{[^}}]*\}})",
+                re.DOTALL,
+            )
+            matches = block_re.findall(GLASS_CSS)
+            self.assertGreater(
+                len(matches), 0, f"sem regra encontrada para .{cls}"
+            )
+            for block in matches:
+                self.assertIn(
+                    "background-image", block,
+                    f".{cls} deve usar background-image (tint), não border-color: {block[:200]}",
+                )
+                self.assertNotIn(
+                    "border-color", block,
+                    f".{cls} não pode usar border-color (era LED): {block[:200]}",
+                )
+
+    def test_status_dot_rule_exists(self):
+        """A classe .status-dot (órfã antes) agora tem regra real."""
+        self.assertRegex(GLASS_CSS, r"\.status-dot\s*\{")
+        # monocromática: variantes light/dark presentes
+        self.assertIn("window.light-glass .status-dot", GLASS_CSS)
+        self.assertIn("window.dark-glass .status-dot", GLASS_CSS)
+
+
 if __name__ == "__main__":
     unittest.main()
