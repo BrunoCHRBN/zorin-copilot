@@ -30,7 +30,7 @@ from ..core.browser import BrowserManager
 from ..core.calendar import CalendarManager
 from ..core.config import CopilotConfig
 from ..core.email import EmailManager
-from ..core.fence import ScreenFenceManager
+from ..core.fence import NO_MONITOR_LABEL, ScreenFenceManager
 from ..core.memory import MemoryManager
 from ..core.rag import LocalDocumentRAG
 from ..core.vision import ScreenCaptureService
@@ -198,7 +198,7 @@ LIVE_TOOLS_DECLARATION = [
             },
             {
                 "name": "screen_fence_control",
-                "description": "Controla a cerca de segurança espacial e qual monitor físico está autorizado para receber cliques e automações (ex: monitor principal AOC 27, monitor secundário VIE 24, ou todas as telas).",
+                "description": "Controla a cerca de segurança espacial e qual monitor físico está autorizado para receber cliques e automações (ex: monitor principal, monitor secundário, ou todas as telas).",
                 "parameters": {
                     "type": "OBJECT",
                     "properties": {
@@ -673,7 +673,7 @@ class GeminiLiveClient:
                 # 1. Prepara contexto dinâmico de memória e cercas espaciais
                 context_summary = self.memory.get_context_summary()
                 active_mon = self.fence.get_active_monitor()
-                active_mon_name = active_mon.name if active_mon else "Principal (AOC 27\")"
+                active_mon_name = active_mon.name if active_mon else NO_MONITOR_LABEL
                 monitors_desc = ", ".join([f"Monitor {m.index}: {m.name}" for m in self.fence.monitors])
 
                 system_prompt_text = (

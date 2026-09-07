@@ -1,5 +1,5 @@
 # Decisão de design: cerca espacial matemática rígida (Spatial Fencing) para controle de tela no Wayland.
-# Garante que cliques e teclas só possam ser emitidos dentro do monitor ou bounding box autorizado pelo usuário (default: Monitor Principal AOC 27"),
+# Garante que cliques e teclas só possam ser emitidos dentro do monitor ou bounding box autorizado pelo usuário (default: monitor principal),
 # bloqueando sumariamente qualquer tentativa de interação fora do escopo ou em áreas protegidas (Red Zones como barra de tarefas).
 
 """Gerenciador de cercas espaciais e segurança de tela para automações no desktop."""
@@ -12,6 +12,10 @@ from enum import Enum
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+#: Rótulo mostrado quando não há monitor ativo. Centralizado porque a interface
+#: espalhava um literal com a marca do monitor de desenvolvimento.
+NO_MONITOR_LABEL = "Monitor principal"
 
 
 class FenceMode(str, Enum):
@@ -109,9 +113,11 @@ class ScreenFenceManager:
     def _select_default_primary(self) -> None:
         if not self._monitors:
             return
-        # Procura marcado como primary ou busca o AOC ou primeiro
+        # Só a flag `is_primary` decide. Antes isso também procurava a marca
+        # "aoc" no nome/modelo — hardware específico de uma máquina virando
+        # regra de negócio, que escolhia o monitor errado em qualquer outro PC.
         for i, m in enumerate(self._monitors):
-            if m.is_primary or "aoc" in m.name.lower() or "aoc" in m.model.lower():
+            if m.is_primary:
                 self.active_monitor_index = i
                 return
         self.active_monitor_index = 0
@@ -160,8 +166,9 @@ class ScreenFenceManager:
                     geom = m.get_geometry()
                     desc = m.get_description() or f"Monitor {i}"
                     model = m.get_model() or ""
-                    # Heurística: no setup do Zorin, monitor em x=1920 ou nome AOC é primário
-                    is_primary = bool(i == 0 or "aoc" in desc.lower())
+                    # O próprio GDK sabe qual é o primário; o índice só entra
+                    # como rede de segurança quando ele não responde.
+                    is_primary = bool(m.is_primary()) if hasattr(m, "is_primary") else (i == 0)
                     scale = m.get_scale_factor() if hasattr(m, "get_scale_factor") else 1.0
 
                     monitors.append(
@@ -180,31 +187,38 @@ class ScreenFenceManager:
         except Exception as exc:
             logger.debug(f"Detecção Gdk indisponível: {exc}")
 
-        # Fallback se GDK não encontrar monitores (ex: testes sem X11/Wayland rodando)
-        if not monitors:
-            monitors = [
-                MonitorInfo(
-                    index=0,
-                    name="AOC 27\"",
-                    model="AOC 27G2",
-                    x=1920,
-                    y=0,
-                    width=1920,
-                    height=1080,
-                    is_primary=True,
-                ),
-                MonitorInfo(
-                    index=1,
-                    name="VIE 24\"",
-                    model="VIE 24",
-                    x=0,
-                    y=148,
-                    width=1920,
-                    height=1080,
-                    is_primary=False,
-                ),
-            ]
-        return monitors
+        return monitors or cls._fallback_monitors()
+
+    @staticmethod
+    def _fallback_monitors() -> list[MonitorInfo]:
+        """Inventário usado quando o GDK não vê monitor nenhum (ex: sem X11/Wayland).
+
+        Nomes genéricos: antes isso devolvia "AOC 27""/"VIE 24"", o inventário de
+        uma máquina específica, e com geometria invertida — o monitor marcado
+        como primário começava em x=1920 e o secundário em x=0.
+        """
+        return [
+            MonitorInfo(
+                index=0,
+                name="Monitor 1",
+                model="Desconhecido",
+                x=0,
+                y=0,
+                width=1920,
+                height=1080,
+                is_primary=True,
+            ),
+            MonitorInfo(
+                index=1,
+                name="Monitor 2",
+                model="Desconhecido",
+                x=1920,
+                y=0,
+                width=1920,
+                height=1080,
+                is_primary=False,
+            ),
+        ]
 
     @property
     def monitors(self) -> list[MonitorInfo]:
@@ -231,14 +245,14 @@ class ScreenFenceManager:
         query = str(identifier).strip().lower()
         if query in ("principal", "primaria", "main", "primary"):
             for i, m in enumerate(self._monitors):
-                if m.is_primary or "aoc" in m.name.lower():
+                if m.is_primary:
                     self.active_monitor_index = i
                     self.mode = FenceMode.PRIMARY_ONLY
                     return True
 
         if query in ("secundaria", "segunda", "auxiliar", "secondary"):
             for i, m in enumerate(self._monitors):
-                if not m.is_primary or "vie" in m.name.lower():
+                if not m.is_primary:
                     self.active_monitor_index = i
                     self.mode = FenceMode.MONITOR_INDEX
                     return True
