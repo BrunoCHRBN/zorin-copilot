@@ -106,18 +106,28 @@ class LiveVoiceClientTest(unittest.TestCase):
 
     @patch("zorin_copilot.core.files.FileManager.write_document")
     def test_dispatch_tool_write_document(self, mock_write):
-        """Testa despacho de criação de arquivo na chamada de voz."""
+        """Criação de arquivo é ação de risco: exige confirmação antes de executar."""
         mock_write.return_value = (True, "Arquivo salvo", "/home/bruno/doc.md")
-        res = self.client._dispatch_tool("write_document", {"filename": "doc.md", "content": "olá mundo"})
+        blocked = self.client._dispatch_tool("write_document", {"filename": "doc.md", "content": "olá mundo"})
+        self.assertFalse(blocked["success"])
+        self.assertTrue(blocked["requires_confirmation"])
+        res = self.client._dispatch_tool(
+            "confirm_action", {"confirmation_id": blocked["confirmation_id"], "approve": True}
+        )
         self.assertTrue(res["success"])
         self.assertEqual(res["path"], "/home/bruno/doc.md")
         mock_write.assert_called_once_with("doc.md", "olá mundo", directory=None)
 
     @patch("zorin_copilot.core.files.FileManager.organize_directory")
     def test_dispatch_tool_organize_directory(self, mock_org):
-        """Testa despacho de organização de pasta na chamada de voz."""
+        """Organização de pasta é ação de risco: exige confirmação antes de executar."""
         mock_org.return_value = (True, "Organizado com sucesso", {"Imagens": 2})
-        res = self.client._dispatch_tool("organize_directory", {"directory": "~/Downloads", "dry_run": False})
+        blocked = self.client._dispatch_tool("organize_directory", {"directory": "~/Downloads", "dry_run": False})
+        self.assertFalse(blocked["success"])
+        self.assertTrue(blocked["requires_confirmation"])
+        res = self.client._dispatch_tool(
+            "confirm_action", {"confirmation_id": blocked["confirmation_id"], "approve": True}
+        )
         self.assertTrue(res["success"])
         self.assertIn("Imagens", res["stats"])
         mock_org.assert_called_once_with(directory="~/Downloads", dry_run=False)
@@ -195,11 +205,16 @@ class LiveVoiceClientTest(unittest.TestCase):
         self.assertEqual(res_lookup["contacts"][0]["email"], "lucas@dev.com")
 
     def test_dispatch_tool_email_compose(self):
-        """Testa composição de e-mail com contato resolvido."""
+        """Composição de e-mail é ação de risco: exige confirmação antes de executar."""
         self.client.memory.save_contact("Carlos Contador", "carlos@contabilidade.com", aliases=["contador"])
-        res = self.client._dispatch_tool(
+        blocked = self.client._dispatch_tool(
             "email_compose",
             {"recipient": "contador", "subject": "Balanço Mensal", "body": "Segue relatório."},
+        )
+        self.assertFalse(blocked["success"])
+        self.assertTrue(blocked["requires_confirmation"])
+        res = self.client._dispatch_tool(
+            "confirm_action", {"confirmation_id": blocked["confirmation_id"], "approve": True}
         )
         self.assertTrue(res["success"])
         self.assertIn("carlos@contabilidade.com", res["message"])
