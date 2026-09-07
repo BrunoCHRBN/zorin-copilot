@@ -536,4 +536,13 @@ class PreferencesDialog(Adw.PreferencesDialog):
             self.on_saved(cfg)
         toast = Adw.Toast.new("Configurações salvas com sucesso!")
         self.add_toast(toast)
-        GLib.timeout_add(700, lambda: (self.close(), GLib.SOURCE_REMOVE)[1])
+
+        # Fecha depois de o toast aparecer. Antes era
+        # `lambda: (self.close(), GLib.SOURCE_REMOVE)[1]` — a tupla servia só
+        # para enfiar duas coisas numa lambda, e lia-se como se o retorno fosse
+        # o resultado de close().
+        def close_after_toast() -> bool:
+            self.close()
+            return GLib.SOURCE_REMOVE
+
+        GLib.timeout_add(700, close_after_toast)

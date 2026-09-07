@@ -108,7 +108,7 @@ window.glass-window .destructive-action image {
 window.glass-window button.suggested-action,
 window.glass-window .glass-submit-btn,
 button.suggested-action.glass-submit-btn {
-    background-color: #15a6f0;
+    background-color: @accent_color;
     background-image: none;
     color: #ffffff;
     border: 1px solid rgba(13, 143, 209, 0.4);
@@ -219,8 +219,8 @@ window.light-glass .glass-entry,
 
 window.light-glass .glass-entry:focus-within {
     background-color: #ffffff;
-    border: 1px solid #15a6f0;
-    box-shadow: 0 0 0 2px rgba(21, 166, 240, 0.28), 0 2px 10px rgba(21, 166, 240, 0.12);
+    border: 1px solid @accent_color;
+    box-shadow: 0 0 0 2px alpha(@accent_color, 0.28), 0 2px 10px alpha(@accent_color, 0.12);
     color: #123354;
 }
 
@@ -240,19 +240,19 @@ window.dark-glass .glass-entry:focus-within {
 
 /* --- Botão Principal 'Pedir' (Sempre Azul Zorin com Alto Destaque) --- */
 .glass-submit-btn {
-    background-color: #15a6f0;
+    background-color: @accent_color;
     color: #ffffff;
     border: 1px solid rgba(13, 143, 209, 0.4);
     border-radius: 12px;
     padding: 8px 20px;
     font-weight: 600;
-    box-shadow: 0 2px 8px rgba(21, 166, 240, 0.35);
+    box-shadow: 0 2px 8px alpha(@accent_color, 0.35);
     transition: all 180ms ease;
 }
 
 .glass-submit-btn:hover {
     background-color: #0d8fd1;
-    box-shadow: 0 4px 12px rgba(21, 166, 240, 0.45);
+    box-shadow: 0 4px 12px alpha(@accent_color, 0.45);
 }
 
 .glass-submit-btn:active {
@@ -304,14 +304,14 @@ window.dark-glass .glass-card {
 
 window.light-glass .glass-launch-btn,
 .glass-launch-btn {
-    background-color: rgba(21, 166, 240, 0.12);
-    border: 1px solid rgba(21, 166, 240, 0.30);
+    background-color: alpha(@accent_color, 0.12);
+    border: 1px solid alpha(@accent_color, 0.30);
     color: #0d8fd1;
 }
 
 window.light-glass .glass-launch-btn:hover {
-    background-color: rgba(21, 166, 240, 0.22);
-    border-color: rgba(21, 166, 240, 0.50);
+    background-color: alpha(@accent_color, 0.22);
+    border-color: alpha(@accent_color, 0.50);
 }
 
 window.dark-glass .glass-launch-btn {
@@ -372,8 +372,8 @@ window.light-glass .glass-chip,
 
 window.light-glass .glass-chip:hover {
     background-color: #ffffff;
-    border: 1px solid #15a6f0;
-    box-shadow: 0 4px 12px rgba(21, 166, 240, 0.18);
+    border: 1px solid @accent_color;
+    box-shadow: 0 4px 12px alpha(@accent_color, 0.18);
     color: #0d8fd1;
 }
 
@@ -502,8 +502,8 @@ window.dark-glass .sidebar-chat-row:hover {
 }
 
 window.light-glass .sidebar-chat-row.active {
-    background-color: rgba(21, 166, 240, 0.12);
-    border-left: 3px solid #15a6f0;
+    background-color: alpha(@accent_color, 0.12);
+    border-left: 3px solid @accent_color;
 }
 
 window.dark-glass .sidebar-chat-row.active {
@@ -520,14 +520,14 @@ window.dark-glass .sidebar-chat-row.active {
 }
 
 window.light-glass .user-chat-bubble {
-    background-color: rgba(21, 166, 240, 0.09);
-    border: 1px solid rgba(21, 166, 240, 0.22);
+    background-color: alpha(@accent_color, 0.09);
+    border: 1px solid alpha(@accent_color, 0.22);
     color: #123354;
 }
 
 window.dark-glass .user-chat-bubble {
-    background-color: rgba(21, 166, 240, 0.16);
-    border: 1px solid rgba(21, 166, 240, 0.30);
+    background-color: alpha(@accent_color, 0.16);
+    border: 1px solid alpha(@accent_color, 0.30);
     color: #ffffff;
 }
 
@@ -564,8 +564,8 @@ window.light-glass .prompt-bar-card {
 }
 
 window.light-glass .prompt-bar-card:focus-within {
-    border: 1px solid #15a6f0;
-    box-shadow: 0 0 0 2px rgba(21, 166, 240, 0.25), 0 4px 20px rgba(21, 166, 240, 0.12);
+    border: 1px solid @accent_color;
+    box-shadow: 0 0 0 2px alpha(@accent_color, 0.25), 0 4px 20px alpha(@accent_color, 0.12);
 }
 
 window.dark-glass .prompt-bar-card {

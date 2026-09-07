@@ -9,6 +9,7 @@ from zorin_copilot.ai.live import (
     LiveVoiceState,
 )
 from zorin_copilot.core.config import CopilotConfig
+from zorin_copilot.ui.live_view import live_model_label
 
 
 class LiveVoiceClientTest(unittest.TestCase):
@@ -261,6 +262,26 @@ class LiveVoiceClientTest(unittest.TestCase):
                 {"file_path": str(sample_file), "page_number": 1},
             )
             self.assertTrue(res_open["success"])
+
+
+class LiveModelLabelTest(unittest.TestCase):
+    """O rótulo do modelo na UI de voz acompanha o modelo configurado."""
+
+    def test_strips_path_and_suffixes(self):
+        self.assertEqual(
+            live_model_label("models/gemini-2.5-flash-native-audio-latest"), "Gemini 2.5"
+        )
+        self.assertEqual(live_model_label("models/gemini-3.1-flash-live-preview"), "Gemini 3.1")
+
+    def test_without_gemini_prefix_returns_the_id(self):
+        self.assertEqual(live_model_label("models/meu-modelo"), "meu-modelo")
+
+    def test_empty_falls_back_to_gemini(self):
+        self.assertEqual(live_model_label(""), "Gemini")
+        self.assertEqual(live_model_label(None), "Gemini")
+
+    def test_default_config_produces_2_5(self):
+        self.assertEqual(live_model_label(CopilotConfig().gemini_live_model), "Gemini 2.5")
 
 
 if __name__ == "__main__":
