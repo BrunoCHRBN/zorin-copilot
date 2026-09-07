@@ -38,7 +38,7 @@ from ..core.vision import ScreenCaptureService
 from ..core.web_search import WebSearchClient
 from ..shell.executor import ActionExecutor
 from ..shell.input_driver import VirtualInputDriver
-from ..shell.risk import RiskLevel, RiskPolicy
+from ..shell.risk import RiskLevel, RiskPolicy, is_blocked_app
 from .actions import ActionPlan, ActionType, DesktopAction
 
 logger = logging.getLogger(__name__)
@@ -1165,6 +1165,11 @@ class GeminiLiveClient:
                     return {
                         "success": False,
                         "message": "Árvore de acessibilidade indisponível (AT-SPI ausente ou nenhum app com foco). Use mouse_click/keyboard_type como fallback.",
+                    }
+                if is_blocked_app(root.name):
+                    return {
+                        "success": False,
+                        "message": f"App '{root.name}' está na lista de bloqueio; o agente não opera nele por segurança.",
                     }
                 include_bounds = bool(args.get("include_bounds", True))
                 tree_text = root.to_summary(include_bounds=include_bounds)

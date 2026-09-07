@@ -66,3 +66,16 @@ class RiskPolicy:
                 return RiskLevel.CONFIRM, "atalho destrutivo (fecha/encerra aplicativo)"
 
         return RiskLevel.SAFE, ""
+
+
+# Aplicativos onde o agente NUNCA deve atuar (banco, gerenciador de senhas, etc.).
+# Pode ser estendido em runtime a partir das preferências do usuário.
+BLOCKED_APPS: set[str] = set()
+
+
+def is_blocked_app(name: str | None) -> bool:
+    """True se `name` (nome do app em foco) está na lista de bloqueio."""
+    if not name:
+        return False
+    n = name.strip().lower()
+    return any(blocked.strip().lower() == n for blocked in BLOCKED_APPS)
