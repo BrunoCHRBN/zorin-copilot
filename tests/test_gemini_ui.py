@@ -125,14 +125,25 @@ class GeminiUILayoutTest(unittest.TestCase):
 
     def test_fence_header_selector(self):
         """Verifica se o botão de cerca espacial no HeaderBar está presente e permite alternar telas."""
+        from zorin_copilot.core.fence import MonitorInfo
+
+        # Injeta monitores conhecidos: o teste não pode depender do inventário
+        # da máquina onde roda (nem de existir mais de um monitor).
+        self.win.fence._monitors = [
+            MonitorInfo(index=0, name="Escrivaninha", model="X", x=0, y=0, width=1920, height=1080, is_primary=True),
+            MonitorInfo(index=1, name="Estante", model="Y", x=1920, y=0, width=1280, height=1024, is_primary=False),
+        ]
+        self.win.fence.set_active_monitor(0)
+        self.win.header.refresh_fence_label()
+
         self.assertIsNotNone(self.win.fence_menu_btn)
         self.assertIsNotNone(self.win.fence_lbl)
-        self.assertIn("AOC", self.win.fence_lbl.get_text())
+        self.assertEqual(self.win.fence_lbl.get_text(), "Escrivaninha")
 
         # Alterna para monitor secundário
         popover = self.win.fence_menu_btn.get_popover()
         self.win._on_select_fence_monitor(1, popover)
-        self.assertIn("VIE", self.win.fence_lbl.get_text())
+        self.assertEqual(self.win.fence_lbl.get_text(), "Estante")
 
         # Alterna para todas as telas
         self.win._on_select_all_monitors(popover)

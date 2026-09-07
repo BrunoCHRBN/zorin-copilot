@@ -18,6 +18,8 @@ from zorin_copilot.core.a11y import UIElement
 from zorin_copilot.core.config import CopilotConfig
 from zorin_copilot.shell.executor import ActionExecutor
 
+from fakes import installed_apps
+
 
 class UIElementTest(unittest.TestCase):
     def test_interactive_roles(self):
@@ -161,7 +163,10 @@ class IntentEngineTest(unittest.TestCase):
         self.assertEqual(plan.actions[0].target, "Salvar")
 
     def test_parse_app_steam(self):
-        plan = self.engine.parse("abrir steam")
+        # Sem o inventário fixo, este teste só passa em máquina com Steam
+        # instalado — e falha em CI, onde o app não existe.
+        with installed_apps("Steam", "Calculadora", "Firefox"):
+            plan = self.engine.parse("abrir steam")
         self.assertFalse(plan.is_empty)
         self.assertEqual(plan.actions[0].action_type, ActionType.LAUNCH_APP)
         self.assertIn("steam", plan.actions[0].target.lower())

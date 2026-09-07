@@ -107,6 +107,55 @@ class ScreenFenceTest(unittest.TestCase):
         self.assertTrue(self.fence.is_coordinate_allowed(2500, 500)[0])
 
 
+class PrimaryMonitorSelectionTest(unittest.TestCase):
+    """A escolha do monitor primário não pode depender de marca de hardware.
+
+    A lógica original procurava a string "aoc" no nome/modelo, o que fazia a
+    cerca apontar para o monitor errado em qualquer máquina que não fosse a de
+    desenvolvimento (e quebrava a suíte em CI).
+    """
+
+    @staticmethod
+    def _mon(name: str, primary: bool, index: int) -> MonitorInfo:
+        return MonitorInfo(index=index, name=name, model=name, x=0, y=0, width=1920, height=1080, is_primary=primary)
+
+    def test_primary_flag_wins_regardless_of_name(self):
+        fence = ScreenFenceManager(
+            monitors=[self._mon("Genérico", False, 0), self._mon("Outro", True, 1)]
+        )
+        self.assertEqual(fence.get_active_monitor().index, 1)
+
+    def test_brand_name_alone_does_not_make_it_primary(self):
+        fence = ScreenFenceManager(
+            monitors=[self._mon("AOC 27\"", False, 0), self._mon("VIE 24\"", True, 1)]
+        )
+        self.assertEqual(fence.get_active_monitor().index, 1)
+
+    def test_without_primary_flag_falls_back_to_first(self):
+        fence = ScreenFenceManager(monitors=[self._mon("A", False, 0), self._mon("B", False, 1)])
+        self.assertEqual(fence.get_active_monitor().index, 0)
+
+    def test_set_active_monitor_by_keyword_uses_primary_flag(self):
+        monitors = [self._mon("A", True, 0), self._mon("B", False, 1)]
+        fence = ScreenFenceManager(monitors=monitors)
+        self.assertTrue(fence.set_active_monitor("principal"))
+        self.assertEqual(fence.get_active_monitor().index, 0)
+        self.assertTrue(fence.set_active_monitor("secundaria"))
+        self.assertEqual(fence.get_active_monitor().index, 1)
+
+
+class HeadlessFallbackTest(unittest.TestCase):
+    """Quando o GDK não vê monitor nenhum, o fallback precisa ser genérico."""
+
+    def test_fallback_names_are_generic(self):
+        monitors = ScreenFenceManager._fallback_monitors()
+        self.assertEqual([m.name for m in monitors], ["Monitor 1", "Monitor 2"])
+        self.assertTrue(monitors[0].is_primary)
+        # Geometria coerente: o primário começa na origem.
+        self.assertEqual(monitors[0].x, 0)
+        self.assertGreater(monitors[1].x, monitors[0].x)
+
+
 class VirtualInputDriverTest(unittest.TestCase):
     def setUp(self):
         monitors = [

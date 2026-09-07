@@ -17,6 +17,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Gtk, GLib, Pango  # noqa: E402
 
 from ..ai.live import GeminiLiveClient, LiveVoiceState
+from ..core.fence import NO_MONITOR_LABEL
 
 LOG_MAX_HEIGHT = 170
 TRANSCRIPT_ROLE_ICONS = {
@@ -455,7 +456,7 @@ class LiveVoiceWidget(Gtk.Box):
     def _update_video_ui(self, is_active: bool) -> bool:
         active_fence = getattr(self.live_client, "fence", None)
         active_mon = active_fence.get_active_monitor() if active_fence else None
-        mon_name = active_mon.name if active_mon else 'AOC 27"'
+        mon_name = active_mon.name if active_mon else NO_MONITOR_LABEL
 
         if is_active:
             self.video_lbl.set_text("Pausar Tela")

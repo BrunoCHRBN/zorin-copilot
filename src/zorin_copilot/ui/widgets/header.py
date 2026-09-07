@@ -14,6 +14,8 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gtk  # noqa: E402
 
+from ...core.fence import NO_MONITOR_LABEL  # noqa: E402
+
 if TYPE_CHECKING:  # pragma: no cover - apenas para type checking
     from ..app import CopilotWindow
 
@@ -111,7 +113,7 @@ class HeaderBarWidget:
         fence_icon = Gtk.Image.new_from_icon_name("video-display-symbolic")
         fence_icon.set_pixel_size(14)
         active_mon = self.ctx.fence.get_active_monitor()
-        mon_name_init = active_mon.name if active_mon else 'AOC 27"'
+        mon_name_init = active_mon.name if active_mon else NO_MONITOR_LABEL
         self.fence_lbl = Gtk.Label(label=mon_name_init)
         self.fence_lbl.add_css_class("caption")
         fence_btn_box.append(fence_icon)
@@ -191,7 +193,7 @@ class HeaderBarWidget:
             self.fence_lbl.set_text("\U0001f6d1 BLOQUEADO")
             return
         mon = self.ctx.fence.get_active_monitor()
-        self.fence_lbl.set_text(mon.name if mon else 'AOC 27"')
+        self.fence_lbl.set_text(mon.name if mon else NO_MONITOR_LABEL)
 
     def _sync_live_client_fence(self) -> None:
         """Reatribui a cerca espacial ao cliente de voz ao vivo, se estiver ativo."""
@@ -223,7 +225,7 @@ class HeaderBarWidget:
         if fence.is_emergency_stopped:
             fence.reset_emergency_stop()
             mon = fence.get_active_monitor()
-            self.fence_lbl.set_text(mon.name if mon else 'AOC 27"')
+            self.fence_lbl.set_text(mon.name if mon else NO_MONITOR_LABEL)
             self.ctx.show_toast("✓ Parada de emergência desativada.")
         else:
             fence.trigger_emergency_stop()
