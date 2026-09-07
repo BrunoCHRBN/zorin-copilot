@@ -173,17 +173,24 @@ class CopilotWindow(Adw.ApplicationWindow):
         ):
             self.show_toast("🎙️ Palavra de ativação atualizada e ouvindo.")
 
-    def _on_wake_word(self, phrase: str) -> None:
+    def _on_wake_word(self, phrase: str, command: str = "") -> None:
         """Chamado pela thread do motor; agenda a abertura da voz no loop principal."""
-        GLib.idle_add(self._handle_wake_on_main_thread, phrase)
+        GLib.idle_add(self._handle_wake_on_main_thread, phrase, command)
 
-    def _handle_wake_on_main_thread(self, phrase: str) -> bool:
-        # Se a conversa por voz já está ativa, ignorar a detecção.
+    def _handle_wake_on_main_thread(self, phrase: str, command: str = "") -> bool:
+        # Se a conversa por voz já está ativa, o comando vira um turno de texto
+        # na própria sessão (ex.: wake word acidental durante a chamada).
         if self.live_client and self.live_client.is_active():
+            if command:
+                self.live_client.send_text_input(command)
             return GLib.SOURCE_REMOVE
-        self.show_toast(f'🎙️ Entendi "{phrase}"! Iniciando conversa...')
         self.summon_hud()
-        self.start_live_voice()
+        if command:
+            self.show_toast(f'🎙️ "{phrase}" — executando: "{command}"')
+            self.start_live_voice(initial_command=command)
+        else:
+            self.show_toast(f'🎙️ Entendi "{phrase}"! Iniciando conversa...')
+            self.start_live_voice()
         return GLib.SOURCE_REMOVE
 
     # ------------------------------------------------------------------
@@ -1109,8 +1116,12 @@ class CopilotWindow(Adw.ApplicationWindow):
         else:
             self.start_live_voice()
 
-    def start_live_voice(self) -> None:
-        """Inicia o chat de voz ao vivo com o Gemini Live."""
+    def start_live_voice(self, initial_command: str = "") -> None:
+        """Inicia o chat de voz ao vivo com o Gemini Live.
+
+        ``initial_command`` (Fase 4A): comando capturado junto à wake word,
+        enviado como primeiro turno de texto assim que a sessão conectar.
+        """
         if not self.config.gemini_api_key.strip():
             self.show_toast("Chave de API do Google Gemini necessária para voz ao vivo. Configure em ⚙️.")
             self._open_settings()
@@ -1125,6 +1136,8 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.live_client.rag = self.rag
         self.live_client.fence = self.fence
         self.live_client.input_driver.fence = self.fence
+        if initial_command:
+            self.live_client.queue_initial_text(initial_command)
 
         self.live_voice_widget = LiveVoiceWidget(
             live_client=self.live_client,
