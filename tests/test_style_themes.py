@@ -30,7 +30,7 @@ class BundledStylesheetTest(unittest.TestCase):
         self.assertGreater(len(style.GLASS_CSS), 5000)
 
     def test_css_keeps_key_rules(self):
-        self.assertIn("@define-color accent_color #15a6f0;", style.GLASS_CSS)
+        self.assertIn("@define-color accent_color #6b7280;", style.GLASS_CSS)
         self.assertIn("window.light-glass image", style.GLASS_CSS)
         self.assertIn("window.dark-glass image", style.GLASS_CSS)
 

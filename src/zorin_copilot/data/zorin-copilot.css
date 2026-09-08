@@ -1,33 +1,74 @@
 /* ====================================================================
-   Zorin Copilot - Calibrated Frosted Glassmorphism Stylesheet (96% Opacity)
+   Zorin Copilot — Material de vidro sóbrio (cinza neutro, 85% opacidade)
+   ====================================================================
+
+   RESTRIÇÃO TÉCNICA — porque aqui não existe "frosted glass" de verdade:
+   o GTK4 não implementa `backdrop-filter`, então é impossível desfocar o
+   que está atrás da janela. O compositor do GNOME/Mutter (base do Zorin)
+   também não desfoca janelas de aplicativos por app_id — isso só existe em
+   Hyprland/Wayfire/Niri. O vidro da Apple é, portanto, inalcançável.
+
+   O que este arquivo faz é a melhor aproximação possível, na ordem do que
+   mais contribui para a ilusão:
+     1. Translucência real        — o fundo precisa aparecer de verdade.
+     2. Borda especular           — 1px de luz no topo. É o que mais vende.
+     3. Sombra grande e suave     — separa o vidro do fundo.
+     4. Tinta de saturação        — substitui o boost de viveza do blur.
+   Sem blur, transparência alta deixa o wallpaper vazar pelo texto; daí o
+   0.85 como ponto de equilíbrio (era 0.96, que é opaco na prática).
+
+   REGRA DE COR: cinza neutro para estrutura. Cor é conteúdo (texto, ícone,
+   preenchimento) e nunca chrome (borda ou halo em volta de algo).
    ==================================================================== */
 
+/* --- Rampa de cinza neutra (levemente fria) --- */
+@define-color zc_gray_50  #f7f8f9;
+@define-color zc_gray_100 #eceef0;
+@define-color zc_gray_200 #dde0e4;
+@define-color zc_gray_300 #c4c9cf;
+@define-color zc_gray_400 #9aa1aa;
+@define-color zc_gray_500 #6b7280;
+@define-color zc_gray_600 #525b66;
+@define-color zc_gray_700 #3d454e;
+@define-color zc_gray_800 #282e35;
+@define-color zc_gray_900 #171a1f;
+
+/* --- Cores semânticas (dessaturadas: sinalizam sem gritar) --- */
+@define-color zc_error   #c0392b;
+@define-color zc_success #3d8b63;
+@define-color zc_warn    #b8860b;
+@define-color zc_speak   #7d5a8c;
+
 /* --- Isolamento de Cores e Blindagem contra Temas Externos do SO --- */
-@define-color accent_color #15a6f0;
-@define-color accent_bg_color #15a6f0;
+/* Accent grafite médio. @define-color é GLOBAL (não escopa por classe de
+   janela), então o valor precisa funcionar no claro E no escuro: o gray_500
+   dá ~5.3:1 contra branco no claro e continua visível sobre o gray_900 no
+   escuro. Um grafite escuro (gray_700) sumiria no modo escuro. */
+@define-color accent_color #6b7280;
+@define-color accent_bg_color #6b7280;
 @define-color accent_fg_color #ffffff;
 
-/* --- Janela Principal Translúcida (Equilíbrio entre vidro e legibilidade) --- */
+/* --- Janela Principal Translúcida --- */
 window.glass-window,
 window.glass-window.background,
 window.glass-window > contents {
-    background-color: alpha(@window_bg_color, 0.96);
+    background-color: alpha(@zc_gray_50, 0.85);
 }
 
 window.light-glass,
 window.light-glass.background,
 window.light-glass > contents {
-    background-color: rgba(245, 247, 251, 0.96);
+    background-color: alpha(@zc_gray_50, 0.85);
 }
 
 window.dark-glass,
 window.dark-glass.background,
 window.dark-glass > contents {
-    background-color: rgba(20, 24, 33, 0.96);
+    background-color: alpha(@zc_gray_900, 0.85);
 }
 
 /* --- Unificação e Blindagem de Cores dos Ícones (Monocromático Neutro) --- */
-/* Modo Claro: Grafite / Ardósia (#3a4759) | Hover: Azul Profundo (#123354) */
+/* Modo Claro: Grafite / Ardósia (@zc_gray_700) | Hover: Azul Profundo (@zc_gray_800) */
 window.light-glass image,
 window.light-glass image.symbolic,
 window.light-glass .glass-icon-btn,
@@ -46,7 +87,7 @@ window.light-glass popover button image,
 window.light-glass .glass-card image,
 window.light-glass .glass-menu-item image,
 window.light-glass adwactionrow image {
-    color: #3a4759;
+    color: @zc_gray_700;
 }
 
 /* --- Indicador de status (live voice widget) — antes órfão, agora monocromático --- */
@@ -54,8 +95,8 @@ window.light-glass adwactionrow image {
     font-size: 10px;
     opacity: 0.45;
 }
-window.light-glass .status-dot { color: #3a4759; }
-window.dark-glass .status-dot  { color: #e4ecf5; }
+window.light-glass .status-dot { color: @zc_gray_700; }
+window.dark-glass .status-dot  { color: @zc_gray_100; }
 
 window.light-glass button.flat:hover,
 window.light-glass button.flat:hover image,
@@ -67,10 +108,10 @@ window.light-glass headerbar windowcontrols button:hover,
 window.light-glass headerbar windowcontrols button:hover image,
 window.light-glass .glass-chip:hover image,
 window.light-glass .glass-menu-item:hover image {
-    color: #123354;
+    color: @zc_gray_800;
 }
 
-/* Modo Escuro: Prata / Gelo (#e4ecf5) | Hover: Branco Puro (#ffffff) */
+/* Modo Escuro: Prata / Gelo (@zc_gray_100) | Hover: Branco Puro (#ffffff) */
 window.dark-glass image,
 window.dark-glass image.symbolic,
 window.dark-glass .glass-icon-btn,
@@ -89,7 +130,7 @@ window.dark-glass popover button image,
 window.dark-glass .glass-card image,
 window.dark-glass .glass-menu-item image,
 window.dark-glass adwactionrow image {
-    color: #e4ecf5;
+    color: @zc_gray_100;
 }
 
 window.dark-glass button.flat:hover,
@@ -109,7 +150,7 @@ window.dark-glass .glass-menu-item:hover image {
 window.glass-window button.destructive-action,
 window.glass-window button.destructive-action image,
 window.glass-window .destructive-action image {
-    color: #e01b24;
+    color: @zc_error;
 }
 
 /* Botão 'Pedir' e Ações Sugeridas (Sempre Azul Zorin com texto e ícone brancos) */
@@ -119,13 +160,13 @@ button.suggested-action.glass-submit-btn {
     background-color: @accent_color;
     background-image: none;
     color: #ffffff;
-    border: 1px solid rgba(13, 143, 209, 0.4);
+    border: 1px solid alpha(@zc_gray_900, 0.4);
 }
 
 window.glass-window button.suggested-action:hover,
 window.glass-window .glass-submit-btn:hover,
 button.suggested-action.glass-submit-btn:hover {
-    background-color: #0d8fd1;
+    background-color: @zc_gray_600;
     color: #ffffff;
 }
 
@@ -141,16 +182,16 @@ window.glass-window headerbar {
 }
 
 window.light-glass headerbar {
-    border-bottom: 1px solid rgba(18, 51, 84, 0.08);
+    border-bottom: 1px solid alpha(@zc_gray_800, 0.08);
 }
 
 window.light-glass headerbar windowtitle .title {
-    color: #123354;
+    color: @zc_gray_800;
     font-weight: 600;
 }
 
 window.light-glass headerbar windowtitle .subtitle {
-    color: #4a607a;
+    color: @zc_gray_600;
 }
 
 window.dark-glass headerbar {
@@ -163,7 +204,7 @@ window.dark-glass headerbar windowtitle .title {
 }
 
 window.dark-glass headerbar windowtitle .subtitle {
-    color: #9aa7b5;
+    color: @zc_gray_400;
 }
 
 /* --- Containers Transparentes Scoped Apenas na Janela Principal --- */
@@ -186,21 +227,21 @@ preferencesdialog > contents {
 }
 
 window.light-glass .glass-pill {
-    background-color: rgba(18, 51, 84, 0.06);
-    border: 1px solid rgba(18, 51, 84, 0.12);
-    color: #123354;
+    background-color: alpha(@zc_gray_800, 0.06);
+    border: 1px solid alpha(@zc_gray_800, 0.12);
+    color: @zc_gray_800;
     font-weight: 500;
 }
 
 window.light-glass .glass-pill:hover {
-    background-color: rgba(18, 51, 84, 0.12);
-    border-color: rgba(18, 51, 84, 0.22);
+    background-color: alpha(@zc_gray_800, 0.12);
+    border-color: alpha(@zc_gray_800, 0.22);
 }
 
 window.dark-glass .glass-pill {
     background-color: rgba(255, 255, 255, 0.08);
     border: 1px solid rgba(255, 255, 255, 0.15);
-    color: #e4ecf5;
+    color: @zc_gray_100;
     font-weight: 500;
 }
 
@@ -220,28 +261,28 @@ window.dark-glass .glass-pill:hover {
 window.light-glass .glass-entry,
 .glass-entry {
     background-color: rgba(255, 255, 255, 0.92);
-    border: 1px solid rgba(18, 51, 84, 0.14);
+    border: 1px solid alpha(@zc_gray_800, 0.14);
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.03), inset 0 1px 0 rgba(255, 255, 255, 0.95);
-    color: #123354;
+    color: @zc_gray_800;
 }
 
 window.light-glass .glass-entry:focus-within {
     background-color: #ffffff;
-    border: 1px solid #0d8fd1;
+    border: 1px solid @accent_color;
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.95);
-    color: #123354;
+    color: @zc_gray_800;
 }
 
 window.dark-glass .glass-entry {
-    background-color: rgba(30, 36, 48, 0.88);
+    background-color: alpha(@zc_gray_800, 0.88);
     border: 1px solid rgba(255, 255, 255, 0.14);
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.08);
-    color: #f6f6f6;
+    color: @zc_gray_50;
 }
 
 window.dark-glass .glass-entry:focus-within {
-    background-color: rgba(36, 44, 58, 0.96);
-    border: 1px solid #62a0ea;
+    background-color: alpha(@zc_gray_800, 0.96);
+    border: 1px solid @zc_gray_400;
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
     color: #ffffff;
 }
@@ -250,7 +291,7 @@ window.dark-glass .glass-entry:focus-within {
 .glass-submit-btn {
     background-color: @accent_color;
     color: #ffffff;
-    border: 1px solid rgba(13, 143, 209, 0.4);
+    border: 1px solid alpha(@zc_gray_900, 0.4);
     border-radius: 12px;
     padding: 8px 20px;
     font-weight: 600;
@@ -259,21 +300,21 @@ window.dark-glass .glass-entry:focus-within {
 }
 
 .glass-submit-btn:hover {
-    background-color: #0d8fd1;
+    background-color: @zc_gray_600;
     box-shadow: 0 3px 8px rgba(0, 0, 0, 0.26);
 }
 
 .glass-submit-btn:active {
-    background-color: #0c7eb9;
+    background-color: @zc_gray_700;
 }
 
 /* --- Títulos da Tela Inicial --- */
 window.light-glass .welcome-title {
-    color: #123354;
+    color: @zc_gray_800;
 }
 
 window.light-glass .welcome-subtitle {
-    color: #4a607a;
+    color: @zc_gray_600;
 }
 
 window.dark-glass .welcome-title {
@@ -281,7 +322,7 @@ window.dark-glass .welcome-title {
 }
 
 window.dark-glass .welcome-subtitle {
-    color: #9aa7b5;
+    color: @zc_gray_400;
 }
 
 /* --- Cards de Vidro (Resposta, Prévia de App, Detalhes) --- */
@@ -293,12 +334,12 @@ window.dark-glass .welcome-subtitle {
 window.light-glass .glass-card,
 .glass-card {
     background-color: rgba(255, 255, 255, 0.88);
-    border: 1px solid rgba(18, 51, 84, 0.09);
+    border: 1px solid alpha(@zc_gray_800, 0.09);
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.04), inset 0 1px 0 rgba(255, 255, 255, 0.95);
 }
 
 window.dark-glass .glass-card {
-    background-color: rgba(34, 40, 52, 0.85);
+    background-color: alpha(@zc_gray_800, 0.85);
     border: 1px solid rgba(255, 255, 255, 0.12);
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.12);
 }
@@ -312,25 +353,25 @@ window.dark-glass .glass-card {
 
 window.light-glass .glass-launch-btn,
 .glass-launch-btn {
-    background-color: alpha(@accent_color, 0.12);
-    border: 1px solid alpha(@accent_color, 0.30);
-    color: #0d8fd1;
+    background-color: alpha(@zc_gray_800, 0.06);
+    border: 1px solid alpha(@zc_gray_800, 0.14);
+    color: @zc_gray_800;
 }
 
 window.light-glass .glass-launch-btn:hover {
-    background-color: alpha(@accent_color, 0.16);
-    border-color: alpha(@accent_color, 0.34);
+    background-color: alpha(@zc_gray_800, 0.12);
+    border-color: alpha(@zc_gray_800, 0.24);
 }
 
 window.dark-glass .glass-launch-btn {
-    background-color: rgba(98, 160, 234, 0.16);
-    border: 1px solid rgba(98, 160, 234, 0.32);
-    color: #78aeed;
+    background-color: alpha(@zc_gray_400, 0.16);
+    border: 1px solid alpha(@zc_gray_400, 0.32);
+    color: @zc_gray_300;
 }
 
 window.dark-glass .glass-launch-btn:hover {
-    background-color: rgba(98, 160, 234, 0.22);
-    border-color: rgba(98, 160, 234, 0.40);
+    background-color: alpha(@zc_gray_400, 0.22);
+    border-color: alpha(@zc_gray_400, 0.40);
 }
 
 /* --- Botão de Fixar Tópico no Header do Card (Pin) --- */
@@ -341,20 +382,20 @@ window.dark-glass .glass-launch-btn:hover {
 }
 
 window.light-glass .glass-pin-btn {
-    background-color: rgba(18, 51, 84, 0.06);
-    border: 1px solid rgba(18, 51, 84, 0.12);
-    color: #123354;
+    background-color: alpha(@zc_gray_800, 0.06);
+    border: 1px solid alpha(@zc_gray_800, 0.12);
+    color: @zc_gray_800;
 }
 
 window.light-glass .glass-pin-btn:hover {
-    background-color: rgba(18, 51, 84, 0.12);
-    border-color: rgba(18, 51, 84, 0.22);
+    background-color: alpha(@zc_gray_800, 0.12);
+    border-color: alpha(@zc_gray_800, 0.22);
 }
 
 window.dark-glass .glass-pin-btn {
     background-color: rgba(255, 255, 255, 0.08);
     border: 1px solid rgba(255, 255, 255, 0.14);
-    color: #e4ecf5;
+    color: @zc_gray_100;
 }
 
 window.dark-glass .glass-pin-btn:hover {
@@ -372,29 +413,29 @@ window.dark-glass .glass-pin-btn:hover {
 window.light-glass .glass-chip,
 .glass-chip {
     background-color: rgba(255, 255, 255, 0.82);
-    border: 1px solid rgba(18, 51, 84, 0.10);
+    border: 1px solid alpha(@zc_gray_800, 0.10);
     box-shadow: 0 2px 6px rgba(0, 0, 0, 0.03), inset 0 1px 0 rgba(255, 255, 255, 0.95);
-    color: #123354;
+    color: @zc_gray_800;
     font-weight: 500;
 }
 
 window.light-glass .glass-chip:hover {
     background-color: #ffffff;
-    border: 1px solid @accent_color;
+    border: 1px solid alpha(@zc_gray_800, 0.22);
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
-    color: #0d8fd1;
+    color: @zc_gray_800;
 }
 
 window.dark-glass .glass-chip {
-    background-color: rgba(42, 50, 64, 0.78);
+    background-color: alpha(@zc_gray_700, 0.78);
     border: 1px solid rgba(255, 255, 255, 0.12);
     box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.1);
-    color: #e4ecf5;
+    color: @zc_gray_100;
 }
 
 window.dark-glass .glass-chip:hover {
-    background-color: rgba(54, 64, 82, 0.95);
-    border: 1px solid #62a0ea;
+    background-color: alpha(@zc_gray_700, 0.95);
+    border: 1px solid @zc_gray_400;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
     color: #ffffff;
 }
@@ -409,41 +450,43 @@ window.dark-glass .glass-chip:hover {
 window.light-glass .glass-row,
 .glass-row {
     background-color: rgba(255, 255, 255, 0.84);
-    border: 1px solid rgba(18, 51, 84, 0.08);
+    border: 1px solid alpha(@zc_gray_800, 0.08);
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.02);
 }
 
 window.dark-glass .glass-row {
-    background-color: rgba(34, 40, 52, 0.82);
+    background-color: alpha(@zc_gray_800, 0.82);
     border: 1px solid rgba(255, 255, 255, 0.1);
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
 }
 
 /* --- Estado final de uma ação já executada (rastro de sucesso/falha) --- */
+/* Trilha de status em cinza: a cor fica no ícone (conteúdo), nunca na borda
+   (chrome). Verde/vermelho na borda era o último resquício de LED na UI. */
 .glass-row.action-done {
-    border-left: 3px solid #33d17a;
+    border-left: 3px solid alpha(@zc_gray_800, 0.55);
 }
 
 .glass-row.action-failed {
-    border-left: 3px solid #e01b24;
+    border-left: 3px solid alpha(@zc_gray_800, 0.55);
 }
 
 window.light-glass .glass-row.action-failed {
-    background-color: rgba(224, 27, 36, 0.07);
+    background-color: alpha(@zc_error, 0.07);
 }
 
 window.dark-glass .glass-row.action-failed {
-    background-color: rgba(224, 27, 36, 0.14);
+    background-color: alpha(@zc_error, 0.14);
 }
 
 /* Ícone de estado colorido explicitamente (não depende das classes de acento) */
 .glass-row.action-done image {
-    color: #33d17a;
+    color: @zc_success;
     margin-right: 2px;
 }
 
 .glass-row.action-failed image {
-    color: #e01b24;
+    color: @zc_error;
     margin-right: 2px;
 }
 
@@ -454,7 +497,7 @@ window.dark-glass .glass-row.action-failed {
 }
 
 window.light-glass .glass-icon-btn:hover {
-    background-color: rgba(18, 51, 84, 0.08);
+    background-color: alpha(@zc_gray_800, 0.08);
 }
 
 window.dark-glass .glass-icon-btn:hover {
@@ -484,12 +527,12 @@ scrollbar slider:hover {
 }
 
 window.light-glass .sidebar-panel {
-    background-color: rgba(243, 246, 251, 0.94);
-    border-right: 1px solid rgba(18, 51, 84, 0.10);
+    background-color: alpha(@zc_gray_100, 0.94);
+    border-right: 1px solid alpha(@zc_gray_800, 0.10);
 }
 
 window.dark-glass .sidebar-panel {
-    background-color: rgba(18, 22, 30, 0.94);
+    background-color: alpha(@zc_gray_900, 0.94);
     border-right: 1px solid rgba(255, 255, 255, 0.08);
 }
 
@@ -502,7 +545,7 @@ window.dark-glass .sidebar-panel {
 }
 
 window.light-glass .sidebar-chat-row:hover {
-    background-color: rgba(18, 51, 84, 0.06);
+    background-color: alpha(@zc_gray_800, 0.06);
 }
 
 window.dark-glass .sidebar-chat-row:hover {
@@ -515,8 +558,8 @@ window.light-glass .sidebar-chat-row.active {
 }
 
 window.dark-glass .sidebar-chat-row.active {
-    background-color: rgba(98, 160, 234, 0.18);
-    border-left: 3px solid #62a0ea;
+    background-color: alpha(@zc_gray_400, 0.18);
+    border-left: 3px solid @zc_gray_400;
 }
 
 /* --- Bolha de Mensagem do Usuário (Estilo Gemini) --- */
@@ -530,7 +573,7 @@ window.dark-glass .sidebar-chat-row.active {
 window.light-glass .user-chat-bubble {
     background-color: alpha(@accent_color, 0.09);
     border: 1px solid alpha(@accent_color, 0.22);
-    color: #123354;
+    color: @zc_gray_800;
 }
 
 window.dark-glass .user-chat-bubble {
@@ -548,12 +591,12 @@ window.dark-glass .user-chat-bubble {
 
 window.light-glass .assistant-message-card {
     background-color: rgba(255, 255, 255, 0.90);
-    border: 1px solid rgba(18, 51, 84, 0.09);
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.03);
+    border: 1px solid alpha(@zc_gray_800, 0.09);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.05), inset 0 1px 0 rgba(255, 255, 255, 0.95);
 }
 
 window.dark-glass .assistant-message-card {
-    background-color: rgba(30, 36, 48, 0.88);
+    background-color: alpha(@zc_gray_800, 0.88);
     border: 1px solid rgba(255, 255, 255, 0.12);
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
 }
@@ -567,23 +610,23 @@ window.dark-glass .assistant-message-card {
 
 window.light-glass .prompt-bar-card {
     background-color: rgba(255, 255, 255, 0.96);
-    border: 1px solid rgba(18, 51, 84, 0.14);
+    border: 1px solid alpha(@zc_gray_800, 0.14);
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.06), inset 0 1px 0 rgba(255, 255, 255, 0.95);
 }
 
 window.light-glass .prompt-bar-card:focus-within {
-    border: 1px solid #0d8fd1;
+    border: 1px solid @accent_color;
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.06), inset 0 1px 0 rgba(255, 255, 255, 0.95);
 }
 
 window.dark-glass .prompt-bar-card {
-    background-color: rgba(32, 38, 50, 0.94);
+    background-color: alpha(@zc_gray_800, 0.94);
     border: 1px solid rgba(255, 255, 255, 0.14);
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.08);
 }
 
 window.dark-glass .prompt-bar-card:focus-within {
-    border: 1px solid #62a0ea;
+    border: 1px solid @zc_gray_400;
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.08);
 }
 
@@ -617,13 +660,13 @@ window.dark-glass .prompt-bar-card:focus-within {
 
 window.light-glass .command-palette,
 .command-palette {
-    background-color: rgba(252, 253, 255, 0.97);
-    border: 1px solid rgba(18, 51, 84, 0.12);
-    box-shadow: 0 18px 48px rgba(0, 0, 0, 0.28);
+    background-color: alpha(@zc_gray_50, 0.97);
+    border: 1px solid alpha(@zc_gray_800, 0.12);
+    box-shadow: 0 18px 48px rgba(0, 0, 0, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.95);
 }
 
 window.dark-glass .command-palette {
-    background-color: rgba(38, 44, 56, 0.97);
+    background-color: alpha(@zc_gray_800, 0.97);
     border: 1px solid rgba(255, 255, 255, 0.12);
     box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
 }
@@ -636,12 +679,12 @@ window.dark-glass .command-palette {
 .drop-hint {
     padding: 32px 48px;
     border-radius: 18px;
-    border: 2px dashed alpha(@accent_color, 0.85);
-    background-color: rgba(20, 24, 32, 0.82);
+    border: 2px dashed alpha(@zc_gray_400, 0.75);
+    background-color: alpha(@zc_gray_900, 0.82);
 }
 
 window.light-glass .drop-hint {
-    background-color: rgba(252, 253, 255, 0.94);
+    background-color: alpha(@zc_gray_50, 0.94);
 }
 
 .attachment-chip {
@@ -652,8 +695,8 @@ window.light-glass .drop-hint {
 /* --- Barra de status inferior (estilo Warp) --- */
 .status-bar {
     padding: 4px 10px;
-    background-color: rgba(127, 127, 127, 0.08);
-    border-top: 1px solid rgba(127, 127, 127, 0.18);
+    background-color: alpha(@zc_gray_500, 0.08);
+    border-top: 1px solid alpha(@zc_gray_500, 0.18);
 }
 
 window.dark-glass .status-bar {
@@ -698,23 +741,23 @@ window.voice-pill-window > contents {
 }
 
 .voice-pill-container {
-    background-color: #1c2029;
+    background-color: @zc_gray_900;
     border: 1px solid rgba(255, 255, 255, 0.10);
     border-radius: 16px;
     padding: 7px 14px;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.10), 0 8px 24px rgba(0, 0, 0, 0.45);
     transition: background-image 180ms ease-in-out, border-color 180ms ease-in-out;
 }
 
 window.light-glass.voice-pill-window .voice-pill-container {
     background-color: #ffffff;
-    border: 1px solid rgba(18, 51, 84, 0.14);
-    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.10);
+    border: 1px solid alpha(@zc_gray_800, 0.14);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.90), 0 6px 20px rgba(0, 0, 0, 0.10);
 }
 
 .voice-pill-avatar {
     border-radius: 9999px;
-    background: linear-gradient(135deg, alpha(@accent_color, 0.22), alpha(#3584e4, 0.18));
+    background: linear-gradient(135deg, alpha(@zc_gray_300, 0.55), alpha(@accent_color, 0.30));
     min-width: 30px;
     min-height: 30px;
     padding: 3px;
@@ -722,14 +765,14 @@ window.light-glass.voice-pill-window .voice-pill-container {
 }
 
 .voice-pill-avatar image {
-    color: #f2f5f9;
+    color: @zc_gray_50;
 }
 
 window.light-glass.voice-pill-window .voice-pill-avatar {
-    background: linear-gradient(135deg, alpha(@accent_color, 0.14), alpha(#3584e4, 0.10));
+    background: linear-gradient(135deg, alpha(@zc_gray_300, 0.60), alpha(@accent_color, 0.22));
 }
 window.light-glass.voice-pill-window .voice-pill-avatar image {
-    color: #123354;
+    color: @zc_gray_800;
 }
 
 .voice-pill-btn {
@@ -754,10 +797,10 @@ window.light-glass .voice-pill-btn:hover {
    Não usar set_visible(False) — isso zera o estilo resolvido. set_opacity(0) preserva.
    LISTENING reusa @accent_color para permitir re-tema do usuário; demais estados
    têm suas próprias @define-color para que user.css possa trocar sem editar Python. */
-@define-color voice_pill_speaking_color #9140ab;
-@define-color voice_pill_thinking_color #f5c211;
-@define-color voice_pill_executing_color #2ec27e;
-@define-color voice_pill_error_color #e01b24;
+@define-color voice_pill_speaking_color @zc_speak;
+@define-color voice_pill_thinking_color @zc_warn;
+@define-color voice_pill_executing_color @zc_success;
+@define-color voice_pill_error_color @zc_error;
 
 window.voice-pill-window .pill-probe {
     min-width: 1px;
@@ -799,7 +842,7 @@ window.light-glass.voice-pill-window .voice-pill-container.pill-interrupting {
 
 /* REC dot sobre o avatar quando o vídeo está ativo */
 window.voice-pill-window .pill-rec-dot {
-    color: #e01b24;
+    color: @zc_error;
     font-size: 9px;
     background-color: rgba(0, 0, 0, 0.55);
     border-radius: 9999px;
@@ -807,23 +850,23 @@ window.voice-pill-window .pill-rec-dot {
 }
 window.light-glass.voice-pill-window .pill-rec-dot {
     background-color: rgba(255, 255, 255, 0.85);
-    color: #c01a22;
+    color: @zc_error;
 }
 
 /* Chip de tool call — usa o status_lbl e adiciona classe */
 window.voice-pill-window .voice-pill-container.pill-chip-ok  .voice-pill-status {
-    color: #2ec27e;
+    color: @zc_success;
     font-weight: 600;
 }
 window.voice-pill-window .voice-pill-container.pill-chip-fail .voice-pill-status {
-    color: #e01b24;
+    color: @zc_error;
     font-weight: 600;
 }
 window.light-glass.voice-pill-window .voice-pill-container.pill-chip-ok  .voice-pill-status {
-    color: #1a7a4d;
+    color: @zc_success;
 }
 window.light-glass.voice-pill-window .voice-pill-container.pill-chip-fail .voice-pill-status {
-    color: #b0161d;
+    color: @zc_error;
 }
 
 /* Timer na title label */
