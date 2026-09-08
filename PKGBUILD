@@ -42,7 +42,6 @@ optdepends=(
   'xdg-desktop-portal-hyprland: portal de captura no Hyprland'
   'xdg-desktop-portal-wlr: portal de captura em wlroots'
   'gtk4-layer-shell: posicionamento da pílula de voz em Wayland'
-  'libayatana-appindicator: bandeja em sessões X11'
   'piper-tts: síntese de voz offline'
   'python-faster-whisper: reconhecimento de fala offline'
   'evince: abertura de PDFs na página exata'

@@ -12,8 +12,8 @@ import os
 
 import gi
 
-gi.require_version("Gtk", "4.0")
-gi.require_version("Adw", "1")
+from .gi_versions import require_gtk4  # noqa: E402
+require_gtk4()
 gi.require_version("Pango", "1.0")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
@@ -660,8 +660,15 @@ class CopilotWindow(Adw.ApplicationWindow):
     def _on_select_all_monitors(self, popover: Gtk.Popover) -> None:
         self.header.on_select_all_monitors(popover)
 
-    def _on_toggle_kill_switch(self, popover: Gtk.Popover) -> None:
+    def _on_toggle_kill_switch(self, popover: Gtk.Popover | None = None) -> None:
         self.header.on_toggle_kill_switch(popover)
+
+    def toggle_kill_switch(self) -> None:
+        """Alterna o kill switch sem popover — usado pelo menu da bandeja."""
+        self.header.on_toggle_kill_switch(None)
+        tray = getattr(self.get_application(), "_tray", None)
+        if tray is not None and hasattr(tray, "set_kill_switch_active"):
+            tray.set_kill_switch_active(self.fence.is_emergency_stopped)
 
     def _update_app_preview(self, text: str) -> None:
         self.prompt_bar._update_app_preview(text)
@@ -1376,11 +1383,14 @@ class ZorinCopilotApp(Adw.Application):
         try:
             from .tray import SystemTrayIndicator
 
+            # Os callbacks já são despachados na main loop pelo próprio
+            # SystemTrayIndicator (_deferred), então passamos as referências puras.
             self._tray = SystemTrayIndicator(
-                on_toggle_hud=lambda: GLib.idle_add(win.toggle_hud),
-                on_crop=lambda: GLib.idle_add(win.trigger_direct_crop),
-                on_preferences=lambda: GLib.idle_add(win._open_settings),
-                on_quit=lambda: GLib.idle_add(self.quit),
+                on_toggle_hud=win.toggle_hud,
+                on_crop=win.trigger_direct_crop,
+                on_preferences=win._open_settings,
+                on_kill_switch=win.toggle_kill_switch,
+                on_quit=self.quit,
             )
             if not self._tray.setup():
                 logger.info("Bandeja indisponível neste ambiente; seguindo sem ícone.")

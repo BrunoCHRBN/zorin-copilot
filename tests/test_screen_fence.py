@@ -69,12 +69,14 @@ class ScreenFenceTest(unittest.TestCase):
         self.assertIn("fora do monitor", reason)
 
     def test_red_zone_blocks_taskbar_clicks(self):
-        """Cliques na barra de tarefas inferior do Zorin OS (últimos 48px) devem ser rejeitados."""
-        # No AOC: max_y é 1080, barra fica de 1032 a 1080
+        """Cliques na faixa do painel inferior (últimos 48px) devem ser rejeitados."""
+        # No AOC: max_y é 1080, a faixa fica de 1032 a 1080.
+        # A zona passou a se chamar `bottombar_*` quando a medida deixou de ser
+        # fixa do Zorin OS e virou detecção de ambiente (fence.default_insets).
         allowed, reason = self.fence.is_coordinate_allowed(2500, 1050)
         self.assertFalse(allowed)
         self.assertIn("área restrita", reason)
-        self.assertIn("taskbar", reason)
+        self.assertIn("bottombar_monitor_0", reason)
 
     def test_all_monitors_mode(self):
         """Modo ALL_MONITORS permite cliques em ambos os monitores válidos."""

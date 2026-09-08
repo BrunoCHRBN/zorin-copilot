@@ -9,17 +9,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-import gi
-
-gi.require_version("Gtk", "4.0")
-gi.require_version("Adw", "1")
+from ..gi_versions import require_gtk4  # noqa: E402
+require_gtk4()
 from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
 
 if TYPE_CHECKING:  # pragma: no cover - apenas para type checking
     from ..app import CopilotWindow
 
 MAX_RESULTS = 8
-
 
 @dataclass(frozen=True)
 class PaletteCommand:
@@ -35,7 +32,6 @@ class PaletteCommand:
     def haystack(self) -> str:
         """Texto usado na busca: título, subtítulo, id e palavras-chave."""
         return " ".join((self.title, self.subtitle, self.name, *self.keywords)).lower()
-
 
 def score_command(query: str, command: PaletteCommand) -> int | None:
     """Pontua a correspondência de um comando com a busca. ``None`` = não casa.
@@ -65,12 +61,10 @@ def score_command(query: str, command: PaletteCommand) -> int | None:
         return max(10, 40 - (len(haystack) - len(query)))
     return None
 
-
 def _is_subsequence(needle: str, haystack: str) -> bool:
     """True se ``needle`` aparece em ordem (não contígua) dentro de ``haystack``."""
     it = iter(haystack)
     return all(char in it for char in needle)
-
 
 class CommandPalette(Gtk.Overlay):
     """Overlay de busca sobre os comandos disponíveis na janela."""
@@ -253,7 +247,6 @@ class CommandPalette(Gtk.Overlay):
         self.entry.set_text("")
         self.ctx.run_palette_command(command)
         self.ctx.palette_closed()
-
 
 def _pretty_accelerator(accelerator: str) -> str:
     """``<Control><Shift>k`` -> ``Ctrl+Shift+K``."""

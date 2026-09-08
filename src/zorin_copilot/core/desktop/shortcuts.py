@@ -540,6 +540,204 @@ class KdeShortcutBackend(ShortcutBackend):
         return "No KDE, use Configurações do Sistema > Atalhos de Teclado > Atalhos Personalizados."
 
 
+class GlobalShortcutsPortalBackend(ShortcutBackend):
+    """Atalhos via portal ``org.freedesktop.portal.GlobalShortcuts``.
+
+    É o caminho padronizado da freedesktop e o futuro para compositores sem
+    mecanismo próprio (niri, river, labwc...). Hoje poucos o implementam — KDE 6
+    e o GNOME 46+ têm suporte parcial — por isso ele entra **depois** dos backends
+    nativos e antes do nulo.
+
+    Ressalva honesta: a sessão do portal morre com o processo que a criou. Um
+    ``copilot setup --shortcut`` cria o bind e o perde ao sair; o vínculo só
+    sobrevive se o app estiver rodando em segundo plano (``--background``).
+    """
+
+    name = "global-shortcuts-portal"
+    persists = False
+
+    PORTAL_BUS: Final = "org.freedesktop.portal.Desktop"
+    PORTAL_PATH: Final = "/org/freedesktop/portal/desktop"
+    PORTAL_IFACE: Final = "org.freedesktop.portal.GlobalShortcuts"
+    #: O trigger do portal usa o mesmo formato de acelerador do GTK.
+    #: Ex.: "<Super><Shift>s".
+    SESSION_IFACE: Final = "org.freedesktop.portal.Session"
+
+    def __init__(self, env: Environment | None = None):
+        super().__init__(env)
+        self._proxy: Any = None
+        self._session: str = ""
+        self._commands: dict[str, str] = {}
+
+    # ------------------------------------------------------------------ suporte
+    def _gio(self) -> Any:
+        try:
+            import gi
+
+            gi.require_version("Gio", "2.0")
+            from gi.repository import Gio
+
+            return Gio
+        except (ImportError, ValueError):
+            return None
+
+    def _proxy_for(self, iface: str) -> Any:
+        gio = self._gio()
+        if gio is None:
+            return None
+        try:
+            return gio.DBusProxy.new_for_bus_sync(
+                gio.BusType.SESSION,
+                gio.DBusProxyFlags.NONE,
+                None,
+                self.PORTAL_BUS,
+                self.PORTAL_PATH,
+                iface,
+                None,
+            )
+        except Exception as exc:
+            logger.debug(f"Portal {iface} indisponível: {exc}")
+            return None
+
+    def is_supported(self) -> bool:
+        # Criar o proxy não prova nada: o Gio resolve nomes preguiçosamente e
+        # aceita interfaces inexistentes. Introspecção é a única checagem honesta.
+        gio = self._gio()
+        if gio is None:
+            return False
+        try:
+            conn = gio.bus_get_sync(gio.BusType.SESSION, None)
+            reply = conn.call_sync(
+                self.PORTAL_BUS,
+                self.PORTAL_PATH,
+                "org.freedesktop.DBus.Introspectable",
+                "Introspect",
+                None,
+                None,
+                gio.DBusCallFlags.NONE,
+                2000,
+                None,
+            )
+            xml = reply.unpack()[0]
+        except Exception as exc:
+            logger.debug(f"Portal inalcançável: {exc}")
+            return False
+
+        if self.PORTAL_IFACE not in xml:
+            return False
+
+        self._proxy = self._proxy_for(self.PORTAL_IFACE)
+        return self._proxy is not None
+
+    # ----------------------------------------------------------------- registro
+    def register(self, slot: str, accelerator: str, command: str) -> ShortcutResult:
+        if self._proxy is None and not self.is_supported():
+            return ShortcutResult(
+                False, "Portal de atalhos globais ausente nesta sessão."
+            )
+
+        try:
+            from gi.repository import GLib
+
+            token = f"zorincopilot{os.getpid()}"
+            options = {
+                "session_handle_token": GLib.Variant("s", token),
+                "handle_token": GLib.Variant("s", token),
+            }
+            reply = self._proxy.call_sync(
+                "CreateSession",
+                GLib.Variant("(a{sv})", (options,)),
+                self._gio().DBusCallFlags.NONE,
+                3000,
+                None,
+            )
+            self._session = reply.unpack()[0]
+            if self._session:
+                # Mantém o proxy vivo: sem ele a sessão é coletada e o bind cai.
+                _PORTAL_SESSIONS[self._session] = self
+                self._proxy.connect("g-signal", self._on_signal)
+        except Exception as exc:
+            return ShortcutResult(False, f"Falha ao criar sessão no portal: {exc}")
+
+        self._commands[slot] = command
+        try:
+            from gi.repository import GLib
+
+            shortcuts = [
+                (
+                    slot,
+                    {
+                        "description": GLib.Variant("s", f"Zorin Copilot — {slot}"),
+                        "preferred_trigger": GLib.Variant("s", accelerator),
+                    },
+                )
+            ]
+            self._proxy.call_sync(
+                "BindShortcuts",
+                GLib.Variant("(sa(sa{sv})sa{sv})", (self._session, shortcuts, "", {})),
+                self._gio().DBusCallFlags.NONE,
+                3000,
+                None,
+            )
+        except Exception as exc:
+            return ShortcutResult(False, f"Falha ao associar atalho no portal: {exc}")
+
+        return ShortcutResult(
+            True,
+            f"Atalho '{slot}' associado via portal (válido enquanto o Copilot estiver rodando).",
+        )
+
+    def unregister(self, slot: str) -> ShortcutResult:
+        self._commands.pop(slot, None)
+        if not self._session:
+            return ShortcutResult(True, "Nenhuma sessão de portal ativa.")
+        try:
+            session = self._proxy_for(self.SESSION_IFACE)
+            if session is None:
+                return ShortcutResult(False, "Não foi possível alcançar a sessão do portal.")
+            from gi.repository import Gio
+
+            session.call_sync(
+                "Close", None, Gio.DBusCallFlags.NONE, 2000, None
+            )
+        except Exception as exc:
+            logger.debug(f"Falha ao fechar sessão do portal: {exc}")
+        _PORTAL_SESSIONS.pop(self._session, None)
+        self._session = ""
+        return ShortcutResult(True, "Sessão do portal encerrada.")
+
+    def is_registered(self, slot: str) -> bool:
+        return bool(self._session) and slot in self._commands
+
+    def hint(self) -> str:
+        return (
+            "O portal GlobalShortcuts só mantém o atalho enquanto o processo do "
+            "Copilot estiver vivo. Para algo persistente, registre o atalho no "
+            "config do seu compositor."
+        )
+
+    # ------------------------------------------------------------------ sinais
+    def _on_signal(self, _proxy, _sender, signal_name, params) -> None:
+        """Dispara o comando quando o compositor reporta o atalho."""
+        if signal_name != "Activated" or not params:
+            return
+        try:
+            _session, shortcut_id, _timestamp, _options = params.unpack()
+        except Exception:
+            return
+        command = self._commands.get(shortcut_id)
+        if not command:
+            return
+        try:
+            subprocess.Popen(command, shell=True, start_new_session=True)
+        except Exception as exc:
+            logger.error(f"Falha ao executar atalho '{shortcut_id}': {exc}")
+
+
+#: Sessões vivas do portal, para que o GC não as destrua junto com o proxy.
+_PORTAL_SESSIONS: dict[str, GlobalShortcutsPortalBackend] = {}
+
+
 class NullShortcutBackend(ShortcutBackend):
     """Backend usado quando nenhum outro serve — falha com mensagem clara."""
 
@@ -571,6 +769,9 @@ def iter_backends(env: Environment | None = None) -> list[ShortcutBackend]:
         HyprlandShortcutBackend(env),
         SwayShortcutBackend(env),
         KdeShortcutBackend(env),
+        # Portal por último: é padronizado, mas poucos compositores implementam e
+        # a sessão morre com o processo. Melhor que nada, pior que o nativo.
+        GlobalShortcutsPortalBackend(env),
     ]
 
 

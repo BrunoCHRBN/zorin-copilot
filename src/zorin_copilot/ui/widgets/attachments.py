@@ -10,17 +10,14 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING
 
-import gi
-
-gi.require_version("Gtk", "4.0")
-gi.require_version("Adw", "1")
+from ..gi_versions import require_gtk4  # noqa: E402
+require_gtk4()
 from gi.repository import Gtk  # noqa: E402
 
 from ...core.attachments import Attachment, format_size
 
 if TYPE_CHECKING:  # pragma: no cover - apenas para type checking
     from ..app import CopilotWindow
-
 
 class AttachmentBar:
     """Lista os arquivos anexados, com remoção individual."""
@@ -101,7 +98,6 @@ class AttachmentBar:
         self.ctx.attachments = [a for a in attachments if a is not att]
         self.refresh()
         self.ctx.show_toast(f"Anexo removido: {att.name}")
-
 
 def _chip_detail(att: Attachment) -> str:
     """Texto secundário do chip: tamanho, truncamento ou erro."""

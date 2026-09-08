@@ -161,22 +161,76 @@ Para ícone na bandeja, adicione o módulo `tray` à sua waybar.
 
 ---
 
-## 8. Roadmap do que ainda falta
+## 8. Segunda leva: itens do roadmap já implementados
 
-| Prioridade | Item | Por quê |
+| Item | Onde | O que mudou |
 |---|---|---|
-| Alta | `gtk4-layer-shell` para a pílula de voz | Único jeito de ancorar e manter acima em Wayland. Hoje ela aparece onde o compositor quiser. |
-| Alta | Remover o laço morto em `_monitor_under_pointer` | `voice_pill.py:992-998` não faz nada; a detecção de monitor nunca funcionou. |
-| Alta | Menu D-Bus completo na bandeja (com.canonical.dbusmenu) | O SNI atual expõe `Menu=/`: a barra cai no `Activate`, então só há "clicar para abrir". |
-| Média | Red zones configuráveis por ambiente | `fence.py:125-149` assume 48px+32px. Sem barra no Hyprland, isso bloqueia área útil. |
-| Média | Backend XDG GlobalShortcuts portal | Caminho padronizado; poucos compositores implementam hoje, mas é o futuro. |
-| Média | Expandir aliases de app (M1) | `dolphin`, `thunar`, `konsole`, `kitty`, `alacritty`. |
-| Baixa | CI em KDE Plasma e Sway | O container Arch cobre GNOME-less, mas Hyprland/Sway reais precisam de testes manuais ou VM. |
+| Versões mínimas de GTK/Adw | `ui/gi_versions.py` (novo) | Verificação em **runtime** com erro acionável. Ver a nota importante abaixo. |
+| `gtk4-layer-shell` na pílula | `ui/layer_shell.py` (novo) | Ancoragem por `wlr-layer-shell` com degradação explícita quando ausente. |
+| Laço morto em `_monitor_under_pointer` | `ui/voice_pill.py` | Substituído por detecção real (superfície sob o ponteiro → `get_monitor_at_surface` → casamento por modelo/descrição/geometria). |
+| Menu D-Bus na bandeja | `core/desktop/menu.py` (novo) | `com.canonical.dbusmenu` completo: layout, propriedades, `clicked`, `LayoutUpdated`. |
+| Red zones por ambiente | `core/fence.py` + `core/config.py` | `default_insets()` por ambiente, `red_zone_*_px` no config, `set_insets()`. |
+| Backend GlobalShortcuts portal | `core/desktop/shortcuts.py` | `GlobalShortcutsPortalBackend`, último antes do nulo. |
+| Aliases de app | `core/apps.py` | 26 entradas, com reordenação por ambiente (`ordered_aliases`). |
+| CI em compositor real | `.github/workflows/ci.yml` | Job `sway-arch`: sobe Sway headless e valida detecção e backends. |
+
+### A armadilha do `require_version`
+
+A primeira tentativa de fixar versões foi `gi.require_version("Gtk", "4.10")`. **Isso está errado e nunca funcionaria**: o namespace do GI é congelado pela API major — GTK 4.6 e GTK 4.18 publicam o mesmo `Gtk-4.0.typelib`, e libadwaita 1.1 e 1.7 publicam o mesmo `Adw-1.typelib`. `require_version("Gtk","4.10")` levanta `ValueError` até na máquina mais nova.
+
+A versão real só é conhecida depois de carregar o namespace:
+
+```python
+gi.require_version("Gtk", "4.0")          # namespace: sempre 4.0
+from gi.repository import Gtk
+Gtk.get_minor_version()                    # runtime: 4.14, 4.6, ...
+```
+
+É isso que `require_gtk4()` faz. Quando o sistema é antigo, ela levanta `ToolkitTooOld` com o comando de instalação da distro detectada. `ZORIN_COPILOT_ALLOW_OLD_TOOLKIT=1` troca o erro fatal por aviso, para quem está depurando num LTS antigo.
+
+### AppIndicator saiu de vez
+
+O caminho AppIndicator3/Ayatana foi removido, não apenas preterido. Ele exige `gi.require_version("Gtk","3.0")`, e o PyGObject recusa duas versões do mesmo namespace no mesmo processo — incompatível com o Gtk4 que o resto do app usa. Como ele nunca funcionou (o bug do `importlib`) e o SNI também cobre X11, mantê-lo só custava. `setup.sh` e o `PKGBUILD` deixaram de puxar `libayatana-appindicator`.
 
 ---
 
 ## 9. Observações sobre a validação
 
-- A suíte roda verde no sandbox **exceto** por um segfault em `tests/test_continuous_vision.py` em diante. Verifiquei que o **mesmo crash ocorre no checkout limpo de `main`** — é limitação do ambiente de validação (Ubuntu 22.04 com GTK 4.6 / libadwaita 1.1, abaixo do GTK 4.10+ que o código exige), não regressão deste PR.
-- Consequência prática: `gi.require_version("Gtk","4.0")` aceita 4.0, mas o código usa `Gtk.FileDialog` (4.10) e `Adw.PreferencesDialog` (1.5). **Vale fixar as versões mínimas** (`gi.require_version("Gtk","4.10")`, `"Adw","1.5")`) para falhar com mensagem clara em vez de `AttributeError`.
+**O segfault era AT-SPI, não GTK.** O crash que aparecia em `tests/test_continuous_vision.py` (`Trace/breakpoint trap`) tinha uma causa identificável: sem um barramento de acessibilidade, o GTK emite
+
+```
+dbind-ERROR: AT-SPI: Couldn't connect to accessibility bus
+```
+
+e **aborta** o processo. Não era bug do projeto nem versão de GTK — era o ambiente de teste sem `org.a11y.Bus`. Confirmado reproduzindo no checkout limpo de `main`.
+
+Para rodar a suíte completa num container/CI sem sessão gráfica:
+
+```bash
+xvfb-run -a dbus-run-session -- bash -c '
+  /usr/libexec/at-spi-bus-launcher --launch-immediately &
+  sleep 2
+  python -m pytest -q
+'
+```
+
+**A suíte também travava, por um segundo motivo.** `run_loop_until()` em `tests/test_ui_refactor.py` drenava o contexto com `while context.pending(): context.iteration(False)`. `pending()` responde "existe source registrado", não "existe algo despachável": uma conexão D-Bus ociosa mantém `pending()` verdadeiro para sempre, e `iteration(False)` não a consome — loop infinito. O `while` ganhou teto (`_drain_ready`). Com isso a suíte passou de "trava em 81%" para **completa em ~17 s**.
+
+Resultado atual: **824 passando, 1 falhando** (`test_submit_renders_assistant_response`). Verifiquei que essa falha **também ocorre no `main` limpo** — é dependência de ordem no harness de teste, não regressão desta mudança. `test_setup_shortcut` (que falhava por não mockar o terceiro slot de atalho) foi corrigido junto.
+
+Outras notas:
+
+- Os 16 módulos de UI e 13 arquivos de teste agora chamam `require_gtk4()` em vez de espalhar `require_version` — se o requisito mudar, muda em um lugar.
+- `ZORIN_COPILOT_ALLOW_OLD_TOOLKIT=1` existe para desenvolvimento, não para produção.
 - Recomendo rodar a suíte no Arch real antes de mergear — é lá que a história de PyGObject/GTK rola primeiro.
+
+---
+
+## 10. O que ainda falta
+
+| Prioridade | Item | Por quê |
+|---|---|---|
+| Média | `icon-data` no dbusmenu | Ícones por nome têmático dependem do tema da barra; enviar pixels resolve. |
+| Média | Configurar red zones pela UI | Hoje só por `CopilotConfig` (`red_zone_bottom_px` / `red_zone_top_px`). |
+| Baixa | CI em KDE Plasma real | Plasma Wayland em container é mais frágil que Sway; segue manual. |
+| Baixa | Menus dinâmicos no dbusmenu | `AboutToShow` responde `False`: a árvore é estática, o que basta hoje. |

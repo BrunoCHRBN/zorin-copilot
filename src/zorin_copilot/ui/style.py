@@ -22,10 +22,8 @@ import os
 from pathlib import Path
 from typing import Iterable
 
-import gi
-
-gi.require_version("Gtk", "4.0")
-gi.require_version("Adw", "1")
+from .gi_versions import require_gtk4  # noqa: E402
+require_gtk4()
 from gi.repository import Adw, Gdk, Gtk  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -33,20 +31,16 @@ logger = logging.getLogger(__name__)
 #: CSS instalado pela distribuição; vence o tema embutido.
 SYSTEM_CSS_PATH = Path("/usr/share/zorin-copilot/zorin-copilot.css")
 
-
 def config_dir() -> Path:
     """Diretório de configuração do usuário (respeita ``XDG_CONFIG_HOME``)."""
     base = os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")
     return Path(base) / "zorin-copilot"
 
-
 def user_css_path() -> Path:
     return config_dir() / "user.css"
 
-
 def themes_dir() -> Path:
     return config_dir() / "themes"
-
 
 def _load_bundled_css() -> str:
     """Lê o CSS embutido no pacote.
@@ -64,9 +58,7 @@ def _load_bundled_css() -> str:
         logger.error("Não foi possível carregar o CSS embutido: %s", exc)
         return ""
 
-
 GLASS_CSS = _load_bundled_css()
-
 
 def load_stylesheet_chain() -> list[tuple[str, str]]:
     """Devolve ``[(nome, css)]`` em ordem crescente de prioridade."""
@@ -89,7 +81,6 @@ def load_stylesheet_chain() -> list[tuple[str, str]]:
 
     return chain
 
-
 def _external_sources() -> Iterable[tuple[Path, str]]:
     """Caminhos externos de CSS, da menor para a maior prioridade."""
     yield SYSTEM_CSS_PATH, "system"
@@ -101,9 +92,7 @@ def _external_sources() -> Iterable[tuple[Path, str]]:
 
     yield user_css_path(), "user"
 
-
 _provider_installed = False
-
 
 def apply_glass_theme(display: Gdk.Display | None = None) -> None:
     """Aplica a cadeia de CSS à aplicação, com o override do usuário por último."""
@@ -134,7 +123,6 @@ def apply_glass_theme(display: Gdk.Display | None = None) -> None:
 
     _provider_installed = True
 
-
 def setup_glass_window(window: Adw.ApplicationWindow) -> None:
     """Configura o efeito glassmorphism na janela e sincroniza tema claro/escuro."""
     apply_glass_theme(window.get_display())
@@ -153,7 +141,6 @@ def setup_glass_window(window: Adw.ApplicationWindow) -> None:
     style_manager.connect("notify::dark", sync_color_scheme)
     sync_color_scheme()
 
-
 def setup_glass_pill_window(window: Gtk.Window) -> None:
     """Configura o efeito glassmorphism na janela flutuante da pílula de voz e sincroniza temas."""
     apply_glass_theme(window.get_display())
@@ -171,4 +158,3 @@ def setup_glass_pill_window(window: Gtk.Window) -> None:
 
     style_manager.connect("notify::dark", sync_color_scheme)
     sync_color_scheme()
-

@@ -79,7 +79,6 @@ resolve_pkg() {
                 pdftotext) echo poppler-utils ;;
                 evince) echo evince ;;
                 ydotool) echo ydotool ;;
-                appindicator) echo gir1.2-ayatanaappindicator3-0.1 ;;
                 notify) echo libnotify-bin ;;
                 clipboard) echo "wl-clipboard xclip" ;;
                 grim) echo "" ;;   # não existe no Debian; cai no portal/grim compilado
@@ -94,7 +93,6 @@ resolve_pkg() {
                 pdftotext) echo poppler ;;
                 evince) echo evince ;;
                 ydotool) echo "AUR:ydotool" ;;
-                appindicator) echo libayatana-appindicator ;;
                 notify) echo libnotify ;;
                 clipboard) echo "wl-clipboard xclip" ;;
                 grim) echo grim ;;
@@ -109,7 +107,6 @@ resolve_pkg() {
                 pdftotext) echo poppler-utils ;;
                 evince) echo evince ;;
                 ydotool) echo ydotool ;;
-                appindicator) echo libayatana-appindicator-gtk3 ;;
                 notify) echo libnotify ;;
                 clipboard) echo "wl-clipboard xclip" ;;
                 grim) echo grim ;;
@@ -139,7 +136,8 @@ CAPS="python3 pip3 gi gtk4 libadwaita pdftotext notify clipboard"
 case "$DESKTOP_ENV" in
     hyprland|sway|wlroots) CAPS="$CAPS grim slurp" ;;
 esac
-CAPS="$CAPS ydotool appindicator"
+# Bandeja é StatusNotifierItem puro em D-Bus: não depende de AppIndicator/GTK3.
+CAPS="$CAPS ydotool"
 
 OFFICIAL_DEPS=()
 AUR_DEPS=()

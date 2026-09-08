@@ -9,17 +9,14 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-import gi
-
-gi.require_version("Gtk", "4.0")
-gi.require_version("Adw", "1")
+from ..gi_versions import require_gtk4  # noqa: E402
+require_gtk4()
 from gi.repository import GLib, Gtk, Pango  # noqa: E402
 
 if TYPE_CHECKING:  # pragma: no cover - apenas para type checking
     from ..app import CopilotWindow
 
 SEARCH_DEBOUNCE_MS = 80
-
 
 def format_relative_timestamp(iso_str: str) -> str:
     """Formata timestamp ISO de forma amigável para exibição no histórico de tópicos."""
@@ -39,7 +36,6 @@ def format_relative_timestamp(iso_str: str) -> str:
             return dt.strftime("%d/%m/%Y")
     except Exception:
         return iso_str[:16].replace("T", " ")
-
 
 class SidebarPanel:
     """Painel lateral de histórico de conversas com busca filtrada."""

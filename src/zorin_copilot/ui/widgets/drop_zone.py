@@ -15,7 +15,8 @@ from typing import TYPE_CHECKING
 import gi
 
 gi.require_version("Gdk", "4.0")
-gi.require_version("Gtk", "4.0")
+from ..gi_versions import require_gtk4  # noqa: E402
+require_gtk4()
 from gi.repository import Gdk, Gtk  # noqa: E402
 
 if TYPE_CHECKING:  # pragma: no cover - apenas para type checking

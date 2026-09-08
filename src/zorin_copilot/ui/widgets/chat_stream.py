@@ -10,10 +10,8 @@ import html
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-import gi
-
-gi.require_version("Gtk", "4.0")
-gi.require_version("Adw", "1")
+from ..gi_versions import require_gtk4  # noqa: E402
+require_gtk4()
 from gi.repository import Adw, Gdk, GLib, Gtk, Pango  # noqa: E402
 
 from ...ai.actions import ActionPlan, ActionType, DesktopAction
@@ -23,7 +21,6 @@ from ..markdown import format_markdown_to_markup  # noqa: F401 - reexportado por
 
 if TYPE_CHECKING:  # pragma: no cover - apenas para type checking
     from ..app import CopilotWindow
-
 
 def get_action_icon(action: DesktopAction) -> str:
     """Retorna o ícone semântico padrão mais adequado para a ação proposta."""
@@ -60,7 +57,6 @@ def get_action_icon(action: DesktopAction) -> str:
         return "folder-symbolic"
     return "system-run-symbolic"
 
-
 class TypingIndicator(Gtk.Box):
     """Indicador de "digitando…" estilo iMessage: três pontos que pulsam em onda.
 
@@ -95,7 +91,6 @@ class TypingIndicator(Gtk.Box):
             GLib.source_remove(self._timer)
             self._timer = None
 
-
 @dataclass
 class ActionRowHandle:
     """Trio (linha, botão, chave) de uma ação proposta, para atualização após executar."""
@@ -104,7 +99,6 @@ class ActionRowHandle:
     button: "Gtk.Button"
     action: DesktopAction
     key: str | None
-
 
 class ChatStreamView:
     """Fluxo rolável de mensagens com tela de boas-vindas e ações executáveis."""

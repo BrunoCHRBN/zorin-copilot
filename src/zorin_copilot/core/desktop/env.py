@@ -73,6 +73,46 @@ DESKTOP_LABELS: Final[dict[str, str]] = {
 }
 
 
+#: Barras que aparecem em compositores wlroots. Diferente de GNOME/KDE, aqui a
+#: barra é opcional — por isso precisa ser detectada em execução, não assumida.
+BAR_PROCESSES: Final[tuple[str, ...]] = (
+    "waybar",
+    "polybar",
+    "yambar",
+    "eww",
+    "ags",
+    "swaybar",
+    "xfce4-panel",
+    "tint2",
+    "lemonbar",
+)
+
+
+def running_processes() -> frozenset[str]:
+    """Nomes dos processos em execução, lidos direto de ``/proc``.
+
+    Evita depender de ``pgrep``/``ps`` — que não existem em imagens mínimas de
+    container — e é trivial de simular em teste.
+    """
+    names: set[str] = set()
+    try:
+        import os
+
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            try:
+                with open(f"/proc/{entry}/comm", "rb") as handle:
+                    name = handle.read().decode("utf-8", "replace").strip()
+            except OSError:
+                continue
+            if name:
+                names.add(name)
+    except OSError:
+        return frozenset()
+    return frozenset(names)
+
+
 def describe_for_prompt(env: Environment) -> str:
     """Descreve o ambiente numa frase curta, para o prompt de sistema.
 
@@ -163,6 +203,11 @@ class Environment:
     def has(self, *binaries: str) -> bool:
         """Algum dos binários informados está disponível?"""
         return any(b in self.binaries for b in binaries)
+
+    def is_running(self, *processes: str) -> bool:
+        """Algum dos processos informados está em execução agora?"""
+        running = running_processes()
+        return any(p in running for p in processes)
 
     def describe(self) -> str:
         """Frase curta para logs e para o rodapé de diagnóstico."""

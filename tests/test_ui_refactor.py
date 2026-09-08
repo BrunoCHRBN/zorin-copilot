@@ -13,8 +13,8 @@ import unittest
 
 import gi
 
-gi.require_version("Gtk", "4.0")
-gi.require_version("Adw", "1")
+from zorin_copilot.ui.gi_versions import require_gtk4  # noqa: E402
+require_gtk4()
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
 Adw.init()
@@ -44,18 +44,32 @@ def run_loop_until(predicate, timeout_ms=2000):
     context = GLib.MainContext.default()
 
     while time.monotonic() < deadline:
-        # iteration(False) não bloqueia: só despacha o que já está pronto.
-        while context.pending():
-            context.iteration(False)
+        _drain_ready(context)
         if predicate():
             return True
         time.sleep(0.005)
 
     # Última chance: o prazo pode ter vencido no mesmo instante em que a
     # condição ficou pronta.
-    while context.pending():
-        context.iteration(False)
+    _drain_ready(context)
     return bool(predicate())
+
+
+def _drain_ready(context, max_iterations: int = 100) -> None:
+    """Despacha o que já está pronto, com teto de iterações.
+
+    O laço precisa de teto: `MainContext.pending()` responde "existe source
+    registrado", não "existe algo despachável". Uma conexão D-Bus ociosa mantém
+    `pending()` verdadeiro indefinidamente e `iteration(False)` não a consome —
+    o `while context.pending()` original travava a suíte inteira.
+    """
+    for _ in range(max_iterations):
+        if not context.pending():
+            return
+        # iteration(False) não bloqueia: só despacha o que já está pronto.
+        # Devolve False quando não havia nada pronto — aí também paramos.
+        if not context.iteration(False):
+            return
 
 
 class SessionTurnRegressionTest(unittest.TestCase):
@@ -111,7 +125,12 @@ class WindowCompositionTest(unittest.TestCase):
             self.win.entry.set_text("abrir calculadora")
             self.win._on_submit(self.win.entry)
 
-        self.assertTrue(run_loop_until(lambda: not self.win._is_busy))
+        # Praço largo pelo mesmo motivo do teste de debounce: em runner
+        # compartilhado o worker da IA pode demorar a ser despachado.
+        self.assertTrue(
+            run_loop_until(lambda: not self.win._is_busy, timeout_ms=10_000),
+            "o envio não liberou a interface dentro do prazo",
+        )
         self.assertEqual(self.win.session.turn_count, 1)
 
         children = []

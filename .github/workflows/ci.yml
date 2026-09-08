@@ -78,7 +78,7 @@ jobs:
             gtk4 libadwaita \
             poppler \
             xorg-server-xvfb \
-            dbus \
+            dbus at-spi2-core \
             git
 
       - uses: actions/checkout@v4
@@ -103,7 +103,18 @@ jobs:
           "
 
       - name: Roda a suíte
-        run: xvfb-run -a .venv/bin/python -m pytest -q
+        # Sem um barramento de acessibilidade o GTK aborta o processo com
+        # `dbind-ERROR: AT-SPI: Couldn't connect to accessibility bus` — o que
+        # aparece como "core dumped" e parece bug do projeto. Subir o launcher
+        # antes evita isso; o dbus-run-session dá a sessão que ele exige.
+        run: |
+          xvfb-run -a dbus-run-session -- bash -c '
+            for launcher in /usr/lib/at-spi-bus-launcher /usr/libexec/at-spi-bus-launcher; do
+              if [ -x "$launcher" ]; then "$launcher" --launch-immediately & break; fi
+            done
+            sleep 1
+            .venv/bin/python -m pytest -q
+          '
         env:
           XDG_RUNTIME_DIR: /tmp
 
@@ -134,3 +145,77 @@ jobs:
           test -L "$HOME/.local/bin/zorin-copilot"
           test -f "$HOME/.local/share/applications/io.github.bruno.ZorinCopilot.desktop"
           echo "Setup Arch ok"
+
+  # Compositor wlroots de verdade. O container Arch cobre "sem GNOME", mas não
+  # cobre "com Wayland": é aqui que survivem os bugs de detect_environment, de
+  # seleção de backend e de captura. Roda com continue-on-error porque subir
+  # Sway headless em container é sensível à imagem — o job é sinal, não porteiro.
+  sway-arch:
+    name: Sessão Sway real (Arch)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    container:
+      image: archlinux:latest
+
+    steps:
+      - name: Instala Sway e dependências
+        run: |
+          pacman -Sy --noconfirm --needed \
+            python python-pip python-gobject \
+            gtk4 libadwaita \
+            poppler git \
+            sway seatd grim slurp wl-clipboard \
+            dbus
+
+      - uses: actions/checkout@v4
+
+      - name: Prepara o ambiente
+        run: |
+          python -m venv --system-site-packages .venv
+          .venv/bin/pip install -e . --no-deps
+          .venv/bin/pip install pytest Pillow requests beautifulsoup4 websockets
+
+      - name: Sobe o Sway em modo headless
+        run: |
+          mkdir -p /tmp/xdg && chmod 700 /tmp/xdg
+          seatd -u root &
+          sleep 1
+          mkdir -p /tmp/swaylog
+          WLR_BACKENDS=headless \
+          WLR_LIBINPUT_NODEVICES=1 \
+          XDG_RUNTIME_DIR=/tmp/xdg \
+          nohup sway --config /dev/null --debug > /tmp/swaylog/sway.log 2>&1 &
+          for i in $(seq 1 30); do
+            [ -S /tmp/xdg/wayland-0 ] && break
+            sleep 1
+          done
+          test -S /tmp/xdg/wayland-0 || { cat /tmp/swaylog/sway.log; exit 1; }
+          echo "WAYLAND_DISPLAY=wayland-0" >> "$GITHUB_ENV"
+          echo "XDG_RUNTIME_DIR=/tmp/xdg" >> "$GITHUB_ENV"
+          echo "XDG_SESSION_TYPE=wayland" >> "$GITHUB_ENV"
+
+      - name: Confere a detecção de ambiente num compositor real
+        run: |
+          .venv/bin/python -c "
+          from zorin_copilot.core.desktop import env as desktop_env
+          detected = desktop_env.detect_environment()
+          print('desktop:', detected.desktop)
+          print('sessão :', detected.session_type)
+          assert detected.desktop == 'sway', f'esperava sway, veio {detected.desktop!r}'
+          assert detected.is_wlroots, 'sway deveria contar como wlroots'
+          "
+
+      - name: Confere backends escolhidos sob wlroots
+        run: |
+          .venv/bin/python -c "
+          from zorin_copilot.core.desktop.env import detect_environment
+          from zorin_copilot.core.desktop import screenshot, shortcuts
+          env = detect_environment()
+          print('atalhos  :', shortcuts.select_backend(env).name)
+          print('captura  :', screenshot.select_backend(env).name)
+          print('faltando :', screenshot.missing_dependencies(env) or 'nada')
+          assert shortcuts.select_backend(env).name == 'sway'
+          "
+
+      - name: Roda a suíte de portabilidade dentro da sessão
+        run: .venv/bin/python -m pytest tests/test_desktop_portability.py -q

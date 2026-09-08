@@ -103,12 +103,15 @@ class StatusNotifierTray:
         icon_name: str = "dialog-information-symbolic",
         on_activate: Callable[[], None] | None = None,
         on_secondary: Callable[[], None] | None = None,
+        menu: Any | None = None,
     ):
         self.app_id = app_id
         self.title = title
         self.icon_name = icon_name
         self.on_activate = on_activate
         self.on_secondary = on_secondary
+        # DbusMenu opcional: sem ele a barra só oferece o Activate (clique simples).
+        self.menu = menu
 
         self._owner_id: int = 0
         self._registration_id: int = 0
@@ -174,12 +177,30 @@ class StatusNotifierTray:
             logger.warning(f"Falha ao registrar objeto SNI: {exc}")
             return
 
+        self._register_menu()
         self._register_with_watcher()
         self._active = True
         logger.info("Ícone de bandeja registrado via StatusNotifierItem.")
 
     def _on_name_lost(self, conn, name, *args) -> None:
         self._active = False
+
+    def _register_menu(self) -> None:
+        """Publica o menu D-Bus na mesma conexão e expõe o caminho no SNI."""
+        if self.menu is None or not self._conn:
+            return
+        try:
+            if not self.menu.register(self._conn):
+                logger.info("Menu da bandeja não registrado; seguindo só com Activate.")
+        except Exception as exc:
+            logger.warning(f"Falha ao registrar menu da bandeja: {exc}")
+
+    @property
+    def menu_path(self) -> str:
+        """Caminho do menu publicado, ou ``/`` quando não há menu."""
+        if self.menu is not None and getattr(self.menu, "is_registered", False):
+            return str(self.menu.path)
+        return "/"
 
     def _register_with_watcher(self) -> None:
         if not self._conn:
@@ -224,7 +245,7 @@ class StatusNotifierTray:
             "Title": self.title,
             "IconName": self.icon_name,
             "IconThemePath": "",
-            "Menu": "/",  # sem menu D-Bus: a barra cai no Activate
+            "Menu": self.menu_path,  # "/" = sem menu; a barra cai no Activate
             "IconAccessibleDesc": self.title,
         }
         if prop in string_props:
@@ -276,6 +297,8 @@ class StatusNotifierTray:
                 self._conn.unregister_object(self._registration_id)
             except Exception:
                 pass
+        if self.menu is not None:
+            self.menu.unregister()
         if self._owner_id:
             try:
                 Gio.bus_unown_name(self._owner_id)

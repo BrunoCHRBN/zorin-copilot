@@ -11,10 +11,8 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING
 
-import gi
-
-gi.require_version("Gtk", "4.0")
-gi.require_version("Adw", "1")
+from ..gi_versions import require_gtk4  # noqa: E402
+require_gtk4()
 from gi.repository import Adw, Gtk, GLib  # noqa: E402
 
 from ...core.usage import format_tokens  # noqa: E402
@@ -31,7 +29,6 @@ _ICON_RAG = "folder-documents-symbolic"
 
 _REFRESH_INTERVAL_SECONDS = 5
 
-
 def _read_mem_available_gb() -> float | None:
     """Lê ``MemAvailable`` de ``/proc/meminfo`` (kB) e devolve em GB, ou ``None``."""
     try:
@@ -44,11 +41,9 @@ def _read_mem_available_gb() -> float | None:
         return None
     return None
 
-
 def _format_gb(value: float) -> str:
     # pt-BR: ponto decimal vira vírgula.
     return f"{value:.1f}".replace(".", ",")
-
 
 class StatusBarWidget:
     """Barra de status inferior com telemetria de sistema e consumo de tokens.

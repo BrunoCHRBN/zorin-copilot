@@ -3,8 +3,8 @@
 import unittest
 import gi
 
-gi.require_version("Gtk", "4.0")
-gi.require_version("Adw", "1")
+from zorin_copilot.ui.gi_versions import require_gtk4  # noqa: E402
+require_gtk4()
 from gi.repository import Adw, Gdk, Gtk  # noqa: E402
 
 from zorin_copilot.ui.style import GLASS_CSS, apply_glass_theme, setup_glass_window

@@ -7,10 +7,8 @@ from __future__ import annotations
 import threading
 from typing import Callable
 
-import gi
-
-gi.require_version("Gtk", "4.0")
-gi.require_version("Adw", "1")
+from .gi_versions import require_gtk4  # noqa: E402
+require_gtk4()
 from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
 
 from ..ai.providers import (
@@ -35,7 +33,6 @@ PROVIDER_ICONS: dict[str, str] = {
 }
 FALLBACK_ICON = "application-x-executable-symbolic"
 VALID_PROVIDERS = ("gemini", "ollama", "openai")
-
 
 class PreferencesDialog(Adw.PreferencesDialog):
     """Diálogo de configurações do Zorin Copilot usando Libadwaita."""

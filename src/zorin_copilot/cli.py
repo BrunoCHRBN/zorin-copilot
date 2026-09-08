@@ -132,19 +132,35 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     missing = desktop_shot.missing_dependencies(env)
     if missing:
         print(f"  ⚠ Captura: faltam {', '.join(missing)}")
+
+    # Red zones: 80px travados sem barra é a reclamação clássica em Hyprland/Sway.
+    try:
+        from .core.fence import default_insets
+
+        bottom, top = default_insets(env)
+        if bottom or top:
+            print(f"  Red zones: inferior {bottom}px, superior {top}px (detectado do ambiente)")
+        else:
+            print("  Red zones: desativadas (nenhum painel detectado neste ambiente)")
+    except Exception:
+        pass
     print()
 
     checks = []
 
-    # 1. PyGObject e GTK4
+    # 1. PyGObject, GTK4 e a versão mínima de runtime que o código realmente usa
     try:
-        import gi
-        gi.require_version("Gtk", "4.0")
-        gi.require_version("Adw", "1")
-        from gi.repository import Adw, Gtk  # noqa: F401
-        checks.append(("GTK 4.0 + Libadwaita 1", True, "disponível"))
+        from .ui.gi_versions import require_gtk4, toolkit_report
+
+        require_gtk4()
+        report = toolkit_report()
+        parts = []
+        for namespace, info in report.get("details", {}).items():  # type: ignore[union-attr]
+            parts.append(f"{namespace} {info['found']}")
+        checks.append(("GTK4 + Libadwaita", True, " / ".join(parts)))
     except Exception as exc:
-        checks.append(("GTK 4.0 + Libadwaita 1", False, str(exc)))
+        # ToolkitTooOld já vem com a mensagem de "como resolver" pronta.
+        checks.append(("GTK4 + Libadwaita", False, str(exc)))
 
     # 2. AT-SPI2
     try:

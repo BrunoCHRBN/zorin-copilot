@@ -72,10 +72,17 @@ class CopilotConfig:
     pill_monitor_idx: int = -1  # -1 = auto (monitor sob o cursor), senão índice Gdk.Display.get_monitors()
     pill_corner: str = "top-center"  # "top-center", "top-right", "top-left", "bottom-center"
     pill_pinned: bool = True  # manter acima de outras janelas (best-effort; X11-only)
+    pill_margin: int = 12  # folga das bordas quando ancorada via layer-shell (Wayland)
     pill_idle_timeout_sec: int = 8  # 0 = nunca esmaecer; fade ocioso para 30% de opacidade
 
     # Inicialização automática com o sistema (Autostart no boot/login)
     autostart_enabled: bool = False
+
+    # Red zones (faixas bloqueadas para automação) em pixels.
+    # -1 = automático: pergunta ao ambiente (GNOME/KDE têm painel; wlroots só
+    # tem barra se o usuário rodar uma). 0 desliga a faixa.
+    red_zone_bottom_px: int = -1
+    red_zone_top_px: int = -1
 
     # Configurações de Confiança, Privacidade e RAG
     trusted_directories: list[str] = field(default_factory=lambda: ["~/Documentos"])
