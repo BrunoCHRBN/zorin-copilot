@@ -14,9 +14,28 @@ import requests
 
 from .actions import ActionType, DesktopAction
 from ..core.config import CopilotConfig
+from ..core.desktop.env import current_environment, describe_for_prompt
 from ..core.usage import TokenUsage, TokenUsageTracker, usage_from_gemini, usage_from_ollama, usage_from_openai
 
 logger = logging.getLogger(__name__)
+
+#: Frase que identifica o ambiente dentro do prompt. Fica isolada para poder ser
+#: substituída pela descrição real — dizer ao modelo que ele está no Zorin OS
+#: quando a máquina é EndeavourOS/Hyprland produz comandos que não existem.
+DEFAULT_ENV_DESCRIPTION = "Zorin OS 18 Core (Linux / GNOME 46 no Wayland)"
+
+
+def build_system_prompt(env=None) -> str:
+    """Prompt de sistema com o ambiente real do usuário.
+
+    No GNOME/Zorin o texto é idêntico ao constante. Em Arch/Hyprland a frase do
+    ambiente é trocada (ex.: "EndeavourOS (Linux / Hyprland no Wayland)").
+    """
+    environment = env or current_environment()
+    description = describe_for_prompt(environment)
+    if description == DEFAULT_ENV_DESCRIPTION:
+        return SYSTEM_PROMPT
+    return SYSTEM_PROMPT.replace(DEFAULT_ENV_DESCRIPTION, description, 1)
 
 
 SYSTEM_PROMPT = """Você é o Zorin Copilot, assistente e parceiro de desktop nativo do usuário no Zorin OS 18 Core (Linux / GNOME 46 no Wayland).
@@ -358,7 +377,7 @@ class GeminiProvider(BaseLLMProvider):
                 [],
             )
 
-        sys_instruction = SYSTEM_PROMPT
+        sys_instruction = build_system_prompt()
         if context_summary:
             sys_instruction += f"\n\n{context_summary}"
         if app_list:
@@ -481,7 +500,7 @@ class OllamaProvider(BaseLLMProvider):
         image_mime: str = "image/jpeg",
     ) -> tuple[str, list[DesktopAction]]:
         url = f"{self.host_url}/api/chat"
-        sys_instruction = SYSTEM_PROMPT
+        sys_instruction = build_system_prompt()
         if context_summary:
             sys_instruction += f"\n\n{context_summary}"
         if app_list:
@@ -576,7 +595,7 @@ class OpenAICompatProvider(BaseLLMProvider):
 
         url = f"{self.api_url}/chat/completions"
         headers = {"Authorization": f"Bearer {self.api_key}"}
-        sys_instruction = SYSTEM_PROMPT
+        sys_instruction = build_system_prompt()
         if context_summary:
             sys_instruction += f"\n\n{context_summary}"
         if app_list:
@@ -681,7 +700,7 @@ class WorkBuddyProvider(BaseLLMProvider):
             "Content-Type": "application/json",
         }
 
-        sys_instruction = SYSTEM_PROMPT
+        sys_instruction = build_system_prompt()
         if context_summary:
             sys_instruction += f"\n\n{context_summary}"
         if app_list:

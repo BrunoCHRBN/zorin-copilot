@@ -117,7 +117,23 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
+    from .core.desktop.env import current_environment
+    from .core.desktop import screenshot as desktop_shot
+    from .core.desktop import controls as desktop_controls
+
+    env = current_environment()
+
     print("Zorin Copilot — Diagnóstico do Sistema\n")
+    print(f"  Ambiente: {env.describe()}")
+    print(f"  Gerenciador de pacotes: {env.package_manager or 'desconhecido'}")
+    print(f"  Backend de atalhos: {ShortcutManager.backend_name()}")
+    print(f"  Backend de captura: {desktop_shot.select_backend(env).name}")
+
+    missing = desktop_shot.missing_dependencies(env)
+    if missing:
+        print(f"  ⚠ Captura: faltam {', '.join(missing)}")
+    print()
+
     checks = []
 
     # 1. PyGObject e GTK4
@@ -147,15 +163,20 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     configured = cfg.is_configured()
     checks.append((f"Provedor IA ({cfg.provider})", configured, "configurado" if configured else "chave não informada (use ⚙️ na UI)"))
 
-    # 4. Atalhos Globais GNOME
+    # 4. Atalhos Globais (backend escolhido pelo ambiente)
+    backend = ShortcutManager.backend_name()
     has_shortcut = ShortcutManager.is_registered()
-    checks.append(("Atalho Global HUD (Super+C)", has_shortcut, "registrado no GNOME" if has_shortcut else "não registrado (use 'zorin-copilot-cli setup --shortcut')"))
+    checks.append((
+        "Atalho Global HUD (Super+C)",
+        has_shortcut,
+        f"registrado via {backend}" if has_shortcut else f"não registrado via {backend} (use 'zorin-copilot-cli setup --shortcut')",
+    ))
 
     has_crop = ShortcutManager.is_crop_registered()
-    checks.append(("Atalho Recorte (Super+Shift+S)", has_crop, "registrado no GNOME" if has_crop else "não registrado"))
+    checks.append(("Atalho Recorte (Super+Shift+S)", has_crop, f"registrado via {backend}" if has_crop else "não registrado"))
 
     has_voice = ShortcutManager.is_voice_registered()
-    checks.append(("Atalho Voz (Super+Shift+V)", has_voice, "registrado no GNOME" if has_voice else "não registrado"))
+    checks.append(("Atalho Voz (Super+Shift+V)", has_voice, f"registrado via {backend}" if has_voice else "não registrado"))
 
     # 5. Motor Ollama Local & Modelos
     ollama_ok = False

@@ -1,6 +1,7 @@
-# Decisão de design: Captura de tela via XDG Desktop Portal (D-Bus) para compatibilidade nativa
-# total com Wayland e GNOME Shell no Zorin OS, com suporte a recorte de área (interactive=True)
-# e compressão inteligente via Pillow para otimizar tokens de API do Gemini.
+# Decisão de design: a captura deixou de falar direto com o portal XDG e passou por
+# `core.desktop.screenshot`, que escolhe o backend pelo ambiente — grim/slurp em wlroots
+# (Hyprland, Sway), spectacle no Plasma, portal no GNOME. A otimização (recorte, resize, JPEG)
+# continua aqui, num único lugar.
 
 """Serviço de captura e visão computacional da tela para o Zorin Copilot."""
 
@@ -9,14 +10,7 @@ from __future__ import annotations
 import io
 import logging
 import os
-import time
-from urllib.parse import unquote, urlparse
-from typing import Tuple
-
-import gi
-gi.require_version("Gio", "2.0")
-gi.require_version("GLib", "2.0")
-from gi.repository import Gio, GLib
+from typing import Any, Tuple
 
 try:
     from PIL import Image
@@ -53,82 +47,21 @@ class ScreenCaptureService:
         Returns:
             Tuple[sucesso, bytes_da_imagem, mensagem_ou_modo]
         """
+        from .desktop.screenshot import select_backend
+
+        backend = select_backend()
+        logger.debug(f"Captura de tela via backend '{backend.name}' (interactive={interactive})")
+
         try:
-            bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+            shot = backend.capture(interactive=interactive, timeout_sec=timeout_sec)
         except Exception as exc:
-            logger.error(f"Não foi possível conectar ao D-Bus de sessão: {exc}")
-            return False, None, f"Erro D-Bus: {exc}"
+            logger.error(f"Backend de captura '{backend.name}' falhou: {exc}")
+            return False, None, f"Falha na captura: {exc}"
 
-        loop = GLib.MainLoop()
-        result: dict[str, str | int | None] = {"uri": None, "code": -1}
-        expected_handle: list[str | None] = [None]
+        if not shot.ok or shot.path is None:
+            return False, None, shot.message or "Captura cancelada pelo usuário."
 
-        def on_response(conn, sender, path, iface, signal, params, user_data):
-            try:
-                # Garante que só processa o sinal associado a este pedido específico
-                if expected_handle[0] and path != expected_handle[0]:
-                    return
-                res_code, results = params.unpack()
-                result["code"] = res_code
-                if res_code == 0 and "uri" in results:
-                    result["uri"] = results["uri"]
-            except Exception as e:
-                logger.error(f"Erro ao processar sinal do portal de screenshot: {e}")
-            finally:
-                loop.quit()
-
-        # Inscreve-se no sinal ANTES de disparar a chamada para evitar race conditions
-        sub_id = bus.signal_subscribe(
-            "org.freedesktop.portal.Desktop",
-            "org.freedesktop.portal.Request",
-            "Response",
-            None,
-            None,
-            Gio.DBusSignalFlags.NONE,
-            on_response,
-            None,
-        )
-
-        try:
-            # Opções do Portal XDG Screenshot passadas como dicionário nativo Python
-            portal_options = {
-                "interactive": GLib.Variant("b", interactive),
-                "modal": GLib.Variant("b", False),
-            }
-
-            val = bus.call_sync(
-                "org.freedesktop.portal.Desktop",
-                "/org/freedesktop/portal/desktop",
-                "org.freedesktop.portal.Screenshot",
-                "Screenshot",
-                GLib.Variant("(sa{sv})", ("", portal_options)),
-                GLib.VariantType("(o)"),
-                Gio.DBusCallFlags.NONE,
-                15000,
-                None,
-            )
-            expected_handle[0] = val.unpack()[0]
-        except Exception as exc:
-            bus.signal_unsubscribe(sub_id)
-            logger.error(f"Falha ao chamar org.freedesktop.portal.Screenshot: {exc}")
-            return False, None, f"Falha no portal de screenshot: {exc}"
-
-        # Timeout de segurança generoso para o usuário desenhar a seleção com calma
-        timeout_source = GLib.timeout_add_seconds(timeout_sec, loop.quit)
-        try:
-            loop.run()
-        finally:
-            bus.signal_unsubscribe(sub_id)
-            GLib.source_remove(timeout_source)
-
-        if result["code"] != 0 or not result["uri"]:
-            logger.info("Captura cancelada pelo usuário ou tempo esgotado.")
-            return False, None, "Captura cancelada pelo usuário."
-
-        # Extrai caminho do arquivo local
-        uri_str = str(result["uri"])
-        parsed = urlparse(uri_str)
-        file_path = unquote(parsed.path)
+        file_path = str(shot.path)
 
         if not os.path.isfile(file_path):
             return False, None, f"Arquivo de captura não encontrado: {file_path}"

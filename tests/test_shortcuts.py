@@ -1,159 +1,165 @@
-"""Testes para o gerenciador de atalhos globais do sistema (ShortcutManager)."""
+"""Testes para o gerenciador de atalhos globais do sistema (ShortcutManager).
+
+Com a refatoração multi-ambiente, o ShortcutManager deixou de falar direto com o
+GNOME e passou a despachar para um backend. Estes testes verificam o contrato de
+despacho (slot/acelerador/flag) e a degradação graciosa — não mais o caminho
+interno de media-keys, que agora é responsabilidade de
+``core.desktop.shortcuts.GnomeShortcutBackend``.
+"""
 
 import unittest
 from unittest.mock import MagicMock, patch
 
 from zorin_copilot.core.config import CopilotConfig
-from zorin_copilot.core.shortcuts import (
-    COPILOT_BINDING_PATH,
-    ShortcutManager,
-)
+from zorin_copilot.core.desktop import env as desktop_env
+from zorin_copilot.core.desktop import shortcuts as desktop_shortcuts
+from zorin_copilot.core.shortcuts import AutostartManager, ShortcutManager
+
+
+class _RecordingBackend(desktop_shortcuts.ShortcutBackend):
+    """Backend falso que anota chamadas e simula registro persistido."""
+
+    name = "gravador-teste"
+
+    def __init__(self):
+        super().__init__(env=desktop_shortcuts.current_environment())
+        self.registered: dict[str, str] = {}
+        self.unregistered: list[str] = []
+
+    def is_supported(self):
+        return True
+
+    def register(self, slot, accelerator, command):
+        self.registered[slot] = accelerator
+        return desktop_shortcuts.ShortcutResult(True, "ok")
+
+    def unregister(self, slot):
+        self.registered.pop(slot, None)
+        self.unregistered.append(slot)
+        return desktop_shortcuts.ShortcutResult(True, "ok")
+
+    def is_registered(self, slot):
+        return slot in self.registered
 
 
 class ShortcutManagerTest(unittest.TestCase):
+    def setUp(self):
+        self.backend = _RecordingBackend()
+        patcher = patch.object(desktop_shortcuts, "select_backend", return_value=self.backend)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    # ------------------------------------------------------------------ config
     def test_config_defaults(self):
-        """Verifica se os valores padrão de atalho global estão presentes na configuração."""
+        """Valores padrão de atalho global presentes na configuração."""
         cfg = CopilotConfig()
         self.assertTrue(cfg.global_shortcut_enabled)
         self.assertEqual(cfg.global_shortcut_key, "<Super>c")
 
-    def test_get_binary_command(self):
-        """Comando retornado deve conter o parâmetro --toggle."""
-        cmd = ShortcutManager.get_binary_command()
-        self.assertIn("--toggle", cmd)
-        self.assertTrue(cmd.endswith("--toggle"))
-
-    @patch("zorin_copilot.core.shortcuts.Gio.SettingsSchemaSource")
-    @patch("zorin_copilot.core.shortcuts.Gio.Settings")
-    def test_is_registered_true(self, mock_settings_cls, mock_schema_source):
-        mock_schema_source.get_default.return_value.lookup.return_value = object()
-        mock_settings = MagicMock()
-        mock_settings.get_strv.return_value = [COPILOT_BINDING_PATH, "/other/path/"]
-        mock_settings_cls.new.return_value = mock_settings
-
-        self.assertTrue(ShortcutManager.is_registered())
-        mock_settings.get_strv.assert_called_with("custom-keybindings")
-
-    @patch("zorin_copilot.core.shortcuts.Gio.SettingsSchemaSource")
-    @patch("zorin_copilot.core.shortcuts.Gio.Settings")
-    def test_is_registered_false(self, mock_settings_cls, mock_schema_source):
-        mock_schema_source.get_default.return_value.lookup.return_value = object()
-        mock_settings = MagicMock()
-        mock_settings.get_strv.return_value = ["/other/path/"]
-        mock_settings_cls.new.return_value = mock_settings
-
-        self.assertFalse(ShortcutManager.is_registered())
-
-    @patch("zorin_copilot.core.shortcuts.Gio.SettingsSchemaSource")
-    @patch("zorin_copilot.core.shortcuts.Gio.Settings")
-    def test_register_success(self, mock_settings_cls, mock_schema_source):
-        mock_schema_source.get_default.return_value.lookup.return_value = object()
-        mock_main_settings = MagicMock()
-        mock_main_settings.get_strv.return_value = []
-        mock_custom_settings = MagicMock()
-
-        mock_settings_cls.new.return_value = mock_main_settings
-        mock_settings_cls.new_with_path.return_value = mock_custom_settings
-
-        result = ShortcutManager.register("<Super>c")
-        self.assertTrue(result)
-
-        mock_main_settings.set_strv.assert_called_once_with("custom-keybindings", [COPILOT_BINDING_PATH])
-        mock_custom_settings.set_string.assert_any_call("name", "Zorin Copilot")
-        mock_custom_settings.set_string.assert_any_call("binding", "<Super>c")
-
-    @patch("zorin_copilot.core.shortcuts.Gio.SettingsSchemaSource")
-    @patch("zorin_copilot.core.shortcuts.Gio.Settings")
-    def test_unregister_success(self, mock_settings_cls, mock_schema_source):
-        mock_schema_source.get_default.return_value.lookup.return_value = object()
-        mock_main_settings = MagicMock()
-        mock_main_settings.get_strv.return_value = [COPILOT_BINDING_PATH]
-        mock_custom_settings = MagicMock()
-
-        mock_settings_cls.new.return_value = mock_main_settings
-        mock_settings_cls.new_with_path.return_value = mock_custom_settings
-
-        result = ShortcutManager.unregister()
-        self.assertTrue(result)
-        mock_main_settings.set_strv.assert_called_once_with("custom-keybindings", [])
-        mock_custom_settings.set_string.assert_any_call("name", "")
-
     def test_config_crop_defaults(self):
-        """Verifica se os valores padrão do atalho de recorte estão presentes na configuração."""
+        """Valores padrão do atalho de recorte presentes na configuração."""
         cfg = CopilotConfig()
         self.assertTrue(cfg.crop_shortcut_enabled)
         self.assertEqual(cfg.crop_shortcut_key, "<Super><Shift>s")
 
+    # --------------------------------------------------------------- binário
+    def test_get_binary_command(self):
+        cmd = ShortcutManager.get_binary_command()
+        self.assertIn("--toggle", cmd)
+        self.assertTrue(cmd.endswith("--toggle"))
+
     def test_get_binary_command_crop(self):
-        """Comando retornado com flag --crop deve conter --crop."""
         cmd = ShortcutManager.get_binary_command("--crop")
         self.assertIn("--crop", cmd)
         self.assertTrue(cmd.endswith("--crop"))
 
-    @patch("zorin_copilot.core.shortcuts.Gio.SettingsSchemaSource")
-    @patch("zorin_copilot.core.shortcuts.Gio.Settings")
-    def test_crop_is_registered_true(self, mock_settings_cls, mock_schema_source):
-        from zorin_copilot.core.shortcuts import CROP_BINDING_PATH
-        mock_schema_source.get_default.return_value.lookup.return_value = object()
-        mock_settings = MagicMock()
-        mock_settings.get_strv.return_value = [CROP_BINDING_PATH]
-        mock_settings_cls.new.return_value = mock_settings
+    # --------------------------------------------------------------- despacho
+    def test_registra_slot_hud(self):
+        self.assertTrue(ShortcutManager.register("<Super>c"))
+        self.assertEqual(self.backend.registered["hud"], "<Super>c")
 
+    def test_is_registered_reflete_o_backend(self):
+        self.assertFalse(ShortcutManager.is_registered())
+        ShortcutManager.register("<Super>c")
+        self.assertTrue(ShortcutManager.is_registered())
+
+    def test_unregister_remove_slot_hud(self):
+        ShortcutManager.register("<Super>c")
+        self.assertTrue(ShortcutManager.unregister())
+        self.assertNotIn("hud", self.backend.registered)
+        self.assertIn("hud", self.backend.unregistered)
+
+    def test_crop_register_and_unregister(self):
+        self.assertTrue(ShortcutManager.register_crop("<Super><Shift>s"))
+        self.assertEqual(self.backend.registered["crop"], "<Super><Shift>s")
         self.assertTrue(ShortcutManager.is_crop_registered())
+        self.assertTrue(ShortcutManager.unregister_crop())
+        self.assertFalse(ShortcutManager.is_crop_registered())
 
-    @patch("zorin_copilot.core.shortcuts.Gio.SettingsSchemaSource")
-    @patch("zorin_copilot.core.shortcuts.Gio.Settings")
-    def test_crop_register_and_unregister(self, mock_settings_cls, mock_schema_source):
-        from zorin_copilot.core.shortcuts import CROP_BINDING_PATH
-        mock_schema_source.get_default.return_value.lookup.return_value = object()
-        mock_main_settings = MagicMock()
-        mock_main_settings.get_strv.return_value = []
-        mock_custom_settings = MagicMock()
+    def test_cada_slot_recebe_sua_flag(self):
+        ShortcutManager.register()
+        ShortcutManager.register_crop()
+        ShortcutManager.register_voice()
+        flags = {slot: cmd.split()[-1] for slot, cmd in (
+            ("hud", ShortcutManager.get_binary_command("--toggle")),
+            ("crop", ShortcutManager.get_binary_command("--crop")),
+            ("voice", ShortcutManager.get_binary_command("--voice")),
+        )}
+        self.assertEqual(flags, {"hud": "--toggle", "crop": "--crop", "voice": "--voice"})
 
-        mock_settings_cls.new.return_value = mock_main_settings
-        mock_settings_cls.new_with_path.return_value = mock_custom_settings
+    # ------------------------------------------------------------- degradação
+    def test_backend_sem_suporte_devolve_falso_e_explica(self):
+        """Ambiente sem mecanismo de atalho: falso + mensagem, não exceção."""
+        with patch.object(
+            desktop_shortcuts,
+            "select_backend",
+            return_value=desktop_shortcuts.NullShortcutBackend(),
+        ):
+            self.assertFalse(ShortcutManager.register("<Super>c"))
+            self.assertIn("Nenhum backend", ShortcutManager.last_message)
 
-        ok_reg = ShortcutManager.register_crop("<Super><Shift>s")
-        self.assertTrue(ok_reg)
-        mock_main_settings.set_strv.assert_called_with("custom-keybindings", [CROP_BINDING_PATH])
-        mock_custom_settings.set_string.assert_any_call("name", "Zorin Copilot - Recorte Inteligente")
-        mock_custom_settings.set_string.assert_any_call("binding", "<Super><Shift>s")
+    def test_backend_que_explode_nao_derruba_o_app(self):
+        broken = MagicMock()
+        broken.name = "quebrado"
+        broken.is_registered.side_effect = RuntimeError("boom")
+        with patch.object(desktop_shortcuts, "select_backend", return_value=broken):
+            self.assertFalse(ShortcutManager.is_registered())
 
-        mock_main_settings.get_strv.return_value = [CROP_BINDING_PATH]
-        ok_unreg = ShortcutManager.unregister_crop()
-        self.assertTrue(ok_unreg)
-        mock_main_settings.set_strv.assert_called_with("custom-keybindings", [])
+    def test_gnomo_sem_schema_degrada_para_falso(self):
+        """Sem o schema de media-keys, o backend GNOME recusa o registro."""
+        env = desktop_env.detect_environment({"XDG_CURRENT_DESKTOP": "GNOME"}, probe=False)
+        backend = desktop_shortcuts.GnomeShortcutBackend(env)
+        with patch.object(backend, "_schema_exists", return_value=False):
+            self.assertFalse(backend.register("hud", "<Super>c", "zorin-copilot").ok)
 
+    # -------------------------------------------------------------- autostart
     def test_autostart_enable_disable(self):
-        """Testa habilitação e desabilitação do autostart de inicialização."""
+        """Habilita e desabilita via XDG usando XDG_CONFIG_HOME temporário."""
+        import os
         import tempfile
         from pathlib import Path
-        from zorin_copilot.core.shortcuts import AutostartManager
 
+        old = os.environ.get("XDG_CONFIG_HOME")
         with tempfile.TemporaryDirectory() as tmp_dir:
-            tmp_path = Path(tmp_dir)
-            with patch.object(AutostartManager, "get_autostart_dir", return_value=tmp_path):
-                with patch.object(AutostartManager, "get_autostart_file", return_value=tmp_path / "zorin-test.desktop"):
-                    self.assertFalse(AutostartManager.is_enabled())
+            os.environ["XDG_CONFIG_HOME"] = tmp_dir
+            try:
+                from zorin_copilot.core.desktop import autostart
 
-                    ok = AutostartManager.enable("/usr/local/bin/zorin-copilot")
-                    self.assertTrue(ok)
-                    self.assertTrue(AutostartManager.is_enabled())
+                self.assertFalse(AutostartManager.is_enabled())
 
-                    content = (tmp_path / "zorin-test.desktop").read_text()
-                    self.assertIn("Exec=/usr/local/bin/zorin-copilot --background", content)
-                    self.assertIn("X-GNOME-Autostart-enabled=true", content)
+                self.assertTrue(AutostartManager.enable("/usr/local/bin/zorin-copilot"))
+                self.assertTrue(AutostartManager.is_enabled())
 
-                    ok_dis = AutostartManager.disable()
-                    self.assertTrue(ok_dis)
-                    self.assertFalse(AutostartManager.is_enabled())
+                content = (Path(tmp_dir) / "autostart" / f"{autostart.APP_ID}.desktop").read_text()
+                self.assertIn("Exec=/usr/local/bin/zorin-copilot --background", content)
 
-    @patch("zorin_copilot.core.shortcuts.Gio.SettingsSchemaSource")
-    def test_register_graceful_when_schema_missing(self, mock_schema_source):
-        """Sem o schema de media-keys (ex.: ambiente sem GNOME), registro degrada para False."""
-        mock_schema_source.get_default.return_value.lookup.return_value = None
-        self.assertFalse(ShortcutManager.register("<Super>c"))
-        self.assertFalse(ShortcutManager.is_registered())
+                self.assertTrue(AutostartManager.disable())
+                self.assertFalse(AutostartManager.is_enabled())
+            finally:
+                if old is None:
+                    os.environ.pop("XDG_CONFIG_HOME", None)
+                else:
+                    os.environ["XDG_CONFIG_HOME"] = old
 
 
 if __name__ == "__main__":

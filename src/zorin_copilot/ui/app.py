@@ -1321,6 +1321,9 @@ class CopilotWindow(Adw.ApplicationWindow):
 class ZorinCopilotApp(Adw.Application):
     """Aplicação Zorin Copilot com suporte a comando de linha, modo HUD e atalhos globais."""
 
+    #: Ícone de bandeja, quando o modo --background consegue publicar um.
+    _tray: object | None = None
+
     def __init__(self):
         super().__init__(
             application_id=__app_id__,
@@ -1363,6 +1366,27 @@ class ZorinCopilotApp(Adw.Application):
                 return win
         return CopilotWindow(self)
 
+    def _setup_background_tray(self, win: CopilotWindow) -> None:
+        """Publica o ícone de bandeja no modo --background.
+
+        Em compositores sem atalho global (Hyprland/Sway sem bind configurado) a
+        bandeja é o único ponto de entrada, então falhar aqui significa deixar o
+        usuário sem o app. Registramos o log e seguimos.
+        """
+        try:
+            from .tray import SystemTrayIndicator
+
+            self._tray = SystemTrayIndicator(
+                on_toggle_hud=lambda: GLib.idle_add(win.toggle_hud),
+                on_crop=lambda: GLib.idle_add(win.trigger_direct_crop),
+                on_preferences=lambda: GLib.idle_add(win._open_settings),
+                on_quit=lambda: GLib.idle_add(self.quit),
+            )
+            if not self._tray.setup():
+                logger.info("Bandeja indisponível neste ambiente; seguindo sem ícone.")
+        except Exception as exc:
+            logger.warning(f"Falha ao iniciar a bandeja em segundo plano: {exc}")
+
     def do_shutdown(self):
         # Encerra a thread de wake word junto com o processo (no close-request
         # ela continua ativa de propósito — o modo HUD depende dela).
@@ -1393,6 +1417,9 @@ class ZorinCopilotApp(Adw.Application):
 
         win = self._get_or_create_window()
         if is_background:
+            # Modo autostart: sem janela, mas com bandeja — senão não há como
+            # reabrir o Copilot quando o ambiente não registra atalho global.
+            self._setup_background_tray(win)
             return 0
         elif is_voice:
             mode = getattr(win.config, "voice_overlay_mode", "pill")

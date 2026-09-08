@@ -13,11 +13,8 @@ from zorin_copilot.ai.local_voice import (
     clean_text_for_speech,
 )
 from zorin_copilot.core.config import CopilotConfig
-from zorin_copilot.core.shortcuts import (
-    ShortcutManager,
-    VOICE_BINDING_NAME,
-    VOICE_BINDING_PATH,
-)
+from zorin_copilot.core.desktop import shortcuts as desktop_shortcuts
+from zorin_copilot.core.shortcuts import ShortcutManager
 
 
 class TestCleanTextForSpeech(unittest.TestCase):
@@ -340,38 +337,82 @@ class TestLocalLiveVoiceClient(unittest.TestCase):
         self.assertIn("Mercado Livre", agent_transcripts[0])
 
 
+class _RecordingBackend(desktop_shortcuts.ShortcutBackend):
+    """Backend falso que só anota as chamadas — usado para testar o despacho."""
+
+    name = "gravador-teste"
+
+    def __init__(self):
+        super().__init__(env=desktop_shortcuts.current_environment())
+        self.registered: list[tuple[str, str, str]] = []
+        self.unregistered: list[str] = []
+
+    def is_supported(self):
+        return True
+
+    def register(self, slot, accelerator, command):
+        self.registered.append((slot, accelerator, command))
+        return desktop_shortcuts.ShortcutResult(True, "ok")
+
+    def unregister(self, slot):
+        self.unregistered.append(slot)
+        return desktop_shortcuts.ShortcutResult(True, "ok")
+
+    def is_registered(self, slot):
+        return any(entry[0] == slot for entry in self.registered)
+
+
 class TestVoiceShortcuts(unittest.TestCase):
-    """Testes para o gerenciamento de atalhos de voz do sistema."""
+    """O ShortcutManager precisa despachar para o backend do ambiente.
 
-    @patch.object(ShortcutManager, "_is_path_registered")
-    def test_is_voice_registered(self, mock_is_registered):
-        mock_is_registered.return_value = True
+    Antes esses testes fixavam o caminho do GNOME (`_register_binding` com path
+    de media-keys), o que amarrava a API a um único ambiente. Agora verificamos
+    o contrato: slot certo, acelerador certo e flag certa no comando.
+    """
+
+    def setUp(self):
+        self.backend = _RecordingBackend()
+        self._patcher = patch.object(desktop_shortcuts, "select_backend", return_value=self.backend)
+        self._patcher.start()
+        self.addCleanup(self._patcher.stop)
+
+    def test_register_voice_despacha_slot_e_flag_corretos(self):
+        self.assertTrue(ShortcutManager.register_voice("<Super><Shift>v"))
+        slot, accelerator, command = self.backend.registered[0]
+        self.assertEqual(slot, "voice")
+        self.assertEqual(accelerator, "<Super><Shift>v")
+        self.assertTrue(command.endswith("--voice"))
+
+    def test_register_hud_usa_flag_toggle(self):
+        ShortcutManager.register("<Super>c")
+        slot, _, command = self.backend.registered[0]
+        self.assertEqual(slot, "hud")
+        self.assertTrue(command.endswith("--toggle"))
+
+    def test_register_crop_usa_flag_crop(self):
+        ShortcutManager.register_crop("<Super><Shift>s")
+        slot, _, command = self.backend.registered[0]
+        self.assertEqual(slot, "crop")
+        self.assertTrue(command.endswith("--crop"))
+
+    def test_is_voice_registered_consulta_o_backend(self):
+        self.assertFalse(ShortcutManager.is_voice_registered())
+        ShortcutManager.register_voice()
         self.assertTrue(ShortcutManager.is_voice_registered())
-        mock_is_registered.assert_called_with(VOICE_BINDING_PATH)
 
-    @patch.object(ShortcutManager, "_get_binding_at_path")
-    def test_get_voice_binding(self, mock_get_binding):
-        mock_get_binding.return_value = "<Super><Shift>v"
-        self.assertEqual(ShortcutManager.get_voice_binding(), "<Super><Shift>v")
-        mock_get_binding.assert_called_with(VOICE_BINDING_PATH)
-
-    @patch.object(ShortcutManager, "_register_binding")
-    def test_register_voice(self, mock_reg):
-        mock_reg.return_value = True
-        res = ShortcutManager.register_voice("<Super><Shift>v")
-        self.assertTrue(res)
-        mock_reg.assert_called_with(
-            path=VOICE_BINDING_PATH,
-            name=VOICE_BINDING_NAME,
-            command=ShortcutManager.get_binary_command("--voice"),
-            binding="<Super><Shift>v",
-        )
-
-    @patch.object(ShortcutManager, "_unregister_binding")
-    def test_unregister_voice(self, mock_unreg):
-        mock_unreg.return_value = True
+    def test_unregister_voice_remove_o_slot(self):
+        ShortcutManager.register_voice()
         self.assertTrue(ShortcutManager.unregister_voice())
-        mock_unreg.assert_called_with(VOICE_BINDING_PATH)
+        self.assertEqual(self.backend.unregistered, ["voice"])
+
+    def test_backend_com_falha_devolve_falso_e_explica(self):
+        with patch.object(
+            desktop_shortcuts,
+            "select_backend",
+            return_value=desktop_shortcuts.NullShortcutBackend(),
+        ):
+            self.assertFalse(ShortcutManager.register_voice())
+            self.assertIn("Nenhum backend", ShortcutManager.last_message)
 
 
 if __name__ == "__main__":

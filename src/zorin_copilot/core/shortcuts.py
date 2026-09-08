@@ -1,6 +1,10 @@
-# Decisão de design: Integração nativa de atalhos globais no GNOME / Zorin OS via
-# org.gnome.settings-daemon.plugins.media-keys.custom-keybinding, garantindo compatibilidade
-# oficial com Wayland sem necessidade de hooks em nível de root ou instabilidade no compositor.
+# Decisão de design: atalhos globais saíram de uma implementação única presa ao GNOME Settings
+# Daemon e passaram a ser despachados para `core.desktop.shortcuts`, que escolhe o backend pelo
+# ambiente (GNOME media-keys, hyprland.conf, sway config, kglobalshortcutsrc).
+#
+# Esta classe continua sendo a porta de entrada — preserva a API usada pela UI, pela CLI e pelo
+# instalador — mas deixa de mentir: `register()` devolve False e explica o motivo quando o
+# ambiente não oferece mecanismo de atalho.
 
 """Gerenciador de atalho global do sistema para o Zorin Copilot."""
 
@@ -13,27 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-import gi
-
-gi.require_version("Gio", "2.0")
-from gi.repository import Gio  # noqa: E402
-
 logger = logging.getLogger(__name__)
-
-
-def _media_keys_schema_exists() -> bool:
-    """Verifica se o schema de media-keys do GNOME está disponível antes de abrir Gio.Settings.
-
-    Abrir Gio.Settings com um schema inexistente causa abort em nível C (não capturável por
-    try/except) em algumas builds do GLib — este guard evita esse crash tanto no app quanto
-    nos testes, degradando para "atalho indisponível" de forma graciosa.
-    """
-    try:
-        src = Gio.SettingsSchemaSource.get_default()
-        return src.lookup(MEDIA_KEYS_SCHEMA, True) is not None
-    except Exception as exc:
-        logger.warning(f"Não foi possível verificar o schema de atalhos do GNOME: {exc}")
-        return False
 
 
 @dataclass(frozen=True)
@@ -63,187 +47,136 @@ APP_SHORTCUTS: Final[tuple[AppShortcut, ...]] = (
     AppShortcut("app.undo-action", "<Control>z", "Desfazer a última ação reversível"),
 )
 
-MEDIA_KEYS_SCHEMA: Final = "org.gnome.settings-daemon.plugins.media-keys"
-CUSTOM_KEY_SCHEMA: Final = "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding"
+#: Paths legados do GNOME, mantidos para quem já tem os atalhos registrados.
 COPILOT_BINDING_PATH: Final = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/zorin-copilot/"
-COPILOT_BINDING_NAME: Final = "Zorin Copilot"
-
 CROP_BINDING_PATH: Final = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/zorin-copilot-crop/"
-CROP_BINDING_NAME: Final = "Zorin Copilot - Recorte Inteligente"
-
 VOICE_BINDING_PATH: Final = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/zorin-copilot-voice/"
-VOICE_BINDING_NAME: Final = "Zorin Copilot - Conversa por Voz"
+
+#: Flags que cada slot executa.
+_SLOT_FLAGS: Final[dict[str, str]] = {
+    "hud": "--toggle",
+    "crop": "--crop",
+    "voice": "--voice",
+}
 
 
 class ShortcutManager:
-    """Gerencia o registro e remoção dos atalhos de teclado globais do Copilot no GNOME/Zorin OS."""
+    """Registra os atalhos globais usando o backend adequado ao ambiente.
+
+    A API pública permanece a mesma (``register``, ``register_crop``,
+    ``register_voice``, ``is_registered``...), mas o trabalho agora é feito pelo
+    backend escolhido em :func:`zorin_copilot.core.desktop.shortcuts.select_backend`.
+    """
+
+    #: Última mensagem devolvida pelo backend — a UI mostra isso quando falha.
+    last_message: str = ""
 
     @classmethod
     def get_binary_command(cls, flag: str = "--toggle") -> str:
         """Obtém o caminho executável do zorin-copilot com a flag informada."""
-        venv_bin = os.path.expanduser("~/.local/share/zorin-copilot/venv/bin/zorin-copilot")
-        if os.path.exists(venv_bin):
-            return f"{venv_bin} {flag}"
-        local_bin = os.path.expanduser("~/.local/bin/zorin-copilot")
-        if os.path.exists(local_bin):
-            return f"{local_bin} {flag}"
-        which_bin = shutil.which("zorin-copilot")
-        if which_bin:
-            return f"{which_bin} {flag}"
-        return f"zorin-copilot {flag}"
+        from .desktop.shortcuts import resolve_binary
 
-    # -------------------------------------------------------------------------
-    # Métodos internos genéricos de D-Bus para custom-keybinding
-    # -------------------------------------------------------------------------
-    @classmethod
-    def _is_path_registered(cls, path: str) -> bool:
-        if not _media_keys_schema_exists():
-            return False
-        try:
-            settings = Gio.Settings.new(MEDIA_KEYS_SCHEMA)
-            existing = list(settings.get_strv("custom-keybindings"))
-            return path in existing
-        except Exception as exc:
-            logger.warning(f"Não foi possível ler configurações de atalhos do GNOME: {exc}")
-            return False
+        return resolve_binary(flag)
 
     @classmethod
-    def _get_binding_at_path(cls, path: str) -> str:
-        if not cls._is_path_registered(path):
-            return ""
+    def backend_name(cls) -> str:
+        """Nome do backend ativo (útil no diagnóstico e na UI)."""
+        from .desktop.shortcuts import select_backend
+
+        return select_backend().name
+
+    @classmethod
+    def _register(cls, slot: str, binding: str) -> bool:
+        from .desktop.shortcuts import select_backend
+
+        backend = select_backend()
+        result = backend.register(slot, binding, cls.get_binary_command(_SLOT_FLAGS[slot]))
+        cls.last_message = result.message
+        if not result.ok:
+            logger.warning(f"Atalho '{slot}' não registrado: {result.message}")
+        return result.ok
+
+    @classmethod
+    def _unregister(cls, slot: str) -> bool:
+        from .desktop.shortcuts import select_backend
+
+        result = select_backend().unregister(slot)
+        cls.last_message = result.message
+        return result.ok
+
+    @classmethod
+    def _is_registered(cls, slot: str) -> bool:
+        from .desktop.shortcuts import select_backend
+
         try:
-            custom_setting = Gio.Settings.new_with_path(CUSTOM_KEY_SCHEMA, path)
-            return custom_setting.get_string("binding")
+            return select_backend().is_registered(slot)
         except Exception:
-            return ""
-
-    @classmethod
-    def _register_binding(cls, path: str, name: str, command: str, binding: str) -> bool:
-        if not _media_keys_schema_exists():
-            logger.warning("Schema de media-keys do GNOME indisponível; atalho não registrado.")
-            return False
-        try:
-            settings = Gio.Settings.new(MEDIA_KEYS_SCHEMA)
-            existing = list(settings.get_strv("custom-keybindings"))
-            if path not in existing:
-                existing.append(path)
-                settings.set_strv("custom-keybindings", existing)
-
-            custom_setting = Gio.Settings.new_with_path(CUSTOM_KEY_SCHEMA, path)
-            custom_setting.set_string("name", name)
-            custom_setting.set_string("command", command)
-            custom_setting.set_string("binding", binding)
-            logger.info(f"Atalho global '{name}' registrado com sucesso: {binding}")
-            return True
-        except Exception as exc:
-            logger.error(f"Erro ao registrar atalho global '{name}' do GNOME: {exc}")
-            return False
-
-    @classmethod
-    def _unregister_binding(cls, path: str) -> bool:
-        if not _media_keys_schema_exists():
-            return False
-        try:
-            settings = Gio.Settings.new(MEDIA_KEYS_SCHEMA)
-            existing = list(settings.get_strv("custom-keybindings"))
-            if path in existing:
-                existing.remove(path)
-                settings.set_strv("custom-keybindings", existing)
-
-            custom_setting = Gio.Settings.new_with_path(CUSTOM_KEY_SCHEMA, path)
-            custom_setting.set_string("name", "")
-            custom_setting.set_string("command", "")
-            custom_setting.set_string("binding", "")
-            logger.info(f"Atalho global '{path}' desregistrado com sucesso.")
-            return True
-        except Exception as exc:
-            logger.error(f"Erro ao desregistrar atalho global '{path}' do GNOME: {exc}")
             return False
 
     # -------------------------------------------------------------------------
-    # Atalho do HUD Principal (Ctrl+Space / Super+Z / Super+C)
+    # Atalho do HUD Principal (Super+C)
     # -------------------------------------------------------------------------
     @classmethod
     def is_registered(cls) -> bool:
-        """Verifica se o atalho do HUD do Copilot está atualmente cadastrado no GNOME."""
-        return cls._is_path_registered(COPILOT_BINDING_PATH)
+        """Verifica se o atalho do HUD está cadastrado no ambiente atual."""
+        return cls._is_registered("hud")
 
     @classmethod
     def get_current_binding(cls) -> str:
-        """Retorna a combinação de teclas atualmente cadastrada para o HUD."""
-        return cls._get_binding_at_path(COPILOT_BINDING_PATH)
+        """Combinação configurada para o HUD (a fonte da verdade é a config)."""
+        from .config import CopilotConfig
+
+        return CopilotConfig.load().global_shortcut_key
 
     @classmethod
     def register(cls, binding: str = "<Super>c") -> bool:
-        """Cadastra o atalho global do HUD no sistema operacional."""
-        return cls._register_binding(
-            path=COPILOT_BINDING_PATH,
-            name=COPILOT_BINDING_NAME,
-            command=cls.get_binary_command("--toggle"),
-            binding=binding,
-        )
+        return cls._register("hud", binding)
 
     @classmethod
     def unregister(cls) -> bool:
-        """Remove o atalho global do HUD do sistema operacional."""
-        return cls._unregister_binding(COPILOT_BINDING_PATH)
+        return cls._unregister("hud")
 
     # -------------------------------------------------------------------------
-    # Atalho Global Direto de Recorte Inteligente (Super+Shift+S)
+    # Atalho de recorte inteligente (Super+Shift+S)
     # -------------------------------------------------------------------------
     @classmethod
     def is_crop_registered(cls) -> bool:
-        """Verifica se o atalho de recorte inteligente está atualmente cadastrado."""
-        return cls._is_path_registered(CROP_BINDING_PATH)
+        return cls._is_registered("crop")
 
     @classmethod
     def get_crop_binding(cls) -> str:
-        """Retorna a combinação de teclas atualmente cadastrada para recorte."""
-        return cls._get_binding_at_path(CROP_BINDING_PATH)
+        from .config import CopilotConfig
+
+        return CopilotConfig.load().crop_shortcut_key
 
     @classmethod
     def register_crop(cls, binding: str = "<Super><Shift>s") -> bool:
-        """Cadastra o atalho global de recorte inteligente no sistema operacional."""
-        return cls._register_binding(
-            path=CROP_BINDING_PATH,
-            name=CROP_BINDING_NAME,
-            command=cls.get_binary_command("--crop"),
-            binding=binding,
-        )
+        return cls._register("crop", binding)
 
     @classmethod
     def unregister_crop(cls) -> bool:
-        """Remove o atalho global de recorte inteligente do sistema operacional."""
-        return cls._unregister_binding(CROP_BINDING_PATH)
+        return cls._unregister("crop")
 
     # -------------------------------------------------------------------------
-    # -------------------------------------------------------------------------
-    # Atalho Global Direto de Conversa por Voz (Super+Shift+V / Super+V)
+    # Atalho de conversa por voz (Super+Shift+V / Super+V)
     # -------------------------------------------------------------------------
     @classmethod
     def is_voice_registered(cls) -> bool:
-        """Verifica se o atalho de conversa por voz está atualmente cadastrado."""
-        return cls._is_path_registered(VOICE_BINDING_PATH)
+        return cls._is_registered("voice")
 
     @classmethod
     def get_voice_binding(cls) -> str:
-        """Retorna a combinação de teclas atualmente cadastrada para conversa por voz."""
-        return cls._get_binding_at_path(VOICE_BINDING_PATH)
+        from .config import CopilotConfig
+
+        return CopilotConfig.load().voice_shortcut_key
 
     @classmethod
     def register_voice(cls, binding: str = "<Super><Shift>v") -> bool:
-        """Cadastra o atalho global de conversa por voz no sistema operacional."""
-        return cls._register_binding(
-            path=VOICE_BINDING_PATH,
-            name=VOICE_BINDING_NAME,
-            command=cls.get_binary_command("--voice"),
-            binding=binding,
-        )
+        return cls._register("voice", binding)
 
     @classmethod
     def unregister_voice(cls) -> bool:
-        """Remove o atalho global de conversa por voz do sistema operacional."""
-        return cls._unregister_binding(VOICE_BINDING_PATH)
+        return cls._unregister("voice")
 
 
 class AutostartManager:
@@ -264,57 +197,43 @@ class AutostartManager:
 
     @classmethod
     def is_enabled(cls) -> bool:
-        """Verifica se o autostart está ativo no sistema."""
-        desktop_file = cls.get_autostart_file()
-        if not desktop_file.exists():
-            return False
+        """Verifica se o autostart está ativo, por qualquer mecanismo."""
+        from .desktop.autostart import is_enabled
+
         try:
-            content = desktop_file.read_text(encoding="utf-8")
-            if "X-GNOME-Autostart-enabled=false" in content:
-                return False
-            return "Exec=" in content
+            return is_enabled()
         except Exception:
             return False
 
     @classmethod
     def enable(cls, binary_command: str | None = None) -> bool:
-        """Habilita o Zorin Copilot para iniciar com o sistema em segundo plano."""
-        try:
-            if not binary_command:
-                binary_command = ShortcutManager.get_binary_command("--background")
-            elif not binary_command.endswith("--background"):
-                binary_command = f"{binary_command} --background"
+        """Habilita o autostart no XDG e, em wlroots, no config do compositor.
 
-            desktop_file = cls.get_autostart_file()
-            content = f"""[Desktop Entry]
-Type=Application
-Version=1.0
-Name=Zorin Copilot
-GenericName=Assistente de IA
-Comment=Assistente de IA integrado ao desktop Zorin OS
-Exec={binary_command}
-Icon=system-help-symbolic
-Terminal=false
-Categories=Utility;GTK;GNOME;
-StartupNotify=false
-X-GNOME-Autostart-enabled=true
-"""
-            desktop_file.write_text(content, encoding="utf-8")
-            logger.info(f"Autostart do Zorin Copilot habilitado em: {desktop_file}")
-            return True
+        Hyprland e Sway não leem ``~/.config/autostart`` — nesses casos gravamos
+        também a linha ``exec-once`` / ``exec`` no snippet do compositor.
+        """
+        from .desktop.autostart import enable
+
+        if not binary_command:
+            binary_command = ShortcutManager.get_binary_command("--background")
+
+        try:
+            ok, message = enable(binary_command)
+            logger.info(f"Autostart: {message}")
+            return ok
         except Exception as exc:
             logger.error(f"Erro ao habilitar autostart do Zorin Copilot: {exc}")
             return False
 
     @classmethod
     def disable(cls) -> bool:
-        """Desabilita o autostart removendo o arquivo desktop de inicialização."""
+        """Desabilita o autostart em todos os mecanismos onde foi gravado."""
+        from .desktop.autostart import disable
+
         try:
-            desktop_file = cls.get_autostart_file()
-            if desktop_file.exists():
-                desktop_file.unlink()
-            logger.info("Autostart do Zorin Copilot desabilitado.")
-            return True
+            ok, message = disable()
+            logger.info(f"Autostart removido: {message}")
+            return ok
         except Exception as exc:
             logger.error(f"Erro ao desabilitar autostart: {exc}")
             return False

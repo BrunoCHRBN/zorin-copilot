@@ -1,6 +1,10 @@
-# Decisão de design: indicador de bandeja do sistema (Tray Icon / StatusNotifierItem) para o Zorin OS.
-# Fornece acesso rápido às funções do assistente (HUD, Recorte, Sincronização de Documentos, Preferências e Kill Switch)
-# quando o Zorin Copilot estiver operando em segundo plano (--background).
+# Decisão de design: a bandeja anterior usava AppIndicator3/Ayatana — GTK3 + XEmbed, duas coisas
+# que não existem em Wayland — e ainda tinha `from gi.repository import importlib`, um import de
+# módulo stdlib pelo namespace do GI que estourava sempre e era engolido por um except nu.
+# Resultado: a bandeja nunca funcionou, em distro nenhuma.
+#
+# Agora o caminho principal é StatusNotifierItem puro D-Bus (`core.desktop.tray`), que é o que
+# waybar/Plasma/GNOME-com-extensão entendem. O AppIndicator fica só como alternativa em X11.
 
 """Indicador de bandeja do sistema para o Zorin Copilot."""
 
@@ -14,22 +18,34 @@ logger = logging.getLogger(__name__)
 HAS_APP_INDICATOR = False
 AppIndicatorModule = None
 
-for mod_name in ("AyatanaAppIndicator3", "AppIndicator3"):
-    try:
+# AppIndicator3 roda em GTK3/XEmbed: só vale a pena em sessão X11.
+try:  # pragma: no cover - depende do ambiente
+    import os
+
+    if os.environ.get("XDG_SESSION_TYPE", "").lower() == "x11":
         import gi
-        gi.require_version(mod_name, "0.1")
+
         gi.require_version("Gtk", "3.0")
-        from gi.repository import Gtk as Gtk3
-        from gi.repository import importlib
-        AppIndicatorModule = __import__(f"gi.repository.{mod_name}", fromlist=[mod_name])
-        HAS_APP_INDICATOR = True
-        break
-    except Exception:
-        pass
+        from gi.repository import Gtk as Gtk3  # noqa: F401
+
+        for _mod_name in ("AyatanaAppIndicator3", "AppIndicator3"):
+            try:
+                gi.require_version(_mod_name, "0.1")
+                AppIndicatorModule = __import__(f"gi.repository.{_mod_name}", fromlist=[_mod_name])
+                HAS_APP_INDICATOR = True
+                break
+            except Exception:
+                continue
+except Exception:
+    HAS_APP_INDICATOR = False
 
 
 class SystemTrayIndicator:
-    """Gerencia o ícone e menu de contexto na bandeja do sistema operacional."""
+    """Ícone de bandeja, preferindo StatusNotifierItem (Wayland) a AppIndicator (X11).
+
+    Mantém o menu completo quando há AppIndicator; com SNI a barra controla o menu
+    e o clique principal chama ``on_toggle_hud``.
+    """
 
     def __init__(
         self,
@@ -46,20 +62,47 @@ class SystemTrayIndicator:
         self.on_preferences = on_preferences
         self.on_kill_switch = on_kill_switch
         self.on_quit = on_quit
+
         self.indicator = None
+        self._sni = None
         self._is_active = False
 
     @classmethod
     def is_available(cls) -> bool:
-        """Indica se as bibliotecas de AppIndicator estão disponíveis no sistema."""
-        return HAS_APP_INDICATOR
+        """Existe algum mecanismo de bandeja utilizável nesta sessão?"""
+        from ..core.desktop.tray import watcher_present
+
+        return HAS_APP_INDICATOR or watcher_present()
 
     def setup(self) -> bool:
-        """Inicializa o ícone e menu da bandeja se suportado pelo ambiente desktop."""
-        if not HAS_APP_INDICATOR or AppIndicatorModule is None:
-            logger.info("AyatanaAppIndicator indisponível; o assistente continuará via atalhos globais.")
-            return False
+        """Tenta StatusNotifierItem primeiro; cai para AppIndicator em X11."""
+        if self._setup_sni():
+            return True
+        if HAS_APP_INDICATOR:
+            return self._setup_app_indicator()
+        logger.info("Sem bandeja disponível; o Copilot seguirá acessível pelos atalhos globais.")
+        return False
 
+    # ------------------------------------------------------------------ SNI
+    def _setup_sni(self) -> bool:
+        from ..core.desktop.tray import StatusNotifierTray
+
+        sni = StatusNotifierTray(
+            on_activate=self.on_toggle_hud,
+            on_secondary=self.on_preferences,
+        )
+        if not sni.setup():
+            return False
+        # setup() publica o nome de forma assíncrona; só marcamos ativo se o
+        # barramento foi adquirido de fato.
+        self._sni = sni
+        self._is_active = True
+        return True
+
+    # --------------------------------------------------------- AppIndicator
+    def _setup_app_indicator(self) -> bool:  # pragma: no cover - só em X11
+        if AppIndicatorModule is None:
+            return False
         try:
             from gi.repository import Gtk as Gtk3
 
@@ -72,22 +115,18 @@ class SystemTrayIndicator:
             self.indicator.set_status(AppIndicatorModule.IndicatorStatus.ACTIVE)
             self.indicator.set_title("Zorin Copilot")
 
-            # Cria o menu de contexto
             menu = Gtk3.Menu()
 
-            # 1. Abrir Copilot
-            item_hud = Gtk3.MenuItem(label="Abrir Zorin Copilot (Super + C)")
+            item_hud = Gtk3.MenuItem(label="Abrir Zorin Copilot")
             if self.on_toggle_hud:
                 item_hud.connect("activate", lambda _: self.on_toggle_hud())
             menu.append(item_hud)
 
-            # 2. Recorte Inteligente
-            item_crop = Gtk3.MenuItem(label="Recorte Inteligente (Super + Shift + S)")
+            item_crop = Gtk3.MenuItem(label="Recorte Inteligente")
             if self.on_crop:
                 item_crop.connect("activate", lambda _: self.on_crop())
             menu.append(item_crop)
 
-            # 3. Sincronizar Documentos RAG
             item_sync = Gtk3.MenuItem(label="Sincronizar Documentos (RAG)")
             if self.on_sync_rag:
                 item_sync.connect("activate", lambda _: self.on_sync_rag())
@@ -95,13 +134,11 @@ class SystemTrayIndicator:
 
             menu.append(Gtk3.SeparatorMenuItem())
 
-            # 4. Preferências
             item_prefs = Gtk3.MenuItem(label="Preferências do Sistema...")
             if self.on_preferences:
                 item_prefs.connect("activate", lambda _: self.on_preferences())
             menu.append(item_prefs)
 
-            # 5. Kill Switch
             item_kill = Gtk3.MenuItem(label="Kill Switch (Bloquear Ações Físicas)")
             if self.on_kill_switch:
                 item_kill.connect("activate", lambda _: self.on_kill_switch())
@@ -109,7 +146,6 @@ class SystemTrayIndicator:
 
             menu.append(Gtk3.SeparatorMenuItem())
 
-            # 6. Sair
             item_quit = Gtk3.MenuItem(label="Sair do Copilot")
             if self.on_quit:
                 item_quit.connect("activate", lambda _: self.on_quit())
@@ -118,9 +154,19 @@ class SystemTrayIndicator:
             menu.show_all()
             self.indicator.set_menu(menu)
             self._is_active = True
-            logger.info("SystemTrayIndicator registrado com sucesso na bandeja do Zorin OS.")
+            logger.info("SystemTrayIndicator registrado via AppIndicator.")
             return True
-
         except Exception as exc:
-            logger.warning(f"Erro ao inicializar SystemTrayIndicator: {exc}")
+            logger.warning(f"Erro ao inicializar AppIndicator: {exc}")
             return False
+
+    @property
+    def is_active(self) -> bool:
+        return self._is_active
+
+    def teardown(self) -> None:
+        """Remove o ícone da bandeja ao encerrar."""
+        if self._sni is not None:
+            self._sni.teardown()
+            self._sni = None
+        self._is_active = False

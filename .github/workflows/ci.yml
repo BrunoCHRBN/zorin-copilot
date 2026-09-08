@@ -61,3 +61,76 @@ jobs:
           assert len(css) > 500, "CSS não viajou no pacote"
           print(f"CSS ok ({len(css)} bytes)")
           PY
+
+  # Arch é rolling release: é onde PyGObject, GTK e libadwaita quebram primeiro.
+  # Rodar a suíte aqui pega regressões antes de chegarem ao usuário.
+  tests-arch:
+    name: Suíte de testes (Arch Linux)
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+
+    steps:
+      - name: Instala dependências de sistema
+        run: |
+          pacman -Sy --noconfirm --needed \
+            python python-pip python-gobject \
+            gtk4 libadwaita \
+            poppler \
+            xorg-server-xvfb \
+            dbus \
+            git
+
+      - uses: actions/checkout@v4
+
+      - name: Prepara o ambiente
+        # PyGObject vem do pacman: instalá-lo pelo pip quebraria por PEP 668 e
+        # por falta de typelibs. --no-deps mantém essa separação explícita.
+        run: |
+          python -m venv --system-site-packages .venv
+          .venv/bin/pip install -e . --no-deps
+          .venv/bin/pip install pytest Pillow requests beautifulsoup4 websockets
+
+      - name: Mostra o ambiente detectado
+        run: |
+          .venv/bin/python -c "
+          from zorin_copilot.core.desktop.env import detect_environment
+          env = detect_environment()
+          print('distro :', env.distro.pretty_name or env.distro.id)
+          print('pm     :', env.package_manager)
+          print('desktop:', env.desktop or '(nenhum)')
+          print('sessão :', env.session_type or '(nenhuma)')
+          "
+
+      - name: Roda a suíte
+        run: xvfb-run -a .venv/bin/python -m pytest -q
+        env:
+          XDG_RUNTIME_DIR: /tmp
+
+  # O setup.sh não pode abortar por falta de dpkg/apt — era exatamente o que
+  # acontecia no Arch antes da detecção multi-distribuição.
+  setup-arch:
+    name: Setup multi-distribuição (Arch)
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+
+    steps:
+      - name: Instala dependências mínimas
+        run: |
+          pacman -Sy --noconfirm --needed \
+            python python-pip python-gobject gtk4 libadwaita \
+            poppler xorg-server-xvfb dbus git
+
+      - uses: actions/checkout@v4
+
+      - name: Roda o setup sem interação e sem instalar pacotes
+        # AUTO_INSTALL=0 evita tocar no sistema; validamos apenas o fluxo.
+        run: AUTO_INSTALL=0 ./setup.sh </dev/null || true
+
+      - name: Confere que o venv, os links e o lançador foram criados
+        run: |
+          test -x "$HOME/.local/share/zorin-copilot/venv/bin/zorin-copilot"
+          test -L "$HOME/.local/bin/zorin-copilot"
+          test -f "$HOME/.local/share/applications/io.github.bruno.ZorinCopilot.desktop"
+          echo "Setup Arch ok"
