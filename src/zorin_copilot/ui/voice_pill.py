@@ -163,7 +163,7 @@ class VoicePillWindow(Gtk.Window):
         avatar_overlay.add_overlay(self.rec_dot)
         self.container.append(avatar_overlay)
 
-        self.avatar_icon = Gtk.Image.new_from_icon_name("system-help-symbolic")
+        self.avatar_icon = Gtk.Image.new_from_icon_name("starred-symbolic")
         self.avatar_icon.set_pixel_size(16)
         self.avatar_box.append(self.avatar_icon)
 
@@ -405,7 +405,7 @@ class VoicePillWindow(Gtk.Window):
             icon = "network-transmit-receive-symbolic"
         elif state == LiveVoiceState.LISTENING:
             status_text = "Ouvindo você..."
-            icon = "system-help-symbolic"
+            icon = "starred-symbolic"
         elif state == LiveVoiceState.SPEAKING:
             status_text = "Falando..."
             icon = "audio-speakers-symbolic"
@@ -420,10 +420,10 @@ class VoicePillWindow(Gtk.Window):
             icon = "dialog-error-symbolic"
         elif state == LiveVoiceState.DISCONNECTED:
             status_text = "Desconectado"
-            icon = "system-help-symbolic"
+            icon = "starred-symbolic"
         else:
             status_text = ""
-            icon = "system-help-symbolic"
+            icon = "starred-symbolic"
 
         if not self._chip_active:
             self.status_lbl.set_text(status_text)
@@ -681,7 +681,7 @@ class VoicePillWindow(Gtk.Window):
 
     def _on_notify_is_active(self, *_args) -> None:
         # Reset PTT se a janela perder foco durante o hold
-        if not self.get_is_active() and self._ptt_active:
+        if not self.is_active() and self._ptt_active:
             self._ptt_active = False
 
     def _on_motion_enter(self, *_args) -> None:

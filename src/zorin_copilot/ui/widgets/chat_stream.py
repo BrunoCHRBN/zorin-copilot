@@ -144,7 +144,7 @@ class ChatStreamView:
         header_welcome = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         header_welcome.set_halign(Gtk.Align.CENTER)
 
-        welcome_icon = Gtk.Image.new_from_icon_name("system-help-symbolic")
+        welcome_icon = Gtk.Image.new_from_icon_name("starred-symbolic")
         welcome_icon.set_pixel_size(44)
         welcome_icon.add_css_class("welcome-icon")
         header_welcome.append(welcome_icon)
@@ -302,7 +302,7 @@ class ChatStreamView:
         assistant_card.add_css_class("assistant-message-card")
 
         a_hdr = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        a_icon = Gtk.Image.new_from_icon_name("system-help-symbolic")
+        a_icon = Gtk.Image.new_from_icon_name("starred-symbolic")
         a_icon.set_pixel_size(18)
         a_hdr.append(a_icon)
 

@@ -240,6 +240,7 @@ class CopilotWindow(Adw.ApplicationWindow):
 
         chat_main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         chat_main_box.set_hexpand(True)
+        chat_main_box.add_css_class("chat-main-pane")
 
         self.live_voice_revealer = Gtk.Revealer()
         self.live_voice_revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_DOWN)

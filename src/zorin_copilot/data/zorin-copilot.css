@@ -48,23 +48,25 @@
 @define-color accent_bg_color #6b7280;
 @define-color accent_fg_color #ffffff;
 
-/* --- Janela Principal Translúcida --- */
+/* --- Janela Principal Sólida e Lapidada (Padrão Apple Studio) --- */
 window.glass-window,
 window.glass-window.background,
 window.glass-window > contents {
-    background-color: alpha(@zc_gray_50, 0.85);
+    background-color: @zc_gray_50;
 }
 
 window.light-glass,
 window.light-glass.background,
 window.light-glass > contents {
-    background-color: alpha(@zc_gray_50, 0.85);
+    background-color: @zc_gray_50;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 1.0), 0 20px 48px rgba(0, 0, 0, 0.14);
 }
 
 window.dark-glass,
 window.dark-glass.background,
 window.dark-glass > contents {
-    background-color: alpha(@zc_gray_900, 0.85);
+    background-color: @zc_gray_900;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 24px 56px rgba(0, 0, 0, 0.55);
 }
 
 /* --- Unificação e Blindagem de Cores dos Ícones (Monocromático Neutro) --- */
@@ -175,13 +177,13 @@ window.glass-window .glass-submit-btn image {
     color: #ffffff;
 }
 
-/* --- HeaderBar Nativa com Alto Contraste Integrada ao Vidro --- */
+/* --- HeaderBar Nativa Sólida com Alto Contraste (Blindagem Anti-Vazamento) --- */
 window.glass-window headerbar {
-    background-color: transparent;
     box-shadow: none;
 }
 
 window.light-glass headerbar {
+    background-color: @zc_gray_50;
     border-bottom: 1px solid alpha(@zc_gray_800, 0.08);
 }
 
@@ -195,6 +197,7 @@ window.light-glass headerbar windowtitle .subtitle {
 }
 
 window.dark-glass headerbar {
+    background-color: @zc_gray_900;
     border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 
@@ -207,7 +210,19 @@ window.dark-glass headerbar windowtitle .subtitle {
     color: @zc_gray_400;
 }
 
-/* --- Containers Transparentes Scoped Apenas na Janela Principal --- */
+/* --- Área Central de Leitura e Chat (Padrão Apple: 100% Sólido e Nítido) --- */
+.chat-main-pane {
+    transition: background-color 200ms ease;
+}
+
+window.light-glass .chat-main-pane {
+    background-color: @zc_gray_50;
+}
+
+window.dark-glass .chat-main-pane {
+    background-color: @zc_gray_900;
+}
+
 window.glass-window > contents scrolledwindow,
 window.glass-window > contents scrolledwindow > viewport {
     background-color: transparent;
@@ -219,35 +234,37 @@ preferencesdialog > contents {
     background-color: @dialog_bg_color;
 }
 
-/* --- Indicador de Modelo / Status no HeaderBar (Glass Pill) --- */
+/* --- Indicador de Modelo / Status no HeaderBar e Botões de Controle (Glass Pill) --- */
 .glass-pill {
     border-radius: 16px;
-    padding: 3px 12px;
-    transition: all 180ms ease;
+    padding: 5px 14px;
+    transition: all 180ms cubic-bezier(0.2, 0.8, 0.2, 1.0);
 }
 
 window.light-glass .glass-pill {
-    background-color: alpha(@zc_gray_800, 0.06);
-    border: 1px solid alpha(@zc_gray_800, 0.12);
+    background-color: rgba(0, 0, 0, 0.04);
+    border: 1px solid rgba(0, 0, 0, 0.08);
     color: @zc_gray_800;
     font-weight: 500;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.85);
 }
 
 window.light-glass .glass-pill:hover {
-    background-color: alpha(@zc_gray_800, 0.12);
-    border-color: alpha(@zc_gray_800, 0.22);
+    background-color: rgba(0, 0, 0, 0.08);
+    border-color: rgba(0, 0, 0, 0.14);
 }
 
 window.dark-glass .glass-pill {
     background-color: rgba(255, 255, 255, 0.08);
-    border: 1px solid rgba(255, 255, 255, 0.15);
+    border: 1px solid rgba(255, 255, 255, 0.14);
     color: @zc_gray_100;
     font-weight: 500;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.10);
 }
 
 window.dark-glass .glass-pill:hover {
-    background-color: rgba(255, 255, 255, 0.16);
-    border-color: rgba(255, 255, 255, 0.25);
+    background-color: rgba(255, 255, 255, 0.14);
+    border-color: rgba(255, 255, 255, 0.22);
 }
 
 /* --- Campo de Entrada Glassmorphic (Search Entry) --- */
@@ -325,23 +342,23 @@ window.dark-glass .welcome-subtitle {
     color: @zc_gray_400;
 }
 
-/* --- Cards de Vidro (Resposta, Prévia de App, Detalhes) --- */
+/* --- Cards de Vidro (Resposta, Prévia de App, Detalhes, Live Voice) --- */
 .glass-card {
-    border-radius: 14px;
-    transition: all 200ms ease;
+    border-radius: 18px;
+    transition: all 200ms cubic-bezier(0.2, 0.8, 0.2, 1.0);
 }
 
 window.light-glass .glass-card,
 .glass-card {
-    background-color: rgba(255, 255, 255, 0.88);
-    border: 1px solid alpha(@zc_gray_800, 0.09);
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.04), inset 0 1px 0 rgba(255, 255, 255, 0.95);
+    background-color: rgba(255, 255, 255, 0.95);
+    border: 1px solid rgba(0, 0, 0, 0.07);
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.06), inset 0 1px 0 rgba(255, 255, 255, 1.0);
 }
 
 window.dark-glass .glass-card {
-    background-color: alpha(@zc_gray_800, 0.85);
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+    background-color: alpha(@zc_gray_800, 0.94);
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    box-shadow: 0 16px 36px rgba(0, 0, 0, 0.40), inset 0 1px 0 rgba(255, 255, 255, 0.12);
 }
 
 /* --- Botão Compacto de Abrir Agora (App Preview) --- */
@@ -412,24 +429,24 @@ window.dark-glass .glass-pin-btn:hover {
 
 window.light-glass .glass-chip,
 .glass-chip {
-    background-color: rgba(255, 255, 255, 0.82);
-    border: 1px solid alpha(@zc_gray_800, 0.10);
-    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.03), inset 0 1px 0 rgba(255, 255, 255, 0.95);
+    background-color: rgba(255, 255, 255, 0.90);
+    border: 1px solid alpha(@zc_gray_800, 0.08);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04), inset 0 1px 0 rgba(255, 255, 255, 1.0);
     color: @zc_gray_800;
     font-weight: 500;
 }
 
 window.light-glass .glass-chip:hover {
     background-color: #ffffff;
-    border: 1px solid alpha(@zc_gray_800, 0.22);
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+    border: 1px solid alpha(@zc_gray_800, 0.20);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06);
     color: @zc_gray_800;
 }
 
 window.dark-glass .glass-chip {
-    background-color: alpha(@zc_gray_700, 0.78);
+    background-color: alpha(@zc_gray_700, 0.88);
     border: 1px solid rgba(255, 255, 255, 0.12);
-    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.12);
     color: @zc_gray_100;
 }
 
@@ -527,12 +544,12 @@ scrollbar slider:hover {
 }
 
 window.light-glass .sidebar-panel {
-    background-color: alpha(@zc_gray_100, 0.94);
-    border-right: 1px solid alpha(@zc_gray_800, 0.10);
+    background-color: @zc_gray_100;
+    border-right: 1px solid alpha(@zc_gray_800, 0.08);
 }
 
 window.dark-glass .sidebar-panel {
-    background-color: alpha(@zc_gray_900, 0.94);
+    background-color: @zc_gray_900;
     border-right: 1px solid rgba(255, 255, 255, 0.08);
 }
 
@@ -590,18 +607,18 @@ window.dark-glass .user-chat-bubble {
 }
 
 window.light-glass .assistant-message-card {
-    background-color: rgba(255, 255, 255, 0.90);
-    border: 1px solid alpha(@zc_gray_800, 0.09);
-    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.05), inset 0 1px 0 rgba(255, 255, 255, 0.95);
+    background-color: rgba(255, 255, 255, 0.98);
+    border: 1px solid rgba(0, 0, 0, 0.07);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.05), inset 0 1px 0 rgba(255, 255, 255, 1.0);
 }
 
 window.dark-glass .assistant-message-card {
-    background-color: alpha(@zc_gray_800, 0.88);
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+    background-color: alpha(@zc_gray_800, 0.96);
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.10);
 }
 
-/* --- Barra de Entrada Inferior (Estilo Gemini) --- */
+/* --- Barra de Entrada Inferior (Estilo Gemini / Apple Pill) --- */
 .prompt-bar-card {
     border-radius: 28px;
     padding: 4px 8px 4px 12px;
@@ -609,25 +626,25 @@ window.dark-glass .assistant-message-card {
 }
 
 window.light-glass .prompt-bar-card {
-    background-color: rgba(255, 255, 255, 0.96);
-    border: 1px solid alpha(@zc_gray_800, 0.14);
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.06), inset 0 1px 0 rgba(255, 255, 255, 0.95);
+    background-color: rgba(255, 255, 255, 0.98);
+    border: 1px solid alpha(@zc_gray_800, 0.12);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.08), inset 0 1px 0 rgba(255, 255, 255, 1.0);
 }
 
 window.light-glass .prompt-bar-card:focus-within {
     border: 1px solid @accent_color;
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.06), inset 0 1px 0 rgba(255, 255, 255, 0.95);
+    box-shadow: 0 14px 36px rgba(0, 0, 0, 0.12), inset 0 1px 0 rgba(255, 255, 255, 1.0);
 }
 
 window.dark-glass .prompt-bar-card {
-    background-color: alpha(@zc_gray_800, 0.94);
+    background-color: alpha(@zc_gray_800, 0.96);
     border: 1px solid rgba(255, 255, 255, 0.14);
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    box-shadow: 0 14px 36px rgba(0, 0, 0, 0.40), inset 0 1px 0 rgba(255, 255, 255, 0.10);
 }
 
 window.dark-glass .prompt-bar-card:focus-within {
     border: 1px solid @zc_gray_400;
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.50), inset 0 1px 0 rgba(255, 255, 255, 0.12);
 }
 
 .prompt-bar-card entry {
@@ -692,16 +709,16 @@ window.light-glass .drop-hint {
     border-radius: 10px;
 }
 
-/* --- Barra de status inferior (estilo Warp) --- */
+/* --- Barra de status inferior (estilo Warp / Apple Studio) --- */
 .status-bar {
     padding: 4px 10px;
-    background-color: alpha(@zc_gray_500, 0.08);
-    border-top: 1px solid alpha(@zc_gray_500, 0.18);
+    background-color: @zc_gray_100;
+    border-top: 1px solid alpha(@zc_gray_800, 0.08);
 }
 
 window.dark-glass .status-bar {
-    background-color: rgba(0, 0, 0, 0.28);
-    border-top: 1px solid rgba(255, 255, 255, 0.10);
+    background-color: @zc_gray_900;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .status-item {
@@ -741,38 +758,38 @@ window.voice-pill-window > contents {
 }
 
 .voice-pill-container {
-    background-color: @zc_gray_900;
-    border: 1px solid rgba(255, 255, 255, 0.10);
-    border-radius: 16px;
-    padding: 7px 14px;
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.10), 0 8px 24px rgba(0, 0, 0, 0.45);
+    background-color: alpha(@zc_gray_900, 0.92);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 20px;
+    padding: 8px 16px;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16), 0 16px 40px rgba(0, 0, 0, 0.50);
     transition: background-image 180ms ease-in-out, border-color 180ms ease-in-out;
 }
 
 window.light-glass.voice-pill-window .voice-pill-container {
-    background-color: #ffffff;
-    border: 1px solid alpha(@zc_gray_800, 0.14);
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.90), 0 6px 20px rgba(0, 0, 0, 0.10);
+    background-color: rgba(255, 255, 255, 0.94);
+    border: 1px solid rgba(0, 0, 0, 0.08);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 1.0), 0 12px 32px rgba(0, 0, 0, 0.12);
 }
 
 .voice-pill-avatar {
     border-radius: 9999px;
-    background: linear-gradient(135deg, alpha(@zc_gray_300, 0.55), alpha(@accent_color, 0.30));
-    min-width: 30px;
-    min-height: 30px;
-    padding: 3px;
-    box-shadow: none;
+    background: linear-gradient(135deg, alpha(@zc_gray_400, 0.45), alpha(@accent_color, 0.65));
+    min-width: 32px;
+    min-height: 32px;
+    padding: 4px;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.25);
 }
 
 .voice-pill-avatar image {
-    color: @zc_gray_50;
+    color: #ffffff;
 }
 
 window.light-glass.voice-pill-window .voice-pill-avatar {
-    background: linear-gradient(135deg, alpha(@zc_gray_300, 0.60), alpha(@accent_color, 0.22));
+    background: linear-gradient(135deg, @zc_gray_700, @zc_gray_500);
 }
 window.light-glass.voice-pill-window .voice-pill-avatar image {
-    color: @zc_gray_800;
+    color: #ffffff;
 }
 
 .voice-pill-btn {

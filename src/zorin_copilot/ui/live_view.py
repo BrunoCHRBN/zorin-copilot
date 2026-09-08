@@ -24,8 +24,8 @@ from ..core.fence import NO_MONITOR_LABEL
 LOG_MAX_HEIGHT = 170
 TRANSCRIPT_ROLE_ICONS = {
     "user": "avatar-default-symbolic",
-    "assistant": "system-help-symbolic",
-    "model": "system-help-symbolic",
+    "assistant": "starred-symbolic",
+    "model": "starred-symbolic",
 }
 
 
