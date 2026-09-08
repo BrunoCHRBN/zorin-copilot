@@ -244,6 +244,7 @@ Resultado atual: **828 passando, 0 falhando**. `test_setup_shortcut` (que falhav
 Outras notas:
 
 - **O job do Sway falhava por causa de uma file capability.** `nohup sway` devolvia `Operation not permitted` — e o detalhe é que o erro vinha do `execve`, antes de o sway rodar: o pacote do Arch entrega `/usr/bin/sway` com `cap_sys_nice=ep`, e o container não tem essa capability no bounding set. `setcap -r /usr/bin/sway` resolve. Reproduzido fora do CI, num `docker run archlinux:latest` comum.
+- **`pycairo` é dependência só de teste.** Nada em `src/` importa `cairo`; um único teste de renderização do visualizador de voz usa. No Arch, `python-gobject` não o traz, então a suíte quebrava inteira lá. O CI instala `python-cairo` e o teste agora pula com aviso claro se o módulo faltar — dependência de teste não deve derrubar a suíte.
 - **Não assuma `wayland-0`.** O wlroots numera o socket pelo primeiro número livre; em container limpo o sway subiu como `wayland-1`. O job agora descobre o socket por glob e exporta também `SWAYSOCK` (o marcador que o projeto usa para reconhecer o Sway).
 - Os 16 módulos de UI e 13 arquivos de teste agora chamam `require_gtk4()` em vez de espalhar `require_version` — se o requisito mudar, muda em um lugar.
 - `ZORIN_COPILOT_ALLOW_OLD_TOOLKIT=1` existe para desenvolvimento, não para produção.

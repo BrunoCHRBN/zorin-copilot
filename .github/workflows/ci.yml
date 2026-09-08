@@ -45,7 +45,9 @@ jobs:
           # está entre elas porque os testes cobrem os caminhos de visão e de
           # área de transferência que dependem da biblioteca.
           .venv/bin/pip install -e . --no-deps
-          .venv/bin/pip install pytest Pillow requests beautifulsoup4 websockets
+          # setuptools entrou na lista de propósito: desde o Python 3.12 o venv
+          # não o traz mais, e sem ele um teste de empacotamento é pulado.
+          .venv/bin/pip install pytest Pillow requests beautifulsoup4 websockets setuptools
 
       - name: Roda a suíte
         # A interface precisa de um servidor gráfico; xvfb dá um sem hardware.
@@ -79,6 +81,7 @@ jobs:
             poppler \
             xorg-server-xvfb \
             dbus at-spi2-core \
+            python-cairo \
             git
 
       - uses: actions/checkout@v4
@@ -89,7 +92,9 @@ jobs:
         run: |
           python -m venv --system-site-packages .venv
           .venv/bin/pip install -e . --no-deps
-          .venv/bin/pip install pytest Pillow requests beautifulsoup4 websockets
+          # setuptools entrou na lista de propósito: desde o Python 3.12 o venv
+          # não o traz mais, e sem ele um teste de empacotamento é pulado.
+          .venv/bin/pip install pytest Pillow requests beautifulsoup4 websockets setuptools
 
       - name: Mostra o ambiente detectado
         run: |
@@ -178,7 +183,9 @@ jobs:
         run: |
           python -m venv --system-site-packages .venv
           .venv/bin/pip install -e . --no-deps
-          .venv/bin/pip install pytest Pillow requests beautifulsoup4 websockets
+          # setuptools entrou na lista de propósito: desde o Python 3.12 o venv
+          # não o traz mais, e sem ele um teste de empacotamento é pulado.
+          .venv/bin/pip install pytest Pillow requests beautifulsoup4 websockets setuptools
 
       - name: Sobe o Sway em modo headless
         run: |

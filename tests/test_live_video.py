@@ -19,6 +19,17 @@ from zorin_copilot.core.a11y import DesktopInspector
 from zorin_copilot.core.config import CopilotConfig
 from zorin_copilot.core.vision import ScreenCaptureService, compute_frame_diff
 
+# pycairo não é dependência do app — nada em `src/` o importa. Só este teste de
+# renderização precisa dele. Sem o skip, a suíte quebrava inteira no Arch, onde
+# `python-gobject` não o traz: uma dependência apenas de teste não deveria
+# derrubar a suíte de quem roda sem ela.
+try:
+    import cairo  # noqa: F401
+
+    TEM_PYCAIRO = True
+except ImportError:  # pragma: no cover
+    TEM_PYCAIRO = False
+
 
 class LiveVideoCoreTest(unittest.TestCase):
     """Testes para o pipeline de visão, enquadramento e escudo de privacidade."""
@@ -246,6 +257,7 @@ class LiveVoiceWidgetUITest(unittest.TestCase):
         widget._cycle_visualizer_style()
         self.assertEqual(widget.visualizer_style, "waves")
 
+    @unittest.skipUnless(TEM_PYCAIRO, "pycairo não instalado (python-cairo)")
     def test_visualizer_cairo_rendering(self):
         """Garante que todos os 4 estilos de visualizador renderizam no Cairo sem exceções."""
         import cairo
