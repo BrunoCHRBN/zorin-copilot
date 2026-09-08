@@ -37,7 +37,7 @@ from ..core.export import (
 from ..core.fence import ScreenFenceManager
 from ..core.rag import LocalDocumentRAG
 from ..core.session import TopicSession
-from ..core.shortcuts import APP_SHORTCUTS, ShortcutManager
+from ..core.shortcuts import APP_SHORTCUTS, ShortcutManager, is_gnome_desktop
 from ..shell.action_status import ActionOutcome
 from ..shell.executor import ActionExecutor, ExecutionReport
 from ..shell.undo import UndoEntry
@@ -1345,15 +1345,26 @@ class ZorinCopilotApp(Adw.Application):
 
     def do_startup(self):
         Adw.Application.do_startup(self)
-        # Garante o registro dos atalhos de sistema configurados no GNOME (HUD, Recorte e Voz ao Vivo)
+        # Atalhos de sistema: GNOME media-keys no Zorin/GNOME; portal GlobalShortcuts
+        # nos demais compositores (Hyprland/KDE/dde) — agnóstico de distribuição.
         try:
             cfg = CopilotConfig.load()
-            if cfg.global_shortcut_enabled:
-                ShortcutManager.register(cfg.global_shortcut_key)
-            if getattr(cfg, "crop_shortcut_enabled", True):
-                ShortcutManager.register_crop(getattr(cfg, "crop_shortcut_key", "<Super><Shift>s"))
-            if getattr(cfg, "live_voice_hotkey_enabled", True):
-                ShortcutManager.register_voice(getattr(cfg, "live_voice_hotkey", "<Super>v"))
+            if is_gnome_desktop():
+                if cfg.global_shortcut_enabled:
+                    ShortcutManager.register(cfg.global_shortcut_key)
+                if getattr(cfg, "crop_shortcut_enabled", True):
+                    ShortcutManager.register_crop(getattr(cfg, "crop_shortcut_key", "<Super><Shift>s"))
+                if getattr(cfg, "live_voice_hotkey_enabled", True):
+                    ShortcutManager.register_voice(getattr(cfg, "live_voice_hotkey", "<Super>v"))
+            else:
+                try:
+                    from ..core.shortcuts_portal import PortalShortcutManager
+
+                    self._portal_shortcuts = PortalShortcutManager(self._on_portal_shortcut)
+                    if self._portal_shortcuts.start():
+                        logger.info("Atalhos globais via GlobalShortcuts portal ativos.")
+                except Exception as exc:
+                    logger.warning(f"Falha ao iniciar atalhos via portal GlobalShortcuts: {exc}")
         except Exception:
             pass
 
@@ -1362,6 +1373,18 @@ class ZorinCopilotApp(Adw.Application):
             if isinstance(win, CopilotWindow):
                 return win
         return CopilotWindow(self)
+
+    def _on_portal_shortcut(self, shortcut_id: str) -> None:
+        """Recebe o id de atalho do portal GlobalShortcuts e age na janela."""
+        win = self._get_or_create_window()
+        if shortcut_id == "toggle-hud":
+            win.toggle_hud()
+        elif shortcut_id == "crop":
+            win.trigger_direct_crop()
+        elif shortcut_id == "voice":
+            win.toggle_live_voice()
+        else:
+            logger.debug(f"Atalho de portal desconhecido: {shortcut_id}")
 
     def do_shutdown(self):
         # Encerra a thread de wake word junto com o processo (no close-request

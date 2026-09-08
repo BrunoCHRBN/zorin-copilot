@@ -36,6 +36,23 @@ def _media_keys_schema_exists() -> bool:
         return False
 
 
+def is_gnome_desktop() -> bool:
+    """True se o ambiente é GNOME/Zorin (usa media-keys).
+
+    ``XDG_CURRENT_DESKTOP`` pode ser algo como ``ubuntu:GNOME`` ou ``Hyprland``; checamos
+    substring ignorando caixa. Usado para decidir entre o backend GNOME media-keys e o
+    portal GlobalShortcuts (Hyprland/KDE/dde).
+    """
+    desktop = (os.environ.get("XDG_CURRENT_DESKTOP") or "").lower()
+    return "gnome" in desktop or "zorin" in desktop
+
+
+def is_wlroots_compositor() -> bool:
+    """True se o compositor é wlroots-based (Hyprland, Sway, Niri...)."""
+    desktop = (os.environ.get("XDG_CURRENT_DESKTOP") or "").lower()
+    return any(tok in desktop for tok in ("hyprland", "sway", "niri", "river", "wayfire"))
+
+
 @dataclass(frozen=True)
 class AppShortcut:
     """Atalho interno da janela (escopo de aplicação).
@@ -264,7 +281,20 @@ class AutostartManager:
 
     @classmethod
     def is_enabled(cls) -> bool:
-        """Verifica se o autostart está ativo no sistema."""
+        """Verifica se o autostart está ativo no sistema.
+
+        Em compositores wlroots (Hyprland/Sway) a checagem é feita no
+        ``hyprland.conf`` (via ``exec-once``), pois eles não processam o XDG
+        autostart padrão — motivo pelo qual o ``doctor`` dava falso positivo.
+        """
+        if is_wlroots_compositor():
+            conf = cls._hyprland_conf_path()
+            if not conf.exists():
+                return False
+            try:
+                return cls._exec_once_line(ShortcutManager.get_binary_command("--background")) in conf.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                return False
         desktop_file = cls.get_autostart_file()
         if not desktop_file.exists():
             return False
@@ -278,15 +308,28 @@ class AutostartManager:
 
     @classmethod
     def enable(cls, binary_command: str | None = None) -> bool:
-        """Habilita o Zorin Copilot para iniciar com o sistema em segundo plano."""
+        """Habilita o Zorin Copilot para iniciar com o sistema em segundo plano.
+
+        No Hyprland/Sway escreve ``exec-once`` no hyprland.conf; nos demais,
+        usa o .desktop de XDG autostart.
+        """
         try:
             if not binary_command:
                 binary_command = ShortcutManager.get_binary_command("--background")
             elif not binary_command.endswith("--background"):
                 binary_command = f"{binary_command} --background"
 
-            desktop_file = cls.get_autostart_file()
-            content = f"""[Desktop Entry]
+            if is_wlroots_compositor():
+                return cls._enable_hyprland(binary_command)
+            return cls._enable_desktop(binary_command)
+        except Exception as exc:
+            logger.error(f"Erro ao habilitar autostart do Zorin Copilot: {exc}")
+            return False
+
+    @classmethod
+    def _enable_desktop(cls, binary_command: str) -> bool:
+        desktop_file = cls.get_autostart_file()
+        content = f"""[Desktop Entry]
 Type=Application
 Version=1.0
 Name=Zorin Copilot
@@ -299,17 +342,43 @@ Categories=Utility;GTK;GNOME;
 StartupNotify=false
 X-GNOME-Autostart-enabled=true
 """
-            desktop_file.write_text(content, encoding="utf-8")
-            logger.info(f"Autostart do Zorin Copilot habilitado em: {desktop_file}")
+        desktop_file.write_text(content, encoding="utf-8")
+        logger.info(f"Autostart do Zorin Copilot habilitado em: {desktop_file}")
+        return True
+
+    @classmethod
+    def _enable_hyprland(cls, binary_command: str) -> bool:
+        conf = cls._hyprland_conf_path()
+        line = cls._exec_once_line(binary_command)
+        content = conf.read_text(encoding="utf-8") if conf.exists() else ""
+        # evita duplicar (aceita " = " ou "=")
+        if line in content or line.replace(" = ", "=") in content:
             return True
-        except Exception as exc:
-            logger.error(f"Erro ao habilitar autostart do Zorin Copilot: {exc}")
-            return False
+        header = "\n# Zorin Copilot — inicialização automática\n"
+        conf.parent.mkdir(parents=True, exist_ok=True)
+        with conf.open("a" if conf.exists() else "w", encoding="utf-8") as fh:
+            if content and not content.endswith("\n"):
+                fh.write("\n")
+            fh.write(header + line + "\n")
+        logger.info(f"Autostart do Zorin Copilot habilitado em: {conf}")
+        return True
 
     @classmethod
     def disable(cls) -> bool:
-        """Desabilita o autostart removendo o arquivo desktop de inicialização."""
+        """Desabilita o autostart (remove o .desktop ou a linha exec-once)."""
         try:
+            if is_wlroots_compositor():
+                conf = cls._hyprland_conf_path()
+                if conf.exists():
+                    text = conf.read_text(encoding="utf-8", errors="ignore")
+                    line = cls._exec_once_line(ShortcutManager.get_binary_command("--background"))
+                    new = "\n".join(
+                        ln for ln in text.splitlines()
+                        if ln.strip() != line and not ln.startswith("# Zorin Copilot")
+                    )
+                    conf.write_text(new, encoding="utf-8")
+                logger.info("Autostart do Zorin Copilot desabilitado (Hyprland).")
+                return True
             desktop_file = cls.get_autostart_file()
             if desktop_file.exists():
                 desktop_file.unlink()
@@ -318,4 +387,14 @@ X-GNOME-Autostart-enabled=true
         except Exception as exc:
             logger.error(f"Erro ao desabilitar autostart: {exc}")
             return False
+
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _hyprland_conf_path() -> Path:
+        base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+        return Path(base) / "hypr" / "hyprland.conf"
+
+    @staticmethod
+    def _exec_once_line(binary_command: str) -> str:
+        return f"exec-once = {binary_command}"
 
