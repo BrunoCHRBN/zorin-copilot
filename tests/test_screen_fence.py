@@ -1,6 +1,7 @@
 """Testes unitários para o ScreenFenceManager e VirtualInputDriver (Segurança Espacial)."""
 
 import unittest
+from unittest import mock
 
 from zorin_copilot.core.fence import FenceMode, MonitorInfo, RedZone, ScreenFenceManager
 from zorin_copilot.shell.input_driver import VirtualInputDriver
@@ -157,12 +158,27 @@ class HeadlessFallbackTest(unittest.TestCase):
 
 
 class VirtualInputDriverTest(unittest.TestCase):
+    """Exercita o caminho real (ydotool presente), com o subprocesso mockado.
+
+    Estes testes costumavam passar porque o sandbox não tem ydotool e o driver
+    caía no modo que devolvia sucesso sem fazer nada — ou seja, validavam o bug.
+    Agora o backend é fornecido por mock, então o que está sob teste é a
+    validação da cerca e a emissão do comando, não a ausência de crash.
+    """
+
     def setUp(self):
         monitors = [
             MonitorInfo(index=0, name="AOC 27\"", model="AOC", x=1920, y=0, width=1920, height=1080, is_primary=True),
         ]
         self.fence = ScreenFenceManager(monitors=monitors)
+        self._which = mock.patch("shutil.which", return_value="/usr/bin/ydotool")
+        self._run = mock.patch("subprocess.run")
+        self._which.start()
+        self.run_mock = self._run.start()
+        self.addCleanup(self._which.stop)
+        self.addCleanup(self._run.stop)
         self.driver = VirtualInputDriver(fence=self.fence)
+        self.assertTrue(self.driver.is_available, "backend mockado deveria estar disponível")
 
     def test_driver_blocks_out_of_bounds_click(self):
         """Driver deve rejeitar clique fora da cerca sem emitir subprocess."""
