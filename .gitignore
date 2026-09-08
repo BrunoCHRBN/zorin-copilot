@@ -34,3 +34,7 @@ ENV/
 *.log
 .cache/
 .aider*
+
+# Core dumps (testes GTK sob xvfb podem gerar GBs)
+core.*
+core

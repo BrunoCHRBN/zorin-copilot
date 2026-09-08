@@ -35,15 +35,15 @@ class GlassmorphismStyleTest(unittest.TestCase):
 
     def test_unified_icon_colors_defined(self):
         """Garante que as regras de cores unificadas para ícones estão no CSS."""
-        self.assertIn("#3a4759", GLASS_CSS)
-        self.assertIn("#e4ecf5", GLASS_CSS)
+        self.assertIn("@zc_gray_700", GLASS_CSS)
+        self.assertIn("@zc_gray_100", GLASS_CSS)
         self.assertIn("window.light-glass image", GLASS_CSS)
         self.assertIn("window.dark-glass image", GLASS_CSS)
 
     def test_accent_shielding_defined(self):
-        """Garante que as cores de acento do Zorin são declaradas para blindar contra temas externos."""
-        self.assertIn("@define-color accent_color #15a6f0;", GLASS_CSS)
-        self.assertIn("@define-color accent_bg_color #15a6f0;", GLASS_CSS)
+        """Garante que as cores de acento são declaradas para blindar contra temas externos."""
+        self.assertIn("@define-color accent_color #6b7280;", GLASS_CSS)
+        self.assertIn("@define-color accent_bg_color #6b7280;", GLASS_CSS)
 
 
 class AccentVariableTest(unittest.TestCase):
@@ -54,7 +54,7 @@ class AccentVariableTest(unittest.TestCase):
     nada na prática.
     """
 
-    ACCENT = "#15a6f0"
+    ACCENT = "#6b7280"
 
     def test_accent_literal_only_in_definition(self):
         """Fora das duas declarações, o hex não pode aparecer em nenhuma regra."""
@@ -166,6 +166,76 @@ class NoLedEffectsTest(unittest.TestCase):
         # monocromática: variantes light/dark presentes
         self.assertIn("window.light-glass .status-dot", GLASS_CSS)
         self.assertIn("window.dark-glass .status-dot", GLASS_CSS)
+
+
+class NeutralPaletteTest(unittest.TestCase):
+    """A paleta é cinza neutro: sem viés azul, sem cor saturada como chrome.
+
+    Antes do refactor o stylesheet espalhava ~25 hexes com viés azul e o
+    accent era um ciano vivo (#15a6f0). Re-tematizar exigia caçar literal
+    por literal — e nenhuma delas referenciava uma variável.
+    """
+
+    DEAD_BLUES = (
+        "#123354", "#3a4759", "#4a607a", "#9aa7b5", "#e4ecf5",
+        "#62a0ea", "#0d8fd1", "#3584e4", "#78aeed", "#15a6f0",
+        "#1c2029", "#f2f5f9", "#0c7eb9",
+    )
+
+    def test_no_blue_tinted_literals(self):
+        """Nenhum dos antigos literais com viés azul pode ter sobrevivido."""
+        for dead in self.DEAD_BLUES:
+            self.assertNotIn(
+                dead, GLASS_CSS,
+                f"literal com viés azul ainda presente: {dead}",
+            )
+
+    def test_gray_ramp_defined(self):
+        """A rampa de cinza neutra está declarada de 50 a 900."""
+        for step in (50, 100, 200, 300, 400, 500, 600, 700, 800, 900):
+            self.assertRegex(
+                GLASS_CSS,
+                rf"@define-color zc_gray_{step}\s+#[0-9a-fA-F]{{6}};",
+                f"falta @define-color zc_gray_{step}",
+            )
+
+    def test_semantic_colors_defined(self):
+        """Cores semânticas existem e são dessaturadas (não #e01b24 puro)."""
+        for name in ("zc_error", "zc_success", "zc_warn", "zc_speak"):
+            self.assertRegex(
+                GLASS_CSS,
+                rf"@define-color {name}\s+#[0-9a-fA-F]{{6}};",
+                f"falta @define-color {name}",
+            )
+
+    def test_window_is_actually_translucent(self):
+        """0.96 era opaco na prática; o vidro só aparece quando o fundo vaza."""
+        self.assertGreaterEqual(
+            GLASS_CSS.count("0.85"), 2,
+            "janela principal deveria estar em 0.85, não opaca",
+        )
+
+    def test_no_saturated_color_as_chrome(self):
+        """Cor é conteúdo, nunca chrome: bordas usam cinza, não cor semântica."""
+        for name in ("@zc_error", "@zc_success", "@zc_warn", "@zc_speak"):
+            for lineno, line in enumerate(GLASS_CSS.splitlines(), start=1):
+                stripped = line.strip()
+                if "border" in stripped and name in stripped:
+                    self.fail(
+                        f"linha {lineno}: cor semântica usada como borda "
+                        f"(chrome): {stripped}"
+                    )
+
+    def test_glass_has_specular_edge(self):
+        """A borda especular (1px de luz no topo) é o que vende o vidro.
+
+        Sem backdrop-filter no GTK4, é o recurso que mais compensa a falta
+        do desfoque real.
+        """
+        self.assertGreaterEqual(
+            GLASS_CSS.count("inset 0 1px 0"), 5,
+            "poucas superfícies com borda especular",
+        )
 
 
 if __name__ == "__main__":
