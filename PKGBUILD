@@ -49,7 +49,24 @@ optdepends=(
 )
 makedepends=('python-build' 'python-installer' 'python-wheel' 'python-setuptools')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+# Checksum real do tarball da tag — 'SKIP' é aceito pelo makepkg mas a AUR
+# rejeita checksum vazio em fonte que não é VCS. Ao marcar nova release:
+#   git tag v0.2.0 && git push --tags && updpkgsums   # e suba o pkgver
+sha256sums=('b7185b3477c070950a6591d98584f9496c4b527c52bbaf0d1d83361f15ca73a7')
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  # Rede de segurança: o fonte precisa trazer a camada de portabilidade. Sem
+  # `core/desktop/` o pacote instala um Copilot que só funciona no GNOME — ou
+  # seja, exatamente o problema que este pacote existe para resolver, entregue
+  # silenciosamente. Se a tag estiver atrasada, é melhor falhar aqui do que
+  # publicar binário quebrado. (A tag v0.1.0 é anterior ao porte: 22 arquivos.)
+  if [[ ! -d src/zorin_copilot/core/desktop ]]; then
+    error "v$pkgver não contém a camada de portabilidade (src/zorin_copilot/core/desktop)."
+    error "Marque uma release que inclua o porte, suba o pkgver e rode 'updpkgsums'."
+    return 1
+  fi
+}
 
 build() {
   cd "$pkgname-$pkgver"
@@ -59,6 +76,11 @@ build() {
 package() {
   cd "$pkgname-$pkgver"
   python -m installer --destdir="$pkgdir" dist/*.whl
+
+  # O wheel sai do build com __pycache__ dentro (140 arquivos num pacote de
+  # 244). Bytecode não é conteúdo de pacote: o Python recompila no primeiro uso,
+  # e assim o pacote não carrega lixo de build nem deixa órfão na remoção.
+  find "$pkgdir" -type d -name '__pycache__' -prune -exec rm -rf {} +
 
   install -Dm644 /dev/stdin "$pkgdir/usr/share/applications/io.github.bruno.ZorinCopilot.desktop" <<'DESKTOP'
 [Desktop Entry]

@@ -159,6 +159,28 @@ Para ícone na bandeja, adicione o módulo `tray` à sua waybar.
 ~/.local/share/zorin-copilot/venv/bin/pip install -e ".[voice]"
 ```
 
+### Pelo pacote Arch (`makepkg`)
+
+```bash
+git clone https://github.com/BrunoCHRBN/zorin-copilot.git
+cd zorin-copilot
+makepkg -si
+```
+
+**Atenção antes de publicar na AUR: a tag `v0.1.0` é anterior ao porte.** Ela tem 22 arquivos e não contém `core/desktop/` — ou seja, um `makepkg` hoje produziria um pacote **sem nenhum** suporte a wlroots. Para não entregar isso em silêncio, o `PKGBUILD` tem uma rede de segurança em `prepare()` que aborta com mensagem explicativa se o fonte não trouxer a camada de portabilidade; ela foi verificada disparando contra o tarball real da `v0.1.0`.
+
+Para lançar de verdade:
+
+```bash
+git tag v0.2.0 && git push --tags
+# suba pkgver no PKGBUILD e rode:
+updpkgsums && makepkg --printsrcinfo > .SRCINFO
+```
+
+Também foram corrigidos no pacote: `sha256sums=('SKIP')` → checksum real (a AUR rejeita checksum vazio em fonte não-VCS), e remoção do `__pycache__` que o `bdist_wheel` embutia — eram 140 arquivos `.pyc` num pacote de 244; agora são 96 arquivos, 0 `.pyc`.
+
+Verificado num `archlinux:latest` limpo: `makepkg` constrói, `pacman -U` instala, `zorin-copilot` e `zorin-copilot-cli` entram no PATH, o `.desktop` vai para `/usr/share/applications` e o CSS viaja dentro do pacote.
+
 ---
 
 ## 8. Segunda leva: itens do roadmap já implementados
