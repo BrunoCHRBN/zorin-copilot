@@ -61,8 +61,9 @@ class TypingIndicator(Gtk.Box):
     """Indicador de "digitando…" estilo iMessage: três pontos que pulsam em onda.
 
     Usado na bolha pendente do assistente enquanto a IA processa. A animação roda
-    num ``GLib.timeout`` e se autocancela quando o widget é desrealizado (a bolha
-    pendente é removida assim que a resposta chega).
+    num ``GLib.timeout`` que só existe enquanto o widget está visível (map):
+    criá-lo no ``__init__`` deixava uma fonte periódica viva mesmo para
+    indicadores que nunca chegaram a ser exibidos.
     """
 
     def __init__(self, n_dots: int = 3):
@@ -76,20 +77,39 @@ class TypingIndicator(Gtk.Box):
             self.append(dot)
             self.dots.append(dot)
         self._step = 0
-        self._timer = GLib.timeout_add(300, self._tick)
-        self.connect("unrealize", self._on_unrealize)
+        self._timer = 0
+        self.connect("map", self._on_map)
+        self.connect("unmap", self._on_unmap)
+        self.connect("unrealize", self._on_unmap)
+
+    def _start(self) -> None:
+        if not self._timer:
+            # G_PRIORITY_LOW de propósito: uma animação cosmética não deve
+            # competir com a entrega da resposta da IA, que chega por
+            # GLib.idle_add. Ver "Inanição de prioridade" em
+            # docs/ENDEAVOUROS_PORT.md.
+            self._timer = GLib.timeout_add(300, self._tick, priority=GLib.PRIORITY_LOW)
+
+    def _stop(self) -> None:
+        if self._timer:
+            GLib.source_remove(self._timer)
+            self._timer = 0
+
+    def _on_map(self, *_args) -> None:
+        self._start()
+
+    def _on_unmap(self, *_args) -> None:
+        self._stop()
 
     def _tick(self) -> bool:
+        if not self.get_mapped():
+            self._stop()
+            return GLib.SOURCE_REMOVE
         self._step = (self._step + 1) % (len(self.dots) + 1)
         for i, dot in enumerate(self.dots):
             # Onda da esquerda p/ direita, com uma pausa (step == n_dots) sem brilho.
             dot.set_opacity(1.0 if self._step == i else 0.3)
         return GLib.SOURCE_CONTINUE
-
-    def _on_unrealize(self, *_args) -> None:
-        if self._timer:
-            GLib.source_remove(self._timer)
-            self._timer = None
 
 @dataclass
 class ActionRowHandle:

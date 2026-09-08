@@ -27,6 +27,7 @@ from zorin_copilot.ai.actions import ActionPlan, ActionType, DesktopAction  # no
 from zorin_copilot.core.session import ChatTurn, TopicSession  # noqa: E402
 from zorin_copilot.core.shortcuts import APP_SHORTCUTS  # noqa: E402
 from zorin_copilot.ui.app import CopilotWindow  # noqa: E402
+from zorin_copilot.ui.widgets.chat_stream import TypingIndicator  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -302,6 +303,65 @@ class StatusBarTest(unittest.TestCase):
         self.win.status_bar.refresh_rag()
         self.assertIsInstance(self.win.status_bar.model_lbl.get_text(), str)
         self.assertIsInstance(self.win.status_bar.rag_lbl.get_text(), str)
+
+
+class TimerLeakRegressionTest(unittest.TestCase):
+    """Regressão: fontes periódicas não podem vazar nem passar fome no idle.
+
+    O `GMainContext` só despacha uma fonte quando não existe nenhuma de
+    prioridade mais alta pronta. `GLib.idle_add` roda em
+    `G_PRIORITY_DEFAULT_IDLE` (200) — e é por ele que o app entrega a resposta
+    da IA à interface. Basta sobrar uma fonte periódica em
+    `G_PRIORITY_DEFAULT` (0), ou um frame clock do GDK (100), para que nenhum
+    idle rode nunca mais.
+
+    Foi exatamente isso que aconteceu: os ticks da barra de status e do
+    indicador de "digitando" vazavam por janela, e depois de algumas centenas
+    de janelas acumuladas a suíte travava a janela em "ocupada" para sempre —
+    um teste que passava isolado e falhava só no fim da suíte.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = Adw.Application(application_id="org.zorin.copilot.test.leak")
+
+    def test_status_bar_tick_segue_a_visibilidade_da_janela(self):
+        """O tick de telemetria só existe enquanto a janela está visível.
+
+        Regressão: era criado no `__init__` e nunca removido de fato — o
+        `destroy` do GTK4 sequer emite o sinal para janela nunca apresentada.
+        """
+        win = CopilotWindow(self.app)
+        self.assertEqual(win.status_bar._timer_id, 0, "janela oculta não deve ticar")
+        win.status_bar._on_map()
+        self.assertNotEqual(win.status_bar._timer_id, 0)
+        win.status_bar._on_unmap()
+        self.assertEqual(win.status_bar._timer_id, 0)
+        win.destroy()
+
+    def test_indicador_de_digitacao_nao_tem_timer_enquanto_invisivel(self):
+        """Sem `map` não há timer — era aí que as fontes periódicas vazavam."""
+        self.assertEqual(TypingIndicator()._timer, 0)
+
+    def test_idle_continua_despachando_com_muitas_janelas_vivas(self):
+        """Trinta janelas abertas não podem impedir o despacho de um idle."""
+        janelas = [CopilotWindow(self.app) for _ in range(30)]
+        try:
+            marcador = []
+
+            def marca():
+                marcador.append(True)
+                return GLib.SOURCE_REMOVE
+
+            GLib.idle_add(marca)
+            self.assertTrue(
+                run_loop_until(lambda: bool(marcador), timeout_ms=3000),
+                "GLib.idle_add deixou de ser despachado: o GMainContext está "
+                "passando fome por causa de fontes de prioridade mais alta",
+            )
+        finally:
+            for janela in janelas:
+                janela.destroy()
 
 
 if __name__ == "__main__":

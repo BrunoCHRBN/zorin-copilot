@@ -74,16 +74,27 @@ class TypingIndicatorTest(unittest.TestCase):
         indicators = find_by_type(widget, TypingIndicator)
         self.assertEqual(len(indicators), 1)
         self.assertEqual(len(indicators[0].dots), 3)
-        # Para o timer do indicador (o widget de teste não é realizado).
-        indicators[0]._on_unrealize()
+        # O widget de teste nunca é mapeado, logo não deve ter timer vivo:
+        # era exatamente aí que as fontes periódicas vazavam.
+        self.assertEqual(indicators[0]._timer, 0)
         widget.unparent()
 
-    def test_typing_indicator_stops_on_unrealize(self):
+    def test_typing_indicator_timer_follows_visibility(self):
+        """O timer só deve existir enquanto o indicador está visível.
+
+        Regressão: era criado no `__init__` e só removido no `unrealize`, então
+        todo indicador que nunca chegava a ser exibido deixava uma fonte
+        periódica viva para sempre.
+        """
         ind = TypingIndicator()
-        self.assertIsNotNone(ind._timer)
-        # O sinal "unrealize" só emite num widget realizado; testamos o handler direto.
-        ind._on_unrealize()
-        self.assertIsNone(ind._timer)
+        self.assertEqual(ind._timer, 0, "não deve haver timer antes do map")
+        ind._on_map()
+        self.assertNotEqual(ind._timer, 0, "o timer deve ligar no map")
+        ind._on_unmap()
+        self.assertEqual(ind._timer, 0, "o timer deve desligar no unmap")
+        # Idempotente: chamar de novo não pode remover fonte alheia.
+        ind._on_unmap()
+        self.assertEqual(ind._timer, 0)
 
 
 class CompareButtonTest(unittest.TestCase):

@@ -216,10 +216,35 @@ xvfb-run -a dbus-run-session -- bash -c '
 
 **A suíte também travava, por um segundo motivo.** `run_loop_until()` em `tests/test_ui_refactor.py` drenava o contexto com `while context.pending(): context.iteration(False)`. `pending()` responde "existe source registrado", não "existe algo despachável": uma conexão D-Bus ociosa mantém `pending()` verdadeiro para sempre, e `iteration(False)` não a consome — loop infinito. O `while` ganhou teto (`_drain_ready`). Com isso a suíte passou de "trava em 81%" para **completa em ~17 s**.
 
-Resultado atual: **824 passando, 1 falhando** (`test_submit_renders_assistant_response`). Verifiquei que essa falha **também ocorre no `main` limpo** — é dependência de ordem no harness de teste, não regressão desta mudança. `test_setup_shortcut` (que falhava por não mockar o terceiro slot de atalho) foi corrigido junto.
+**A última falha era inanição de prioridade no `GMainContext` — e era bug de produção.** `test_submit_renders_assistant_response` falhava no fim da suíte e passava isolado. Não era "sensibilidade do harness": era o `GMainContext` passando fome.
+
+O `GMainContext` só despacha uma fonte quando **não existe nenhuma de prioridade mais alta pronta**. `GLib.idle_add` roda em `G_PRIORITY_DEFAULT_IDLE` (**200**) — e é por ele que o app entrega a resposta da IA à interface (`prompt_bar` chama `GLib.idle_add(ctx._on_plan_ready, ...)` da thread de parse). Basta que sobre uma fonte periódica em `G_PRIORITY_DEFAULT` (**0**) ou o frame clock do GDK (**100**) para que **nenhum** idle rode nunca mais.
+
+Sonda que resolveu o mistério (idles de várias prioridades, despachando o contexto à mão):
+
+```
+HIGH(-100)      -> rodou
+DEFAULT(0)      -> rodou
+HIGH_IDLE(100)  -> rodou
+DEFAULT_IDLE(200) -> NÃO rodou   ← inclusive o _on_plan_ready do app
+```
+
+De onde vinham as fontes: a suíte constrói um `CopilotWindow` por teste e nunca os destruía, e dois timers periódicos vazavam por janela — o tick da barra de status (5 s) e a animação do indicador "digitando" (300 ms). Depois de algumas centenas de janelas acumuladas, sempre havia uma fonte pronta acima de 200 e o app parava de renderizar respostas **em produção também**, não só em teste:
+
+- `TypingIndicator` criava o timer no `__init__` e só o removia no `unrealize` — indicador nunca exibido, fonte viva para sempre.
+- `StatusBarWidget` só "se cancelava" devolvendo `SOURCE_REMOVE` na passada seguinte: a fonte sobrevivia ao fechamento por até um intervalo inteiro, e para sempre se a janela nunca fosse destruída (o `destroy` do GTK4 **não emite o sinal** para janela nunca apresentada).
+
+Correções:
+
+1. Os dois timers passaram a seguir a visibilidade: ligam no `map`, desligam no `unmap`, e usam `G_PRIORITY_LOW` (300) — abaixo do idle, portanto incapazes de passar fome.
+2. `tests/conftest.py` ganhou uma fixture `autouse` que destrói as janelas deixadas vivas por cada teste.
+
+Resultado atual: **828 passando, 0 falhando**. `test_setup_shortcut` (que falhava por não mockar o terceiro slot de atalho) foi corrigido junto.
 
 Outras notas:
 
+- **O job do Sway falhava por causa de uma file capability.** `nohup sway` devolvia `Operation not permitted` — e o detalhe é que o erro vinha do `execve`, antes de o sway rodar: o pacote do Arch entrega `/usr/bin/sway` com `cap_sys_nice=ep`, e o container não tem essa capability no bounding set. `setcap -r /usr/bin/sway` resolve. Reproduzido fora do CI, num `docker run archlinux:latest` comum.
+- **Não assuma `wayland-0`.** O wlroots numera o socket pelo primeiro número livre; em container limpo o sway subiu como `wayland-1`. O job agora descobre o socket por glob e exporta também `SWAYSOCK` (o marcador que o projeto usa para reconhecer o Sway).
 - Os 16 módulos de UI e 13 arquivos de teste agora chamam `require_gtk4()` em vez de espalhar `require_version` — se o requisito mudar, muda em um lugar.
 - `ZORIN_COPILOT_ALLOW_OLD_TOOLKIT=1` existe para desenvolvimento, não para produção.
 - Recomendo rodar a suíte no Arch real antes de mergear — é lá que a história de PyGObject/GTK rola primeiro.

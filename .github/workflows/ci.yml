@@ -148,8 +148,12 @@ jobs:
 
   # Compositor wlroots de verdade. O container Arch cobre "sem GNOME", mas não
   # cobre "com Wayland": é aqui que survivem os bugs de detect_environment, de
-  # seleção de backend e de captura. Roda com continue-on-error porque subir
-  # Sway headless em container é sensível à imagem — o job é sinal, não porteiro.
+  # seleção de backend e de captura.
+  #
+  # Segue com continue-on-error porque Arch é rolling release: um pacote novo de
+  # sway ou do wlroots pode tornar a subida headless instável de um dia para o
+  # outro sem que o projeto tenha culpa. O job é sinal, não porteiro — mas ele
+  # foi verificado funcionando (sway 1.12 headless, 75 testes de portabilidade).
   sway-arch:
     name: Sessão Sway real (Arch)
     runs-on: ubuntu-latest
@@ -165,6 +169,7 @@ jobs:
             gtk4 libadwaita \
             poppler git \
             sway seatd grim slurp wl-clipboard \
+            libcap \
             dbus
 
       - uses: actions/checkout@v4
@@ -177,6 +182,14 @@ jobs:
 
       - name: Sobe o Sway em modo headless
         run: |
+          # O pacote do Arch entrega /usr/bin/sway com a file capability
+          # cap_sys_nice=ep. Num container sem essa capability no bounding set
+          # o execve falha ANTES de o sway rodar:
+          #   nohup: failed to run command 'sway': Operation not permitted
+          # Remover a capability resolve — sway não precisa dela em CI.
+          getcap /usr/bin/sway || true
+          setcap -r /usr/bin/sway
+
           mkdir -p /tmp/xdg && chmod 700 /tmp/xdg
           seatd -u root &
           sleep 1
@@ -185,14 +198,22 @@ jobs:
           WLR_LIBINPUT_NODEVICES=1 \
           XDG_RUNTIME_DIR=/tmp/xdg \
           nohup sway --config /dev/null --debug > /tmp/swaylog/sway.log 2>&1 &
+
+          # Não assumir wayland-0: o wlroots numera o socket pelo primeiro
+          # número livre e já subiu como wayland-1 em container limpo.
+          SOCK=""
           for i in $(seq 1 30); do
-            [ -S /tmp/xdg/wayland-0 ] && break
+            SOCK=$(ls -d /tmp/xdg/wayland-* 2>/dev/null | grep -v '\.lock$' | head -1)
+            [ -n "$SOCK" ] && break
             sleep 1
           done
-          test -S /tmp/xdg/wayland-0 || { cat /tmp/swaylog/sway.log; exit 1; }
-          echo "WAYLAND_DISPLAY=wayland-0" >> "$GITHUB_ENV"
+          if [ -z "$SOCK" ]; then cat /tmp/swaylog/sway.log; exit 1; fi
+
+          echo "WAYLAND_DISPLAY=$(basename "$SOCK")" >> "$GITHUB_ENV"
           echo "XDG_RUNTIME_DIR=/tmp/xdg" >> "$GITHUB_ENV"
           echo "XDG_SESSION_TYPE=wayland" >> "$GITHUB_ENV"
+          # SWAYSOCK é o marcador que o projeto usa para reconhecer o Sway.
+          echo "SWAYSOCK=$(ls /tmp/xdg/sway-ipc.*.sock 2>/dev/null | head -1)" >> "$GITHUB_ENV"
 
       - name: Confere a detecção de ambiente num compositor real
         run: |
