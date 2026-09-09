@@ -5,13 +5,18 @@
 from __future__ import annotations
 
 import difflib
+import logging
+import os
 import re
+import shutil
 from typing import Any
 
 import gi
 
 gi.require_version("Gio", "2.0")
 from gi.repository import Gio
+
+logger = logging.getLogger(__name__)
 
 
 COMMON_ALIASES: dict[str, list[str]] = {
@@ -63,6 +68,47 @@ COMMON_ALIASES: dict[str, list[str]] = {
     "captura de tela": ["flameshot", "spectacle", "gnome-screenshot", "grim"],
     "monitor do sistema": ["btop", "htop", "gnome-system-monitor", "ksysguard", "mission-center"],
 }
+
+
+#: Terminais conhecidos. Serve como último recurso: se o usuário pediu um
+#: terminal específico que não está nesta máquina (o modelo mandou "kitty",
+#: "konsole"...), abrimos *qualquer* terminal do ambiente em vez de responder
+#: "não encontrado" e travar o resto do plano.
+TERMINAL_BINS: frozenset[str] = frozenset(COMMON_ALIASES["terminal"])
+
+#: Formas de pedir "um terminal, qualquer um". Inclui o próprio "terminal"
+#: (que é a *chave* em COMMON_ALIASES, não um valor) porque o modelo às vezes
+#: manda o termo genérico e queremos cair no fallback mesmo assim.
+TERMINAL_REQUEST_WORDS: frozenset[str] = frozenset(
+    TERMINAL_BINS | {"terminal", "emulador de terminal", "console", "shell"}
+)
+
+
+def is_terminal_request(query: str) -> bool:
+    """O pedido é por um terminal (não importa qual)?"""
+    return (query or "").strip().lower() in TERMINAL_REQUEST_WORDS
+
+
+#: Binários que existem no $PATH mas nunca são "aplicativo". O índice do Gio
+#: nos protegia disso naturalmente — ele só enxerga .desktop, e ninguém
+#: empacota `shutdown.desktop`. Ao abrir o fallback pelo $PATH, a proteção
+#: precisa ser explícita: sem ela, um "abrir o shutdown" dito por voz (ou
+#: alucinado pelo modelo) chegaria ao Popen.
+NEVER_LAUNCH_BINS: frozenset[str] = frozenset({
+    # energia / init
+    "shutdown", "reboot", "halt", "poweroff", "init", "systemctl",
+    # destrutivos
+    "rm", "dd", "mkfs", "mkfs.ext4", "mkfs.vfat", "fdisk", "parted",
+    "wipefs", "shred", "format",
+    # contas e privilégio
+    "chown", "chmod", "chgrp", "passwd", "useradd", "userdel", "usermod",
+    "su", "sudo", "doas", "pkexec",
+    # processos
+    "kill", "killall", "pkill",
+    # gerenciadores de pacote — instalar é `run_command` (com portão de risco),
+    # não `launch_app`; abrir "o pacman" como app não faz sentido.
+    "pacman", "apt", "apt-get", "dpkg", "yay", "paru", "dnf", "zypper",
+})
 
 
 #: Em cada ambiente alguns aliases devem ser tentados antes dos outros — a lista
@@ -223,6 +269,46 @@ class AppManager:
             return top_app, top_app.get_name()
 
         return None, ""
+
+    @staticmethod
+    def find_binary(query: str) -> str:
+        """Resolve `query` direto no $PATH. Devolve '' quando não existe.
+
+        Por que isso existe: o índice do Gio só conhece apps que tenham
+        .desktop válido **e** `should_show()` verdadeiro. Num ambiente
+        minimalista (Hyprland/Sway/Niri) isso deixa de fora boa parte do que
+        o usuário instalou — kitty, foot e wezterm entram por pacote e, sem
+        entrada de menu indexada, o Gio simplesmente não os vê. O $PATH não
+        tem essa opinião: se o binário está lá, o app existe.
+
+        Só aceitamos um nome simples. Caminho, espaços ou flags vindos do
+        modelo são rejeitados — não executamos argumento arbitrário. Nomes em
+        `NEVER_LAUNCH_BINS` também: existem no $PATH, mas não são aplicativo.
+        """
+        name = (query or "").strip()
+        if not name or "/" in name or " " in name or "\t" in name or name.startswith("-"):
+            return ""
+        if name.lower() in NEVER_LAUNCH_BINS:
+            logger.warning("find_binary: '%s' está na lista de nunca-lançar; ignorado.", name)
+            return ""
+        try:
+            return shutil.which(name) or ""
+        except Exception:
+            return ""
+
+    @classmethod
+    def find_terminal_in_path(cls) -> str:
+        """Primeiro terminal disponível no $PATH, com os nativos do ambiente na frente."""
+        for alias in ordered_aliases("terminal", cls._current_desktop()):
+            found = cls.find_binary(alias)
+            if found:
+                return found
+        return ""
+
+    @staticmethod
+    def is_executable(path: str) -> bool:
+        """`path` existe e é executável? (usado antes de dar Popen num binário do $PATH)"""
+        return bool(path) and os.path.isfile(path) and os.access(path, os.X_OK)
 
     @classmethod
     def launch(cls, app: Gio.AppInfo) -> tuple[bool, str]:

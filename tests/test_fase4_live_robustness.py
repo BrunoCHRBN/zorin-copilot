@@ -14,11 +14,13 @@ import os
 import sys
 import time
 import unittest
+from unittest import mock
 
 sys.path.insert(
     0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
 )
 
+from zorin_copilot.ai import live as live_module  # noqa: E402
 from zorin_copilot.ai.live import GeminiLiveClient  # noqa: E402
 from zorin_copilot.shell.risk import RiskPolicy  # noqa: E402
 
@@ -146,6 +148,142 @@ class WaitForAppFocusTest(unittest.TestCase):
         self.assertFalse(c._wait_for_app_focus("kitty", timeout=0.1))
         # Fallback conservador: dá tempo da janela aparecer.
         self.assertGreaterEqual(time.monotonic() - started, 1.0)
+
+
+class LaunchAppFallbackTest(unittest.TestCase):
+    """`launch_app` não pode depender só do índice do Gio.
+
+    Em Hyprland/Sway o kitty/foot instalado por pacote costuma não ter
+    .desktop indexado (ou tem `should_show()` falso), e o modelo manda o nome
+    do binário ("kitty") — não o apelido ("terminal"). Sem fallback, o plano
+    morre em "não encontrado" mesmo com o app instalado.
+    """
+
+    def _client(self, focused: bool = True):
+        """Cliente que não precisa de inspetor: o foco é forjado."""
+        c = _bare_client()
+        c.inspector = None
+        c._wait_for_app_focus = lambda *_a, **_k: focused
+        return c
+
+    def _patch_gio_miss(self):
+        """find_app devolve (None, "") — o app está fora do índice do Gio."""
+        return mock.patch.object(live_module.AppManager, "find_app", return_value=(None, ""))
+
+    def test_abre_pelo_path_quando_gio_nao_indexa(self):
+        c = self._client(focused=True)
+        with self._patch_gio_miss(), \
+             mock.patch.object(live_module.AppManager, "find_binary", return_value="/usr/bin/kitty"), \
+             mock.patch.object(live_module.AppManager, "is_executable", return_value=True), \
+             mock.patch.object(live_module.subprocess, "Popen") as popen:
+            out = c._dispatch_tool("launch_app", {"app_name": "kitty"})
+
+        self.assertTrue(out["success"])
+        self.assertIn("kitty", out["message"])
+        popen.assert_called_once()
+        self.assertEqual(popen.call_args[0][0], ["/usr/bin/kitty"])
+
+    def test_path_fallback_respeita_foco_nao_confirmado(self):
+        # Sem foco confirmado ainda é sucesso, mas avisa para esperar.
+        c = self._client(focused=False)
+        with self._patch_gio_miss(), \
+             mock.patch.object(live_module.AppManager, "find_binary", return_value="/usr/bin/foot"), \
+             mock.patch.object(live_module.AppManager, "is_executable", return_value=True), \
+             mock.patch.object(live_module.subprocess, "Popen"):
+            out = c._dispatch_tool("launch_app", {"app_name": "foot"})
+
+        self.assertTrue(out["success"])
+        self.assertIn("não confirmamos o foco", out["message"])
+
+    def test_nao_abre_pelo_path_um_caminho_absoluto(self):
+        # `find_binary` recusa caminho; se mesmo assim viesse, não executamos.
+        c = self._client()
+        with self._patch_gio_miss(), \
+             mock.patch.object(live_module.AppManager, "find_binary", return_value="/usr/bin/kitty"), \
+             mock.patch.object(live_module.AppManager, "is_executable", return_value=False), \
+             mock.patch.object(live_module.AppManager, "find_terminal_in_path", return_value=""), \
+             mock.patch.object(live_module.subprocess, "Popen") as popen:
+            out = c._dispatch_tool("launch_app", {"app_name": "/usr/bin/kitty"})
+
+        self.assertFalse(out["success"])
+        popen.assert_not_called()
+
+    def test_terminal_pedido_e_substituido_pelo_terminal_do_ambiente(self):
+        # Pediu konsole, só tem foot: abre o foot em vez de travar o plano.
+        c = self._client(focused=True)
+        with self._patch_gio_miss(), \
+             mock.patch.object(live_module.AppManager, "find_binary", return_value=""), \
+             mock.patch.object(live_module.AppManager, "find_terminal_in_path", return_value="/usr/bin/foot"), \
+             mock.patch.object(live_module.subprocess, "Popen") as popen:
+            out = c._dispatch_tool("launch_app", {"app_name": "konsole"})
+
+        self.assertTrue(out["success"])
+        self.assertEqual(popen.call_args[0][0], ["/usr/bin/foot"])
+
+    def test_gio_tem_preferencia_sobre_path(self):
+        # Com .desktop válido, o caminho Gio continua sendo o escolhido.
+        fake_app = mock.Mock()
+        fake_app.get_name.return_value = "Kitty"
+        c = self._client()
+        with mock.patch.object(live_module.AppManager, "find_app", return_value=(fake_app, "Kitty")), \
+             mock.patch.object(live_module.AppManager, "launch", return_value=(True, "ok")), \
+             mock.patch.object(live_module.AppManager, "find_binary", return_value="/usr/bin/kitty"), \
+             mock.patch.object(live_module.subprocess, "Popen") as popen:
+            out = c._dispatch_tool("launch_app", {"app_name": "kitty"})
+
+        self.assertTrue(out["success"])
+        popen.assert_not_called()
+
+    def test_falha_de_launch_do_gio_nao_cai_no_path(self):
+        # Se o Gio achou e falhou ao lançar, o erro real tem que aparecer.
+        fake_app = mock.Mock()
+        fake_app.get_name.return_value = "Kitty"
+        c = self._client()
+        with mock.patch.object(live_module.AppManager, "find_app", return_value=(fake_app, "Kitty")), \
+             mock.patch.object(live_module.AppManager, "launch", return_value=(False, "Falha ao iniciar 'Kitty': boom")), \
+             mock.patch.object(live_module.subprocess, "Popen") as popen:
+            out = c._dispatch_tool("launch_app", {"app_name": "kitty"})
+
+        self.assertFalse(out["success"])
+        self.assertIn("boom", out["message"])
+        popen.assert_not_called()
+
+
+class AppNotFoundMessageTest(unittest.TestCase):
+    """A mensagem de "não encontrado" tem que dar saída ao modelo."""
+
+    def _fake_app(self, name: str):
+        app = mock.Mock()
+        app.get_name.return_value = name
+        app.get_id.return_value = f"{name.lower()}.desktop"
+        return app
+
+    def test_inclui_sugestoes_quando_existem(self):
+        c = _bare_client()
+        apps = [self._fake_app("Foot"), self._fake_app("Alacritty")]
+        with mock.patch.object(live_module.AppManager, "suggest_apps", return_value=apps):
+            out = c._app_not_found("kodfdy")
+
+        self.assertFalse(out["success"])
+        self.assertIn("não encontrado", out["message"])
+        self.assertIn("Foot", out["message"])
+        self.assertIn("Alacritty", out["message"])
+
+    def test_sem_sugestoes_mensagem_fica_limpa(self):
+        c = _bare_client()
+        with mock.patch.object(live_module.AppManager, "suggest_apps", return_value=[]):
+            out = c._app_not_found("kodfdy")
+
+        self.assertEqual(out["message"], "Aplicativo 'kodfdy' não encontrado no sistema.")
+
+    def test_sugestao_que_explode_nao_derruba_despacho(self):
+        # Sugestão é cortesia: falhar nela não pode virar erro de ferramenta.
+        c = _bare_client()
+        with mock.patch.object(live_module.AppManager, "suggest_apps", side_effect=RuntimeError("gio caiu")):
+            out = c._app_not_found("kodfdy")
+
+        self.assertFalse(out["success"])
+        self.assertIn("não encontrado", out["message"])
 
 
 class PendingTtlTest(unittest.TestCase):

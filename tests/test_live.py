@@ -84,6 +84,9 @@ class LiveVoiceClientTest(unittest.TestCase):
     def test_dispatch_tool_launch_app_not_found(self, mock_apps):
         """Testa o lançamento de aplicativo não encontrado."""
         mock_apps.find_app.return_value = (None, "")
+        # Nem no $PATH nem via terminal do ambiente: tem que falhar de verdade.
+        mock_apps.find_binary.return_value = ""
+        mock_apps.find_terminal_in_path.return_value = ""
 
         res = self.client._dispatch_tool("launch_app", {"app_name": "app_inexistente_xyz"})
         self.assertFalse(res["success"])

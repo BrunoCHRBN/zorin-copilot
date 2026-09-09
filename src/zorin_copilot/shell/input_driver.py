@@ -31,6 +31,30 @@ INSTALL_HINT = (
     "'sudo pacman -S ydotool' (Arch) / 'sudo apt install ydotool' (Ubuntu), com o daemon ydotool ativo."
 )
 
+#: Diretórios conferidos quando o $PATH não resolve. Necessário porque o
+#: copilot pode rodar sob um serviço systemd com PATH mínimo
+#: (/usr/bin:/bin), enquanto o wtype/ydotool foi instalado em /usr/local/bin.
+_EXTRA_BIN_DIRS: tuple[str, ...] = (
+    "/usr/bin", "/usr/local/bin", "/bin", "/usr/local/sbin", "/usr/sbin", "/sbin",
+)
+
+
+def _find_binary(name: str) -> str | None:
+    """Localiza `name`: override por env, depois $PATH, depois diretórios padrão."""
+    override = os.environ.get(f"ZORIN_COPILOT_{name.upper()}_BIN", "").strip()
+    if override and os.path.isfile(override) and os.access(override, os.X_OK):
+        return override
+
+    found = shutil.which(name)
+    if found:
+        return found
+
+    for directory in _EXTRA_BIN_DIRS:
+        candidate = os.path.join(directory, name)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
 
 class VirtualInputDriver:
     """Emite cliques, digitação e atalhos de hardware virtual respeitando cercas espaciais.
@@ -44,14 +68,25 @@ class VirtualInputDriver:
 
     def __init__(self, fence: ScreenFenceManager | None = None, simulation: bool | None = None):
         self.fence = fence or ScreenFenceManager()
-        wtype = shutil.which("wtype")
-        self.wtype_bin = wtype if wtype and "wtype" in os.path.basename(wtype) else None
-        ydotool = shutil.which("ydotool")
-        self.ydotool_bin = ydotool if ydotool and "ydotool" in os.path.basename(ydotool) else None
         # Presença de /dev/uinput gravável é só diagnóstico: não existe emissão
         # direta implementada, então não pode contar como backend disponível.
         self._has_uinput_access = os.access("/dev/uinput", os.W_OK) if os.path.exists("/dev/uinput") else False
         self.simulation = self._resolve_simulation(simulation)
+        self.refresh_backends()
+
+    def refresh_backends(self) -> bool:
+        """(Re)detecta wtype/ydotool. Devolve True se algum backend apareceu.
+
+        A detecção não pode acontecer só no `__init__`: é comum o usuário
+        instalar o wtype *depois* de abrir o copilot (ele descobre que precisa
+        justamente pelo erro). Preso ao probe inicial, o driver continuaria
+        jurando que "nenhum backend existe" até o app ser reiniciado.
+        """
+        wtype = _find_binary("wtype")
+        self.wtype_bin = wtype if wtype and "wtype" in os.path.basename(wtype) else None
+        ydotool = _find_binary("ydotool")
+        self.ydotool_bin = ydotool if ydotool and "ydotool" in os.path.basename(ydotool) else None
+        return self.is_available
 
     @staticmethod
     def _resolve_simulation(override: bool | None) -> bool:
@@ -76,6 +111,15 @@ class VirtualInputDriver:
         if self.simulation:
             return "SIMULAÇÃO (nenhuma ação é executada)"
         return "indisponível (wtype ou ydotool não encontrado)"
+
+    def _ensure_backend(self) -> None:
+        """Re-procura os binários quando nenhum foi encontrado até agora.
+
+        Chamado no início de cada ação: custa um `which` e cobre o caso de o
+        backend ter sido instalado depois de o driver nascer.
+        """
+        if not self.is_available:
+            self.refresh_backends()
 
     def _unavailable(self, action: str) -> tuple[bool, str]:
         """Falha padronizada quando não há backend. Respeita o modo simulação."""
@@ -103,6 +147,8 @@ class VirtualInputDriver:
 
         if self.fence.is_emergency_stopped:
             return False, "Operação cancelada: Parada de emergência (Kill Switch) está ativa."
+
+        self._ensure_backend()
 
         # 2. Execução via backend disponível
         btn_code = "0xC0" if button.lower() in ("left", "esquerdo") else "0xC1"
@@ -174,6 +220,8 @@ class VirtualInputDriver:
         if self.fence.is_emergency_stopped:
             return False, "Operação cancelada: Parada de emergência (Kill Switch) está ativa."
 
+        self._ensure_backend()
+
         try:
             if self.wtype_bin:
                 cmd = [self.wtype_bin, "--", text]
@@ -240,6 +288,8 @@ class VirtualInputDriver:
             return False, "Operação cancelada: Parada de emergência (Kill Switch) está ativa."
 
         keys_str = "+".join(keys)
+
+        self._ensure_backend()
 
         try:
             if self.wtype_bin:

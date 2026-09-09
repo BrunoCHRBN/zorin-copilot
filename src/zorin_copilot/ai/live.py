@@ -26,7 +26,7 @@ except ImportError:
     websockets = None
 
 from ..core.a11y import DesktopInspector
-from ..core.apps import AppManager
+from ..core.apps import AppManager, is_terminal_request
 from ..core.a11y import DesktopInspector
 from ..core.browser import BrowserManager
 from ..core.calendar import CalendarManager
@@ -1270,6 +1270,56 @@ class GeminiLiveClient:
             time.sleep(0.15)
         return False
 
+    def _launch_binary(self, bin_path: str, friendly_name: str) -> dict[str, Any]:
+        """Inicia um binário do $PATH que o Gio não indexou (sem .desktop).
+
+        Mesma espera por foco do caminho Gio: sem ela o `keyboard_type` que
+        vem na sequência escreve na janela errada.
+        """
+        try:
+            subprocess.Popen(
+                [bin_path],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception as exc:
+            return {"success": False, "message": f"Falha ao iniciar '{friendly_name}': {exc}"}
+
+        if self._wait_for_app_focus(friendly_name):
+            return {
+                "success": True,
+                "message": f"Aplicativo '{friendly_name}' aberto e com foco. Pode digitar.",
+            }
+        return {
+            "success": True,
+            "message": (
+                f"Aplicativo '{friendly_name}' iniciado, mas não confirmamos o foco da janela. "
+                "Aguarde um instante antes de digitar."
+            ),
+        }
+
+    def _app_not_found(self, app_name: str) -> dict[str, Any]:
+        """Mensagem de falha de `launch_app` — com sugestões quando existirem.
+
+        Devolver só "não encontrado" deixa o modelo sem saída: ele não sabe o
+        que *existe* nesta máquina e encerra o plano. Com sugestões, ele
+        retrata sozinho ("abrir o foot?").
+        """
+        hint = ""
+        try:
+            names = [
+                (app.get_name() or app.get_id() or "").strip()
+                for app in AppManager.suggest_apps(app_name, limit=3)
+            ]
+            names = [n for n in names if n]
+            if names:
+                hint = " Você quis dizer: " + ", ".join(f"'{n}'" for n in names) + "?"
+        except Exception:  # sugestão é cortesia, nunca deve derrubar o despacho
+            hint = ""
+        return {"success": False, "message": f"Aplicativo '{app_name}' não encontrado no sistema.{hint}"}
+
     def _dispatch_tool(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         """Despacha a execução concreta para os subsistemas do Zorin Copilot."""
         # Portão de risco: ações perigosas não executam imediatamente — exigem
@@ -1303,7 +1353,25 @@ class GeminiLiveClient:
                             "Aguarde um instante antes de digitar."
                         ),
                     }
-                return {"success": False, "message": f"Aplicativo '{app_name}' não encontrado no sistema."}
+
+                # Fallback 1: $PATH. O Gio só indexa apps com .desktop válido e
+                # should_show() verdadeiro — em Hyprland/Sway isso esconde o
+                # kitty/foot/wezterm instalados por pacote. Se o binário existe,
+                # o app existe: abrimos direto.
+                bin_path = AppManager.find_binary(app_name)
+                if bin_path and AppManager.is_executable(bin_path):
+                    logger.info("launch_app: '%s' fora do índice do Gio, abrindo do $PATH (%s).", app_name, bin_path)
+                    return self._launch_binary(bin_path, app_name)
+
+                # Fallback 2: o modelo pediu um terminal específico que não está
+                # aqui. Em vez de travar o plano, abre o terminal do ambiente.
+                if is_terminal_request(app_name):
+                    term = AppManager.find_terminal_in_path()
+                    if term:
+                        logger.info("launch_app: '%s' ausente, usando o terminal '%s'.", app_name, term)
+                        return self._launch_binary(term, os.path.basename(term))
+
+                return self._app_not_found(app_name)
 
             elif name == "system_control":
                 action = args.get("action", "")

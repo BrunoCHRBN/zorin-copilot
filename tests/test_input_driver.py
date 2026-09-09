@@ -15,6 +15,7 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
 from zorin_copilot.core.fence import ScreenFenceManager  # noqa: E402
+from zorin_copilot.shell import input_driver as driver_module  # noqa: E402
 from zorin_copilot.shell.input_driver import (  # noqa: E402
     SIMULATION_ENV_VAR,
     VirtualInputDriver,
@@ -22,15 +23,27 @@ from zorin_copilot.shell.input_driver import (  # noqa: E402
 
 
 def _sem_backend(**kw):
-    """Driver sem ydotool no PATH (o cenário real de uma instalação nova)."""
-    with mock.patch("shutil.which", return_value=None):
-        return VirtualInputDriver(**kw)
+    """Driver sem backend nenhum (o cenário real de uma instalação nova).
+
+    O patch é em `_find_binary`, não em `shutil.which`: o driver também
+    procura nos diretórios padrão, então na máquina que *tem* o wtype
+    instalado patchar só o `which` não produziria um driver sem backend.
+    """
+    with mock.patch.object(driver_module, "_find_binary", return_value=None):
+        driver = VirtualInputDriver(**kw)
+    # A redescoberta tardia existe para o caso "instalei o wtype depois" —
+    # aqui ela atrapalharia: estes testes querem "sem backend", e nesta
+    # máquina o wtype existe de verdade. Congelamos o estado pós-construção.
+    driver.refresh_backends = lambda: False
+    return driver
 
 
 def _com_backend(**kw):
     """Driver com ydotool presente, mas sem executar subprocesso de verdade."""
-    with mock.patch("shutil.which", return_value="/usr/bin/ydotool"):
-        return VirtualInputDriver(**kw)
+    with mock.patch.object(driver_module, "_find_binary", return_value="/usr/bin/ydotool"):
+        driver = VirtualInputDriver(**kw)
+    driver.refresh_backends = lambda: True
+    return driver
 
 
 class SemBackendFalhaTest(unittest.TestCase):
@@ -298,6 +311,65 @@ class ErrosDoBackendPropagamTest(unittest.TestCase):
         self.assertFalse(ok, "Enter falhou: a operação como um todo tem que falhar")
         self.assertIn("Enter", msg)
         self.assertIn("kicked", msg)
+
+
+class RedescobertaDeBackendTest(unittest.TestCase):
+    """O backend pode aparecer *depois* de o driver nascer.
+
+    Caso real: o usuário só descobre que precisa do wtype quando vê o erro de
+    digitação, instala na hora e não reinicia o copilot. Preso ao probe do
+    `__init__`, o driver continuaria jurando que "nenhum backend existe" para
+    sempre — e o usuário Não consegue distinguir isso de "instalei errado".
+    """
+
+    def _driver_sem_nada(self):
+        d = VirtualInputDriver.__new__(VirtualInputDriver)
+        d.fence = ScreenFenceManager()
+        d.wtype_bin = None
+        d.ydotool_bin = None
+        d.simulation = False
+        return d
+
+    def test_refresh_encontra_binario_novo(self):
+        d = self._driver_sem_nada()
+        self.assertFalse(d.is_available)
+
+        with mock.patch.object(driver_module, "_find_binary", return_value="/usr/bin/wtype"):
+            self.assertTrue(d.refresh_backends())
+
+        self.assertEqual(d.wtype_bin, "/usr/bin/wtype")
+        self.assertEqual(d.get_backend_name(), "wtype (Wayland virtual keyboard)")
+
+    def test_type_text_reprocura_antes_de_desistir(self):
+        d = self._driver_sem_nada()
+        ok_proc = mock.Mock(returncode=0, stderr="", stdout="")
+
+        with mock.patch.object(driver_module, "_find_binary", return_value="/usr/bin/wtype"), \
+             mock.patch("subprocess.run", return_value=ok_proc):
+            ok, msg = d.type_text("ls -la")
+
+        self.assertTrue(ok, "backend instalado depois tem que ser aproveitado")
+        self.assertIn("6 caracteres", msg)  # "ls -la"
+
+    def test_nao_reprocura_quando_backend_ja_existe(self):
+        # Já tem backend: não custa um `which` a cada tecla digitada.
+        d = self._driver_sem_nada()
+        d.wtype_bin = "/usr/bin/wtype"
+        with mock.patch.object(driver_module, "_find_binary", side_effect=AssertionError("não deveria reprocurar")):
+            d._ensure_backend()
+
+    def test_override_por_env_var_ganha_do_path(self):
+        with mock.patch.dict(os.environ, {"ZORIN_COPILOT_WTYPE_BIN": "/bin/sh"}):
+            self.assertEqual(driver_module._find_binary("wtype"), "/bin/sh")
+
+    def test_procura_diretorios_padrao_quando_path_restrito(self):
+        # Serviço systemd com PATH=/usr/bin:/bin, binário em /usr/local/bin.
+        with mock.patch.dict(os.environ, {"PATH": "/nonexistent"}, clear=False), \
+             mock.patch("shutil.which", return_value=None), \
+             mock.patch.object(driver_module, "_EXTRA_BIN_DIRS", ("/bin",)), \
+             mock.patch("os.path.isfile", return_value=True), \
+             mock.patch("os.access", return_value=True):
+            self.assertEqual(driver_module._find_binary("wtype"), "/bin/wtype")
 
 
 if __name__ == "__main__":
