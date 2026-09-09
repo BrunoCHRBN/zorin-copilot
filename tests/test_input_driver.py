@@ -313,6 +313,49 @@ class ErrosDoBackendPropagamTest(unittest.TestCase):
         self.assertIn("kicked", msg)
 
 
+class ExplicacaoDeFalhaTest(unittest.TestCase):
+    """O stderr cru do wtype não diz ao usuário o que fazer.
+
+    "Wayland connection failed" parece "instalei errado", mas quase sempre é o
+    copilot rodando fora da sessão gráfica (serviço systemd, outro tty), onde
+    WAYLAND_DISPLAY não existe. A mensagem precisa apontar a causa.
+    """
+
+    def _falha(self, stderr: str):
+        d = VirtualInputDriver.__new__(VirtualInputDriver)
+        d.fence = ScreenFenceManager()
+        d.wtype_bin = "/usr/bin/wtype"
+        d.ydotool_bin = None
+        d.simulation = False
+        proc = mock.Mock(returncode=1, stderr=stderr, stdout="")
+        with mock.patch("subprocess.run", return_value=proc):
+            return d.type_text("ls")
+
+    def test_erro_de_wayland_explica_a_sessao(self):
+        ok, msg = self._falha("error: XDG_RUNTIME_DIR is invalid or not set\nWayland connection failed")
+        self.assertFalse(ok)
+        self.assertIn("Wayland connection failed", msg)
+        self.assertIn("WAYLAND_DISPLAY", msg)
+        self.assertIn("systemd", msg)
+
+    def test_permissao_aponta_dev_uinput(self):
+        ok, msg = self._falha("failed to open /dev/uinput: Permission denied")
+        self.assertFalse(ok)
+        self.assertIn("/dev/uinput", msg)
+        self.assertIn("input", msg)
+
+    def test_erro_sem_causa_conhecida_fica_sem_palpite(self):
+        # Sem diagnóstico confiável, não inventamos explicação.
+        ok, msg = self._falha("alguma coisa muito específica")
+        self.assertFalse(ok)
+        self.assertIn("alguma coisa muito específica", msg)
+        self.assertNotIn("WAYLAND_DISPLAY", msg)
+
+    def test_explicacao_vazia_quando_nao_casa_nada(self):
+        self.assertEqual(driver_module._explain_failure(""), "")
+        self.assertEqual(driver_module._explain_failure("ok"), "")
+
+
 class RedescobertaDeBackendTest(unittest.TestCase):
     """O backend pode aparecer *depois* de o driver nascer.
 

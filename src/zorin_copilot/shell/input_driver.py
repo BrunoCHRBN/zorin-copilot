@@ -39,6 +39,37 @@ _EXTRA_BIN_DIRS: tuple[str, ...] = (
 )
 
 
+def _explain_failure(stderr: str) -> str:
+    """Tradução do erro do backend em causa provável.
+
+    O stderr cru do wtype ("Wayland connection failed") não diz ao usuário
+    *o que fazer*. Na prática esse erro quase nunca é "instalei errado": é o
+    copilot rodando fora da sessão gráfica (serviço systemd, terminal de um
+    outro tty), onde WAYLAND_DISPLAY/XDG_RUNTIME_DIR não existem.
+    """
+    low = (stderr or "").lower()
+    if "wayland connection failed" in low or "xdg_runtime_dir" in low or "display" in low and "wayland" in low:
+        return (
+            " O backend não alcançou o compositor: o copilot precisa rodar dentro da sessão "
+            "Wayland (WAYLAND_DISPLAY e XDG_RUNTIME_DIR definidos). Se ele sobe por um serviço "
+            "systemd, é exatamente isso que costuma faltar."
+        )
+    if "ydotoold" in low or "socket" in low or "connection refused" in low:
+        return " O daemon do ydotool não está de pé: inicie 'ydotoold' (ou o serviço systemd) e repita."
+    if "permission denied" in low or "/dev/uinput" in low:
+        return (
+            " Sem permissão no dispositivo de entrada: entre no grupo 'input' "
+            "e garanta acesso a /dev/uinput."
+        )
+    return ""
+
+
+def _backend_error(tool: str, action: str, returncode: int, stderr: str) -> str:
+    """Monta a mensagem de falha do backend com o stderr e a causa provável."""
+    detail = f": {stderr.strip()}" if (stderr or "").strip() else ""
+    return f"{tool} falhou ao {action} (código {returncode}{detail})." + _explain_failure(stderr)
+
+
 def _find_binary(name: str) -> str | None:
     """Localiza `name`: override por env, depois $PATH, depois diretórios padrão."""
     override = os.environ.get(f"ZORIN_COPILOT_{name.upper()}_BIN", "").strip()
@@ -163,8 +194,7 @@ class VirtualInputDriver:
                     capture_output=True, text=True, timeout=1.5, check=False,
                 )
                 if mv.returncode != 0:
-                    err = (mv.stderr or mv.stdout or "").strip()
-                    msg = f"ydotool mousemove falhou (código {mv.returncode}" + (f": {err}" if err else "") + ")."
+                    msg = _backend_error("ydotool", "mover o mouse", mv.returncode, mv.stderr or mv.stdout or "")
                     logger.error(msg)
                     return False, msg
                 time.sleep(0.04)
@@ -174,8 +204,7 @@ class VirtualInputDriver:
                     capture_output=True, text=True, timeout=1.5, check=False,
                 )
                 if ck.returncode != 0:
-                    err = (ck.stderr or ck.stdout or "").strip()
-                    msg = f"ydotool click falhou (código {ck.returncode}" + (f": {err}" if err else "") + ")."
+                    msg = _backend_error("ydotool", "clicar", ck.returncode, ck.stderr or ck.stdout or "")
                     logger.error(msg)
                     return False, msg
                 if double:
@@ -185,8 +214,7 @@ class VirtualInputDriver:
                         capture_output=True, text=True, timeout=1.5, check=False,
                     )
                     if ck2.returncode != 0:
-                        err = (ck2.stderr or ck2.stdout or "").strip()
-                        msg = f"ydotool click (2º) falhou (código {ck2.returncode}" + (f": {err}" if err else "") + ")."
+                        msg = _backend_error("ydotool", "clicar (2º)", ck2.returncode, ck2.stderr or ck2.stdout or "")
                         logger.error(msg)
                         return False, msg
                 msg = f"Clique físico ({button}) executado em ({x}, {y}) via ydotool."
@@ -227,8 +255,7 @@ class VirtualInputDriver:
                 cmd = [self.wtype_bin, "--", text]
                 res = subprocess.run(cmd, capture_output=True, text=True, timeout=5.0, check=False)
                 if res.returncode != 0:
-                    err = (res.stderr or res.stdout or "").strip()
-                    msg = f"wtype falhou ao digitar (código {res.returncode}" + (f": {err}" if err else "") + ")."
+                    msg = _backend_error("wtype", "digitar", res.returncode, res.stderr or res.stdout or "")
                     logger.error(msg)
                     return False, msg
 
@@ -239,8 +266,7 @@ class VirtualInputDriver:
                         capture_output=True, text=True, timeout=1.0, check=False,
                     )
                     if res_k.returncode != 0:
-                        err = (res_k.stderr or res_k.stdout or "").strip()
-                        msg = f"wtype falhou ao pressionar Enter (código {res_k.returncode}" + (f": {err}" if err else "") + ")."
+                        msg = _backend_error("wtype", "pressionar Enter", res_k.returncode, res_k.stderr or res_k.stdout or "")
                         logger.error(msg)
                         return False, msg
 
@@ -252,8 +278,7 @@ class VirtualInputDriver:
                 cmd = [self.ydotool_bin, "type", "--", text]
                 res = subprocess.run(cmd, capture_output=True, text=True, timeout=5.0, check=False)
                 if res.returncode != 0:
-                    err = (res.stderr or res.stdout or "").strip()
-                    msg = f"ydotool type falhou (código {res.returncode}" + (f": {err}" if err else "") + ")."
+                    msg = _backend_error("ydotool", "digitar", res.returncode, res.stderr or res.stdout or "")
                     logger.error(msg)
                     return False, msg
 
@@ -265,8 +290,7 @@ class VirtualInputDriver:
                         capture_output=True, text=True, timeout=1.0, check=False,
                     )
                     if res_k.returncode != 0:
-                        err = (res_k.stderr or res_k.stdout or "").strip()
-                        msg = f"ydotool key(Enter) falhou (código {res_k.returncode}" + (f": {err}" if err else "") + ")."
+                        msg = _backend_error("ydotool", "pressionar Enter", res_k.returncode, res_k.stderr or res_k.stdout or "")
                         logger.error(msg)
                         return False, msg
 
@@ -315,8 +339,7 @@ class VirtualInputDriver:
                     full_args = [self.wtype_bin] + mods_down + main_keys + mods_up
                     res = subprocess.run(full_args, capture_output=True, text=True, timeout=2.0, check=False)
                     if res.returncode != 0:
-                        err = (res.stderr or res.stdout or "").strip()
-                        msg = f"wtype falhou no atalho '{keys_str}' (código {res.returncode}" + (f": {err}" if err else "") + ")."
+                        msg = _backend_error("wtype", f"acionar o atalho '{keys_str}'", res.returncode, res.stderr or res.stdout or "")
                         logger.error(msg)
                         return False, msg
                     return True, f"Atalho '{keys_str}' acionado com sucesso via wtype."
@@ -361,8 +384,7 @@ class VirtualInputDriver:
                     full_args = [self.ydotool_bin, "key"] + down_seq + up_seq
                     res = subprocess.run(full_args, capture_output=True, text=True, timeout=2.0, check=False)
                     if res.returncode != 0:
-                        err = (res.stderr or res.stdout or "").strip()
-                        msg = f"ydotool falhou no atalho '{keys_str}' (código {res.returncode}" + (f": {err}" if err else "") + ")."
+                        msg = _backend_error("ydotool", f"acionar o atalho '{keys_str}'", res.returncode, res.stderr or res.stdout or "")
                         logger.error(msg)
                         return False, msg
                     return True, f"Atalho '{keys_str}' acionado com sucesso."
