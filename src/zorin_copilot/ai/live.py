@@ -806,7 +806,7 @@ class GeminiLiveClient:
         """Inicia processo de reprodução PipeWire para PCM 24kHz 16-bit mono."""
         self._stop_player()
         if shutil.which("pw-play"):
-            cmd = ["pw-play", "--rate", "24000", "--channels", "1", "--format", "s16", "-"]
+            cmd = ["pw-play", "--raw", "--rate", "24000", "--channels", "1", "--format", "s16", "-"]
         elif shutil.which("aplay"):
             cmd = ["aplay", "-r", "24000", "-f", "S16_LE", "-c", "1", "-"]
         else:
@@ -970,7 +970,7 @@ class GeminiLiveClient:
     async def _mic_recorder_loop(self, ws: Any) -> None:
         """Lê áudio em tempo real do microfone via pw-record e transmite para o Gemini."""
         if shutil.which("pw-record"):
-            cmd = ["pw-record", "--rate", "16000", "--channels", "1", "--format", "s16", "-"]
+            cmd = ["pw-record", "--raw", "--rate", "16000", "--channels", "1", "--format", "s16", "-"]
         elif shutil.which("arecord"):
             cmd = ["arecord", "-r", "16000", "-f", "S16_LE", "-c", "1", "-"]
         else:

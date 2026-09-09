@@ -305,6 +305,24 @@ class LiveModelLabelTest(unittest.TestCase):
         self.assertEqual(live_model_label(CopilotConfig().gemini_live_model), "Gemini 2.5")
 
 
+
+
+class LiveAudioPlayerTest(unittest.TestCase):
+    """Garante que a reprodução e gravação PipeWire usam --raw para evitar rejeição por libsndfile."""
+
+    @patch("shutil.which")
+    @patch("subprocess.Popen")
+    def test_start_player_uses_raw_pw_play(self, mock_popen, mock_which):
+        mock_which.return_value = "/usr/bin/pw-play"
+        mock_popen.return_value = MagicMock()
+        client = GeminiLiveClient()
+        proc = client._start_player()
+        self.assertIsNotNone(proc)
+        cmd = mock_popen.call_args[0][0]
+        self.assertIn("--raw", cmd)
+        self.assertIn("pw-play", cmd[0])
+
+
 if __name__ == "__main__":
     unittest.main()
 

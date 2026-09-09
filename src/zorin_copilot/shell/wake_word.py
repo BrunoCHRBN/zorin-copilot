@@ -154,7 +154,7 @@ class VoskWakeWordBackend:
 
         if shutil.which("pw-record"):
             # 16kHz mono s16 — formato esperado pelo KaldiRecognizer
-            return ["pw-record", "--rate", "16000", "--channels", "1", "--format", "s16", "-"]
+            return ["pw-record", "--raw", "--rate", "16000", "--channels", "1", "--format", "s16", "-"]
         return None
 
     def stream_transcripts(self):

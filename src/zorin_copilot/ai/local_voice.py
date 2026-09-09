@@ -271,7 +271,7 @@ class LocalVoiceSynthesizer:
 
         # Determina o comando de reprodução de áudio (PipeWire pw-play ou ALSA aplay)
         if shutil.which("pw-play"):
-            cmd = ["pw-play", "--rate", "22050", "--channels", "1", "--format", "s16", "-"]
+            cmd = ["pw-play", "--raw", "--rate", "22050", "--channels", "1", "--format", "s16", "-"]
         elif shutil.which("aplay"):
             cmd = ["aplay", "-r", "22050", "-c", "1", "-f", "S16_LE", "-"]
         else:
@@ -608,7 +608,7 @@ class LocalLiveVoiceClient:
     def _mic_loop(self) -> None:
         """Lê áudio contínuo do microfone via PipeWire (pw-record) com VAD e detecção de fim de fala."""
         if shutil.which("pw-record"):
-            cmd = ["pw-record", "--rate", "16000", "--channels", "1", "--format", "s16", "-"]
+            cmd = ["pw-record", "--raw", "--rate", "16000", "--channels", "1", "--format", "s16", "-"]
         elif shutil.which("arecord"):
             cmd = ["arecord", "-r", "16000", "-f", "S16_LE", "-c", "1", "-"]
         else:
