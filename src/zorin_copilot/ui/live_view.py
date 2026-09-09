@@ -12,8 +12,8 @@ from typing import Any, Callable
 
 import gi
 
-gi.require_version("Gtk", "4.0")
-gi.require_version("Adw", "1")
+from .gi_versions import require_gtk4  # noqa: E402
+require_gtk4()
 gi.require_version("Gdk", "4.0")
 from gi.repository import Gtk, Gdk, GLib, Pango  # noqa: E402
 

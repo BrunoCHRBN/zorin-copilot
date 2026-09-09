@@ -869,10 +869,12 @@ class GeminiLiveClient:
                 active_mon = self.fence.get_active_monitor()
                 active_mon_name = active_mon.name if active_mon else NO_MONITOR_LABEL
                 monitors_desc = ", ".join([f"Monitor {m.index}: {m.name}" for m in self.fence.monitors])
-                platform_desc = CopilotConfig.detect_platform()
+
+                from ..core.desktop.env import current_environment, describe_for_prompt
 
                 system_prompt_text = (
-                    f"Você é o Zorin Copilot, assistente e parceiro nativo de voz e visão multimodal do sistema operacional {platform_desc}. "
+                    "Você é o Zorin Copilot, assistente e parceiro nativo de voz e visão multimodal "
+                    f"do sistema {describe_for_prompt(current_environment())}. "
                     "Você conversa por áudio em tempo real com o usuário em português brasileiro como um colega de trabalho próximo, prestativo e ágil. "
                     "\n\nDIRETRIZES DE FALA NATURAL E CADÊNCIA ORAL:\n"
                     "1. Use linguagem falada brasileira autêntica e marcadores naturais ('Opa, beleza!', 'Deixa comigo!', 'Prontinho!', 'Vou dar uma olhada nisso...'). "

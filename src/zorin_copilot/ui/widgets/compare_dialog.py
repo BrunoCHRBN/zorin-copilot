@@ -9,10 +9,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import gi
-
-gi.require_version("Gtk", "4.0")
-gi.require_version("Adw", "1")
+from ..gi_versions import require_gtk4  # noqa: E402
+require_gtk4()
 from gi.repository import Adw, Gtk, Pango  # noqa: E402
 
 from ..markdown import format_markdown_to_markup  # noqa: E402
@@ -21,11 +19,9 @@ if TYPE_CHECKING:  # pragma: no cover - apenas para type checking
     from ..app import CopilotWindow
     from ...core.session import ChatTurn
 
-
 def _preview_text(turn: "ChatTurn") -> str:
     p = (turn.prompt or "(sem pergunta)").strip().replace("\n", " ")
     return p[:48] + ("…" if len(p) > 48 else "")
-
 
 class CompareResponsesDialog(Adw.Dialog):
     """Compara duas respostas da conversa lado a lado (item #5 do backlog)."""

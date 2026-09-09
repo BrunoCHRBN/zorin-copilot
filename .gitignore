@@ -36,6 +36,38 @@ ENV/
 .aider*
 
 # Core dumps (testes GTK sob xvfb podem gerar GBs).
-# Só o padrão 'core.*' (ex.: core.526259) — NÃO 'core' sem sufixo, pois isso
-# engole o diretório src/zorin_copilot/core/ e impede futuros commits do módulo.
+# A regra antiga era  sem âncora: ela também engolia qualquer diretório
+# chamado core/ — inclusive src/zorin_copilot/core/desktop/, que por isso não
+# aparecia no On branch main
+Your branch is up to date with 'origin/main'.
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   README.md
+	modified:   macos-look/README.md
+	modified:   macos-look/hypr/hyprland.conf
+	modified:   macos-look/install.sh
+	modified:   macos-look/rofi/spotlight.rasi
+	modified:   macos-look/swaync/style.css
+	modified:   macos-look/waybar/dock/config.jsonc
+	modified:   macos-look/waybar/dock/style.css
+	modified:   macos-look/waybar/topbar/config.jsonc
+	modified:   macos-look/waybar/topbar/style.css
+	modified:   src/hypr_look/core/desktop_services.py
+	modified:   src/hypr_look/core/presets.py
+	modified:   src/hypr_look/core/system_doctor.py
+	modified:   src/hypr_look/ui/pages/overview.py
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	macos-look/chrome/
+	macos-look/hypr/hyprpaper.conf
+	macos-look/hypr/scripts/
+	macos-look/rofi/launchpad.rasi
+
+no changes added to commit (use "git add" and/or "git commit -a"). Ancorando na raiz e usando o padrão com sufixo,
+# core dumps continuam ignorados e o pacote volta a ser versionado.
+/core
 core.*
+core.[0-9]*

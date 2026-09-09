@@ -11,10 +11,8 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING
 
-import gi
-
-gi.require_version("Gtk", "4.0")
-gi.require_version("Adw", "1")
+from ..gi_versions import require_gtk4  # noqa: E402
+require_gtk4()
 from gi.repository import Adw, Gtk, GLib  # noqa: E402
 
 from ...core.usage import format_tokens  # noqa: E402
@@ -31,7 +29,6 @@ _ICON_RAG = "folder-documents-symbolic"
 
 _REFRESH_INTERVAL_SECONDS = 5
 
-
 def _read_mem_available_gb() -> float | None:
     """Lê ``MemAvailable`` de ``/proc/meminfo`` (kB) e devolve em GB, ou ``None``."""
     try:
@@ -44,11 +41,9 @@ def _read_mem_available_gb() -> float | None:
         return None
     return None
 
-
 def _format_gb(value: float) -> str:
     # pt-BR: ponto decimal vira vírgula.
     return f"{value:.1f}".replace(".", ",")
-
 
 class StatusBarWidget:
     """Barra de status inferior com telemetria de sistema e consumo de tokens.
@@ -96,13 +91,40 @@ class StatusBarWidget:
 
         self.refresh_all()
         self._disposed = False
-        # O tick periódico se autocancela quando a janela é destruída, evitando
-        # vazar o timer (e, com ele, a própria janela) após o fechamento.
+        # O tick só existe enquanto a janela está visível. Antes ele era criado
+        # aqui e só "se cancelava" devolvendo SOURCE_REMOVE na passada
+        # seguinte — ou seja, continuava vivo por até um intervalo inteiro
+        # depois do fechamento, e para sempre se a janela nunca fosse destruída
+        # (o `destroy` do GTK4 não emite o sinal para janela nunca apresentada).
+        self._timer_id = 0
+        self.ctx.connect("map", self._on_map)
+        self.ctx.connect("unmap", self._on_unmap)
         self.ctx.connect("destroy", self._on_dispose)
-        GLib.timeout_add_seconds(_REFRESH_INTERVAL_SECONDS, self._on_tick)
+
+    def _start_tick(self) -> None:
+        if self._timer_id or self._disposed:
+            return
+        # G_PRIORITY_LOW de propósito: telemetria de fundo não deve competir
+        # com a entrega de resposta da IA, que chega por GLib.idle_add.
+        # Ver "Inanição de prioridade" em docs/ENDEAVOUROS_PORT.md.
+        self._timer_id = GLib.timeout_add_seconds(
+            _REFRESH_INTERVAL_SECONDS, self._on_tick, priority=GLib.PRIORITY_LOW
+        )
+
+    def _stop_tick(self) -> None:
+        if self._timer_id:
+            GLib.source_remove(self._timer_id)
+            self._timer_id = 0
+
+    def _on_map(self, *_args) -> None:
+        self._start_tick()
+
+    def _on_unmap(self, *_args) -> None:
+        self._stop_tick()
 
     def _on_dispose(self, *_args) -> None:
         self._disposed = True
+        self._stop_tick()
 
     # ------------------------------------------------------------------
     # Construção
@@ -130,7 +152,10 @@ class StatusBarWidget:
     def _on_tick(self) -> bool:
         # Tick periódico: telemetria de sistema (carga/RAM/RAG) e modelo ativo.
         # Tokens são atualizados de forma pontual pelo app após cada resposta.
-        if self._disposed:
+        # Por construção o tick só roda com a janela visível; se chegou aqui
+        # invisível ou já descartada, a fonte perdeu o sentido e sai de cena.
+        if self._disposed or not self.ctx.get_visible():
+            self._stop_tick()
             return GLib.SOURCE_REMOVE
         self.refresh_load()
         self.refresh_ram()

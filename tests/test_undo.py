@@ -11,8 +11,8 @@ import unittest
 
 import gi
 
-gi.require_version("Gtk", "4.0")
-gi.require_version("Adw", "1")
+from zorin_copilot.ui.gi_versions import require_gtk4  # noqa: E402
+require_gtk4()
 from gi.repository import Adw, Gtk  # noqa: E402
 
 ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")

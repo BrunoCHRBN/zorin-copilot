@@ -36,14 +36,19 @@ class CLISubcommandsTest(unittest.TestCase):
         self.assertIn("Super+Shift+S", out)
         self.assertIn("Autostart", out)
 
+    # Os três slots precisam ser mockados: sem o de voz, o setup cai no backend
+    # real, não encontra um e responde "com avisos" em vez de "com sucesso".
     @patch("zorin_copilot.core.shortcuts.ShortcutManager.register", return_value=True)
     @patch("zorin_copilot.core.shortcuts.ShortcutManager.register_crop", return_value=True)
+    @patch("zorin_copilot.core.shortcuts.ShortcutManager.register_voice", return_value=True)
     @patch("sys.stdout", new_callable=io.StringIO)
-    def test_setup_shortcut(self, mock_stdout, mock_crop, mock_reg):
+    def test_setup_shortcut(self, mock_stdout, mock_voice, mock_crop, mock_reg):
         code = main(["setup", "--shortcut"])
         self.assertEqual(code, 0)
         out = mock_stdout.getvalue()
-        self.assertIn("registrados com sucesso", out)
+        # A mensagem cita o backend real; "GNOME" cravado seria mentira em
+        # Hyprland/Sway/KDE — e era exatamente o que a saída antiga dizia.
+        self.assertIn("Atalhos registrados", out)
 
     @patch("zorin_copilot.core.shortcuts.AutostartManager.enable", return_value=True)
     @patch("sys.stdout", new_callable=io.StringIO)

@@ -11,17 +11,14 @@ import threading
 import time
 from typing import TYPE_CHECKING
 
-import gi
-
-gi.require_version("Gtk", "4.0")
-gi.require_version("Adw", "1")
+from ..gi_versions import require_gtk4  # noqa: E402
+require_gtk4()
 from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
 from ...core.vision import ScreenCaptureService
 
 if TYPE_CHECKING:  # pragma: no cover - apenas para type checking
     from ..app import CopilotWindow
-
 
 class VisionAttachment:
     """Gerencia o card de imagem anexada e o fluxo de captura de tela."""

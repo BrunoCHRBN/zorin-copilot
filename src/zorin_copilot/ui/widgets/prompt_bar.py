@@ -9,10 +9,8 @@ import html
 import threading
 from typing import TYPE_CHECKING
 
-import gi
-
-gi.require_version("Gtk", "4.0")
-gi.require_version("Adw", "1")
+from ..gi_versions import require_gtk4  # noqa: E402
+require_gtk4()
 from gi.repository import Gio, GLib, Gtk  # noqa: E402
 
 from ...ai.actions import ActionType
@@ -25,7 +23,6 @@ if TYPE_CHECKING:  # pragma: no cover - apenas para type checking
     from ..app import CopilotWindow
 
 APP_PREVIEW_DEBOUNCE_MS = 120
-
 
 def get_app_subtitle(app: Gio.AppInfo) -> str:
     """Retorna uma descrição legível e amigável para o aplicativo."""
@@ -43,7 +40,6 @@ def get_app_subtitle(app: Gio.AppInfo) -> str:
         return f"Comando '{exe_name}' • Aplicativo instalado"
 
     return "Aplicativo instalado no Zorin OS"
-
 
 class PromptBar:
     """Barra de prompt com prévia de aplicativo, voz ao vivo e envio de mensagens."""

@@ -12,8 +12,8 @@ from datetime import datetime
 
 import gi
 
-gi.require_version("Gtk", "4.0")
-gi.require_version("Adw", "1")
+from zorin_copilot.ui.gi_versions import require_gtk4  # noqa: E402
+require_gtk4()
 gi.require_version("Gio", "2.0")
 from gi.repository import Adw, GLib, Gio, Gtk  # noqa: E402
 

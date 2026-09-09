@@ -24,8 +24,8 @@ from typing import Any, Callable, Optional
 
 import gi
 
-gi.require_version("Gtk", "4.0")
-gi.require_version("Adw", "1")
+from .gi_versions import require_gtk4  # noqa: E402
+require_gtk4()
 gi.require_version("Gdk", "4.0")
 from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango  # noqa: E402
 
@@ -90,6 +90,11 @@ class VoicePillWindow(Gtk.Window):
         # ---- Estado interno ----
         self.config = CopilotConfig.load()
         self._alive: bool = True
+
+        # Ancoragem Wayland. Em layer-shell a superfície é posicionada por âncoras
+        # e margens, e precisa ser configurada antes de a janela ser realizada —
+        # daí estar aqui e não no place_smart(). Sem suporte, seguimos com move().
+        self._layer_shell: bool = self._init_layer_shell()
         self._target_audio_level: float = 0.0
         self._smooth_audio_level: float = 0.0
         self._prev_target_level: float = 0.0
@@ -126,6 +131,26 @@ class VoicePillWindow(Gtk.Window):
     # ------------------------------------------------------------------
     # Construção
     # ------------------------------------------------------------------
+    @property
+    def _pill_margin(self) -> int:
+        try:
+            return max(0, int(getattr(self.config, "pill_margin", 12)))
+        except Exception:
+            return 12
+
+    def _init_layer_shell(self) -> bool:
+        """Tenta ancorar via wlr-layer-shell. Falso em X11 ou sem a biblioteca."""
+        if not _session_type_is_wayland():
+            return False
+        try:
+            from .layer_shell import anchor_corner
+
+            corner = str(getattr(self.config, "pill_corner", "top-center"))
+            return anchor_corner(self, corner, self._pill_margin)
+        except Exception as exc:
+            logger.debug("layer-shell indisponível, usando posicionamento do WM: %s", exc)
+            return False
+
     def _build_ui(self) -> None:
         handle = Gtk.WindowHandle()
         self.set_child(handle)
@@ -945,6 +970,18 @@ class VoicePillWindow(Gtk.Window):
         corner = str(getattr(self.config, "pill_corner", "top-center"))
         if corner not in _CORNER_OFFSETS:
             corner = "top-center"
+
+        # Com layer-shell o compositor posiciona por âncora/margem: é o único
+        # caminho que funciona em wlroots, e torna move() desnecessário.
+        if self._layer_shell:
+            try:
+                from .layer_shell import reanchor
+
+                reanchor(self, corner, self._pill_margin)
+            except Exception as exc:  # pragma: no cover
+                logger.debug("reanchor falhou: %s", exc)
+            return
+
         xf, yf = _CORNER_OFFSETS[corner]
 
         # Geometria do monitor (tolerante a ausências)
@@ -971,35 +1008,9 @@ class VoicePillWindow(Gtk.Window):
         except Exception as exc:  # pragma: no cover
             logger.debug("place_smart: move falhou: %s", exc)
 
-    def _monitor_under_pointer(self, monitors) -> Any:
-        """Tenta identificar o monitor sob o cursor. Fallback: monitor primário."""
-        try:
-            display = Gdk.Display.get_default()
-            if not display:
-                return monitors[0]
-            seat = display.get_default_seat()
-            if not seat:
-                return monitors[0]
-            pointer = seat.get_pointer()
-            if not pointer:
-                return monitors[0]
-            # Posição atual do cursor
-            surf, x, y = pointer.get_surface_at_position()  # type: ignore
-            if surf is not None:
-                mon = display.get_monitor_at_surface(surf)
-                if mon is not None:
-                    # Encontra o índice correspondente em monitors
-                    for m in monitors:
-                        try:
-                            if m.is_primary or m.index == 0:
-                                # Heurística: aceita primary como fallback se nada bater
-                                pass
-                        except Exception:
-                            pass
-                    return monitors[0]
-        except Exception as exc:  # pragma: no cover
-            logger.debug("_monitor_under_pointer: %s", exc)
-        # Fallback: primário
+    @staticmethod
+    def _primary_monitor(monitors) -> Any:
+        """Monitor primário declarado pelo GDK; na dúvida, o primeiro."""
         for m in monitors:
             try:
                 if m.is_primary:
@@ -1007,6 +1018,72 @@ class VoicePillWindow(Gtk.Window):
             except Exception:
                 continue
         return monitors[0]
+
+    @staticmethod
+    def _match_gdk_monitor(gdk_mon: Any, monitors) -> Any | None:
+        """Cruza um GdkMonitor com os MonitorInfo vindos do ScreenFenceManager.
+
+        Os dois lados não compartilham índice — o GDK reordena conforme os
+        displays são conectados — então o casamento é por modelo/descrição e,
+        em último caso, por geometria exata.
+        """
+        try:
+            model = (gdk_mon.get_model() or "").strip()
+            description = (gdk_mon.get_description() or "").strip()
+            geom = gdk_mon.get_geometry()
+            gx, gy = int(geom.x), int(geom.y)
+            gw, gh = int(geom.width), int(geom.height)
+        except Exception:
+            return None
+
+        for m in monitors:
+            if model and m.model and model == m.model.strip():
+                return m
+            if description and m.name and description == m.name.strip():
+                return m
+
+        for m in monitors:
+            if (m.x, m.y, m.width, m.height) == (gx, gy, gw, gh):
+                return m
+        return None
+
+    def _monitor_under_pointer(self, monitors) -> Any:
+        """Identifica o monitor sob o cursor. Fallback: monitor primário.
+
+        No Wayland não existe perguntar a posição *global* do ponteiro — o
+        protocolo não expõe isso de propósito. O que dá é pedir ao seat sobre
+        qual superfície o ponteiro está e, a partir dela, pedir o monitor ao
+        display. Em headless (sem seat) a resposta é None e caímos no primário,
+        que é o comportamento correto.
+        """
+        try:
+            display = Gdk.Display.get_default()
+            if not display:
+                return self._primary_monitor(monitors)
+            seat = display.get_default_seat()
+            if not seat:
+                return self._primary_monitor(monitors)
+            pointer = seat.get_pointer()
+            if not pointer:
+                return self._primary_monitor(monitors)
+
+            surface, _x, _y = pointer.get_surface_at_position()
+            if surface is None:
+                return self._primary_monitor(monitors)
+            gdk_mon = display.get_monitor_at_surface(surface)
+            if gdk_mon is None:
+                return self._primary_monitor(monitors)
+
+            match = self._match_gdk_monitor(gdk_mon, monitors)
+            if match is not None:
+                return match
+        except AttributeError:
+            # get_surface_at_position não existe em GDK mais antigo (ex.: 4.6).
+            logger.debug("_monitor_under_pointer: GDK sem get_surface_at_position")
+        except Exception as exc:
+            logger.debug("_monitor_under_pointer: %s", exc)
+
+        return self._primary_monitor(monitors)
 
     def save_geometry(self) -> None:
         """Persiste a posição atual (X11) e o canto escolhido. No-op em Wayland."""

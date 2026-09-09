@@ -8,10 +8,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import gi
-
-gi.require_version("Gtk", "4.0")
-gi.require_version("Adw", "1")
+from ..gi_versions import require_gtk4  # noqa: E402
+require_gtk4()
 from gi.repository import Adw, Gtk  # noqa: E402
 
 from ...core.fence import NO_MONITOR_LABEL  # noqa: E402
@@ -19,7 +17,6 @@ from ...core.usage import format_tokens  # noqa: E402
 
 if TYPE_CHECKING:  # pragma: no cover - apenas para type checking
     from ..app import CopilotWindow
-
 
 class HeaderBarWidget:
     """Constrói e governa a HeaderBar do Copilot.
@@ -230,8 +227,10 @@ class HeaderBarWidget:
         self._sync_live_client_fence()
         self.ctx.show_toast("\U0001f310 Cerca espacial expandida para todas as telas.")
 
-    def on_toggle_kill_switch(self, popover: Gtk.Popover) -> None:
-        popover.popdown()
+    def on_toggle_kill_switch(self, popover: Gtk.Popover | None = None) -> None:
+        # `popover` é opcional: a bandeja dispara isso sem popover algum.
+        if popover is not None:
+            popover.popdown()
         fence = self.ctx.fence
         if fence.is_emergency_stopped:
             fence.reset_emergency_stop()

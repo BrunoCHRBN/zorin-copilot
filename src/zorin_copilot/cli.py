@@ -117,18 +117,50 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
+    from .core.desktop.env import current_environment
+    from .core.desktop import screenshot as desktop_shot
+    from .core.desktop import controls as desktop_controls
+
+    env = current_environment()
+
     print("Zorin Copilot — Diagnóstico do Sistema\n")
+    print(f"  Ambiente: {env.describe()}")
+    print(f"  Gerenciador de pacotes: {env.package_manager or 'desconhecido'}")
+    print(f"  Backend de atalhos: {ShortcutManager.backend_name()}")
+    print(f"  Backend de captura: {desktop_shot.select_backend(env).name}")
+
+    missing = desktop_shot.missing_dependencies(env)
+    if missing:
+        print(f"  ⚠ Captura: faltam {', '.join(missing)}")
+
+    # Red zones: 80px travados sem barra é a reclamação clássica em Hyprland/Sway.
+    try:
+        from .core.fence import default_insets
+
+        bottom, top = default_insets(env)
+        if bottom or top:
+            print(f"  Red zones: inferior {bottom}px, superior {top}px (detectado do ambiente)")
+        else:
+            print("  Red zones: desativadas (nenhum painel detectado neste ambiente)")
+    except Exception:
+        pass
+    print()
+
     checks = []
 
-    # 1. PyGObject e GTK4
+    # 1. PyGObject, GTK4 e a versão mínima de runtime que o código realmente usa
     try:
-        import gi
-        gi.require_version("Gtk", "4.0")
-        gi.require_version("Adw", "1")
-        from gi.repository import Adw, Gtk  # noqa: F401
-        checks.append(("GTK 4.0 + Libadwaita 1", True, "disponível"))
+        from .ui.gi_versions import require_gtk4, toolkit_report
+
+        require_gtk4()
+        report = toolkit_report()
+        parts = []
+        for namespace, info in report.get("details", {}).items():  # type: ignore[union-attr]
+            parts.append(f"{namespace} {info['found']}")
+        checks.append(("GTK4 + Libadwaita", True, " / ".join(parts)))
     except Exception as exc:
-        checks.append(("GTK 4.0 + Libadwaita 1", False, str(exc)))
+        # ToolkitTooOld já vem com a mensagem de "como resolver" pronta.
+        checks.append(("GTK4 + Libadwaita", False, str(exc)))
 
     # 2. AT-SPI2
     try:
@@ -147,15 +179,20 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     configured = cfg.is_configured()
     checks.append((f"Provedor IA ({cfg.provider})", configured, "configurado" if configured else "chave não informada (use ⚙️ na UI)"))
 
-    # 4. Atalhos Globais GNOME
+    # 4. Atalhos Globais (backend escolhido pelo ambiente)
+    backend = ShortcutManager.backend_name()
     has_shortcut = ShortcutManager.is_registered()
-    checks.append(("Atalho Global HUD (Super+C)", has_shortcut, "registrado no GNOME" if has_shortcut else "não registrado (use 'zorin-copilot-cli setup --shortcut')"))
+    checks.append((
+        "Atalho Global HUD (Super+C)",
+        has_shortcut,
+        f"registrado via {backend}" if has_shortcut else f"não registrado via {backend} (use 'zorin-copilot-cli setup --shortcut')",
+    ))
 
     has_crop = ShortcutManager.is_crop_registered()
-    checks.append(("Atalho Recorte (Super+Shift+S)", has_crop, "registrado no GNOME" if has_crop else "não registrado"))
+    checks.append(("Atalho Recorte (Super+Shift+S)", has_crop, f"registrado via {backend}" if has_crop else "não registrado"))
 
     has_voice = ShortcutManager.is_voice_registered()
-    checks.append(("Atalho Voz (Super+Shift+V)", has_voice, "registrado no GNOME" if has_voice else "não registrado"))
+    checks.append(("Atalho Voz (Super+Shift+V)", has_voice, f"registrado via {backend}" if has_voice else "não registrado"))
 
     # 5. Motor Ollama Local & Modelos
     ollama_ok = False
@@ -528,21 +565,38 @@ def cmd_rag(args: argparse.Namespace) -> int:
     return 0
 
 
+#: Rótulos legíveis dos backends de atalho. O nome interno do backend é um
+#: identificador ("gnome-media-keys", "hyprland"), não uma frase — e no Zorin
+#: Copilot fora do GNOME dizer "atalhos GNOME" era simplesmente falso.
+_SHORTCUT_BACKEND_LABELS: dict[str, str] = {
+    "gnome-media-keys": "GNOME (media-keys)",
+    "hyprland": "Hyprland (hyprland.conf)",
+    "sway": "Sway (config)",
+    "kde-kglobalaccel": "KDE Plasma (kglobalshortcutsrc)",
+    "global-shortcuts-portal": "Portal XDG (GlobalShortcuts)",
+    "none": "nenhum backend disponível",
+}
+
+
 def cmd_setup(args: argparse.Namespace) -> int:
     did_something = False
 
     if args.all or args.shortcut:
         did_something = True
-        print("Configurando atalhos globais GNOME (<Super>c, <Super><Shift>s e <Super><Shift>v)...")
+        backend = ShortcutManager.backend_name()
+        label = _SHORTCUT_BACKEND_LABELS.get(backend, backend)
+        print(f"Configurando atalhos globais via {label} (<Super>c, <Super><Shift>s e <Super><Shift>v)...")
         ok1 = ShortcutManager.register()
         ok2 = ShortcutManager.register_crop()
         ok3 = ShortcutManager.register_voice()
         if ok1 and ok2 and ok3:
-            print("  ✓ Atalhos globais GNOME registrados com sucesso!")
+            print(f"  ✓ Atalhos registrados no backend {label}.")
         elif ok1 or ok2 or ok3:
             print("  ✓ Atalhos globais registrados com avisos.")
+            print(f"   Detalhe: {ShortcutManager.last_message}")
         else:
-            print("  ✗ Falha ao registrar atalhos via gsettings. Verifique permissões do GNOME.")
+            print(f"  ✗ Falha ao registrar atalhos no backend {label}.")
+            print(f"   Detalhe: {ShortcutManager.last_message}")
 
     if args.all or args.autostart:
         did_something = True

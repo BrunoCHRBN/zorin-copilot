@@ -13,8 +13,8 @@ import unittest
 
 import gi
 
-gi.require_version("Gtk", "4.0")
-gi.require_version("Adw", "1")
+from zorin_copilot.ui.gi_versions import require_gtk4  # noqa: E402
+require_gtk4()
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
 Adw.init()
@@ -27,6 +27,7 @@ from zorin_copilot.ai.actions import ActionPlan, ActionType, DesktopAction  # no
 from zorin_copilot.core.session import ChatTurn, TopicSession  # noqa: E402
 from zorin_copilot.core.shortcuts import APP_SHORTCUTS  # noqa: E402
 from zorin_copilot.ui.app import CopilotWindow  # noqa: E402
+from zorin_copilot.ui.widgets.chat_stream import TypingIndicator  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -44,18 +45,32 @@ def run_loop_until(predicate, timeout_ms=2000):
     context = GLib.MainContext.default()
 
     while time.monotonic() < deadline:
-        # iteration(False) não bloqueia: só despacha o que já está pronto.
-        while context.pending():
-            context.iteration(False)
+        _drain_ready(context)
         if predicate():
             return True
         time.sleep(0.005)
 
     # Última chance: o prazo pode ter vencido no mesmo instante em que a
     # condição ficou pronta.
-    while context.pending():
-        context.iteration(False)
+    _drain_ready(context)
     return bool(predicate())
+
+
+def _drain_ready(context, max_iterations: int = 100) -> None:
+    """Despacha o que já está pronto, com teto de iterações.
+
+    O laço precisa de teto: `MainContext.pending()` responde "existe source
+    registrado", não "existe algo despachável". Uma conexão D-Bus ociosa mantém
+    `pending()` verdadeiro indefinidamente e `iteration(False)` não a consome —
+    o `while context.pending()` original travava a suíte inteira.
+    """
+    for _ in range(max_iterations):
+        if not context.pending():
+            return
+        # iteration(False) não bloqueia: só despacha o que já está pronto.
+        # Devolve False quando não havia nada pronto — aí também paramos.
+        if not context.iteration(False):
+            return
 
 
 class SessionTurnRegressionTest(unittest.TestCase):
@@ -111,7 +126,12 @@ class WindowCompositionTest(unittest.TestCase):
             self.win.entry.set_text("abrir calculadora")
             self.win._on_submit(self.win.entry)
 
-        self.assertTrue(run_loop_until(lambda: not self.win._is_busy))
+        # Praço largo pelo mesmo motivo do teste de debounce: em runner
+        # compartilhado o worker da IA pode demorar a ser despachado.
+        self.assertTrue(
+            run_loop_until(lambda: not self.win._is_busy, timeout_ms=10_000),
+            "o envio não liberou a interface dentro do prazo",
+        )
         self.assertEqual(self.win.session.turn_count, 1)
 
         children = []
@@ -283,6 +303,65 @@ class StatusBarTest(unittest.TestCase):
         self.win.status_bar.refresh_rag()
         self.assertIsInstance(self.win.status_bar.model_lbl.get_text(), str)
         self.assertIsInstance(self.win.status_bar.rag_lbl.get_text(), str)
+
+
+class TimerLeakRegressionTest(unittest.TestCase):
+    """Regressão: fontes periódicas não podem vazar nem passar fome no idle.
+
+    O `GMainContext` só despacha uma fonte quando não existe nenhuma de
+    prioridade mais alta pronta. `GLib.idle_add` roda em
+    `G_PRIORITY_DEFAULT_IDLE` (200) — e é por ele que o app entrega a resposta
+    da IA à interface. Basta sobrar uma fonte periódica em
+    `G_PRIORITY_DEFAULT` (0), ou um frame clock do GDK (100), para que nenhum
+    idle rode nunca mais.
+
+    Foi exatamente isso que aconteceu: os ticks da barra de status e do
+    indicador de "digitando" vazavam por janela, e depois de algumas centenas
+    de janelas acumuladas a suíte travava a janela em "ocupada" para sempre —
+    um teste que passava isolado e falhava só no fim da suíte.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = Adw.Application(application_id="org.zorin.copilot.test.leak")
+
+    def test_status_bar_tick_segue_a_visibilidade_da_janela(self):
+        """O tick de telemetria só existe enquanto a janela está visível.
+
+        Regressão: era criado no `__init__` e nunca removido de fato — o
+        `destroy` do GTK4 sequer emite o sinal para janela nunca apresentada.
+        """
+        win = CopilotWindow(self.app)
+        self.assertEqual(win.status_bar._timer_id, 0, "janela oculta não deve ticar")
+        win.status_bar._on_map()
+        self.assertNotEqual(win.status_bar._timer_id, 0)
+        win.status_bar._on_unmap()
+        self.assertEqual(win.status_bar._timer_id, 0)
+        win.destroy()
+
+    def test_indicador_de_digitacao_nao_tem_timer_enquanto_invisivel(self):
+        """Sem `map` não há timer — era aí que as fontes periódicas vazavam."""
+        self.assertEqual(TypingIndicator()._timer, 0)
+
+    def test_idle_continua_despachando_com_muitas_janelas_vivas(self):
+        """Trinta janelas abertas não podem impedir o despacho de um idle."""
+        janelas = [CopilotWindow(self.app) for _ in range(30)]
+        try:
+            marcador = []
+
+            def marca():
+                marcador.append(True)
+                return GLib.SOURCE_REMOVE
+
+            GLib.idle_add(marca)
+            self.assertTrue(
+                run_loop_until(lambda: bool(marcador), timeout_ms=3000),
+                "GLib.idle_add deixou de ser despachado: o GMainContext está "
+                "passando fome por causa de fontes de prioridade mais alta",
+            )
+        finally:
+            for janela in janelas:
+                janela.destroy()
 
 
 if __name__ == "__main__":

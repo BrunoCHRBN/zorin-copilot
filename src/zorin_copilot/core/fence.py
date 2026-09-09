@@ -95,6 +95,39 @@ class RedZone:
         return self.x <= x < self.max_x and self.y <= y < self.max_y
 
 
+def default_insets(env: Any | None = None) -> tuple[int, int]:
+    """Tamanho ``(inferior, superior)`` dos painéis típicos de cada ambiente.
+
+    GNOME: dash-to-panel/taskbar embaixo + top bar. KDE: painel embaixo.
+    wlroots (Hyprland/Sway/labwc...): **não há painel por padrão** — só reservamos
+    espaço se uma barra estiver realmente rodando, e aí do lado onde ela costuma
+    ficar (waybar e cia. ancoram no topo).
+    """
+    if env is None:
+        try:
+            from .desktop.env import current_environment
+
+            env = current_environment()
+        except Exception:
+            return (48, 32)
+
+    if getattr(env, "is_gnome", False):
+        return (48, 32)
+    if getattr(env, "is_kde", False):
+        return (44, 0)
+    if getattr(env, "is_wlroots", False):
+        try:
+            from .desktop.env import BAR_PROCESSES
+
+            if env.is_running(*BAR_PROCESSES):
+                # Barras de wlroots ancoram no topo por padrão (waybar, yambar...).
+                return (0, 32)
+        except Exception:
+            pass
+        return (0, 0)
+    return (48, 32)
+
+
 class ScreenFenceManager:
     """Gerencia cercas de segurança espacial e valida coordenadas antes da execução física."""
 
@@ -105,6 +138,8 @@ class ScreenFenceManager:
         self.custom_bounds: tuple[int, int, int, int] | None = None  # (min_x, min_y, max_x, max_y)
         self.red_zones: list[RedZone] = []
         self._emergency_stopped: bool = False
+        # Sobrescrito por set_insets(); None = usar config + detecção.
+        self._inset_override: tuple[int, int] | None = None
 
         # Define monitor primário inicial
         self._select_default_primary()
@@ -123,30 +158,76 @@ class ScreenFenceManager:
         self.active_monitor_index = 0
 
     def _setup_default_red_zones(self) -> None:
-        """Configura zonas de proteção padrão do Zorin OS (ex: barra de tarefas inferior)."""
-        self.red_zones.clear()
-        for m in self._monitors:
-            # Barra de tarefas do Zorin (48px na parte inferior da tela)
-            taskbar = RedZone(
-                name=f"taskbar_monitor_{m.index}",
-                x=m.x,
-                y=m.max_y - 48,
-                width=m.width,
-                height=48,
-                description=f"Barra de tarefas do Zorin OS no monitor {m.name}",
-            )
-            self.red_zones.append(taskbar)
+        """Monta as zonas de proteção padrão conforme o ambiente e a config.
 
-            # Barra superior / Top bar (se houver, 32px no topo)
-            topbar = RedZone(
-                name=f"topbar_monitor_{m.index}",
-                x=m.x,
-                y=m.y,
-                width=m.width,
-                height=32,
-                description=f"Painel superior do sistema no monitor {m.name}",
-            )
-            self.red_zones.append(topbar)
+        Os 48px inferior + 32px superior eram as medidas do Zorin OS (GNOME). Em
+        Hyprland/Sway não existe painel por padrão — travar 80px de tela útil sem
+        motivo é pior que não proteger nada. Daí a detecção.
+        """
+        self.red_zones.clear()
+
+        bottom, top = self.resolve_insets()
+        if bottom <= 0 and top <= 0:
+            logger.debug("Red zones desativadas: nenhum painel detectado neste ambiente.")
+            return
+
+        for m in self._monitors:
+            if bottom > 0:
+                self.red_zones.append(
+                    RedZone(
+                        name=f"bottombar_monitor_{m.index}",
+                        x=m.x,
+                        y=m.max_y - bottom,
+                        width=m.width,
+                        height=bottom,
+                        description=f"Painel inferior ({bottom}px) no monitor {m.name}",
+                    )
+                )
+            if top > 0:
+                self.red_zones.append(
+                    RedZone(
+                        name=f"topbar_monitor_{m.index}",
+                        x=m.x,
+                        y=m.y,
+                        width=m.width,
+                        height=top,
+                        description=f"Painel superior ({top}px) no monitor {m.name}",
+                    )
+                )
+
+    def resolve_insets(self) -> tuple[int, int]:
+        """Devolve ``(inferior, superior)`` em pixels, já com a preferência do usuário.
+
+        ``red_zone_*_px`` em ``CopilotConfig`` vence a detecção; ``-1`` significa
+        "decida pelo ambiente". Um override explícito via :meth:`set_insets` vence
+        os dois.
+        """
+        if self._inset_override is not None:
+            return self._inset_override
+
+        from .config import CopilotConfig
+
+        try:
+            cfg = CopilotConfig.load()
+            bottom = int(getattr(cfg, "red_zone_bottom_px", -1))
+            top = int(getattr(cfg, "red_zone_top_px", -1))
+        except Exception:
+            bottom, top = -1, -1
+
+        auto_bottom, auto_top = default_insets()
+        return (
+            auto_bottom if bottom < 0 else bottom,
+            auto_top if top < 0 else top,
+        )
+
+    def set_insets(self, bottom: int | None = None, top: int | None = None) -> tuple[int, int]:
+        """Reconstroi as red zones com novos valores (None mantém o atual)."""
+        current = self.resolve_insets()
+        new_bottom = current[0] if bottom is None else int(bottom)
+        new_top = current[1] if top is None else int(top)
+        self._inset_override = (new_bottom, new_top)
+        self._setup_default_red_zones()
+        return new_bottom, new_top
 
     @classmethod
     def detect_monitors(cls) -> list[MonitorInfo]:

@@ -1,35 +1,69 @@
-# Decisão de design: indicador de bandeja do sistema (Tray Icon / StatusNotifierItem) para o Zorin OS.
-# Fornece acesso rápido às funções do assistente (HUD, Recorte, Sincronização de Documentos, Preferências e Kill Switch)
-# quando o Zorin Copilot estiver operando em segundo plano (--background).
+# Decisão de design: a bandeja anterior usava AppIndicator3/Ayatana — GTK3 + XEmbed, duas coisas
+# que não existem em Wayland — e ainda tinha `from gi.repository import importlib`, um import de
+# módulo stdlib pelo namespace do GI que estourava sempre e era engolido por um except nu.
+# Resultado: a bandeja nunca funcionou, em distro nenhuma.
+#
+# O caminho único agora é StatusNotifierItem (`core.desktop.tray`) com menu
+# `com.canonical.dbusmenu` (`core.desktop.menu`). SNI também cobre X11 (Plasma X11 e
+# qualquer watcher), então manter o AppIndicator só custaria: ele exige
+# `gi.require_version("Gtk", "3.0")`, o que é incompatível com o Gtk4 que o resto do
+# app fixa — o PyGObject recusa duas versões do mesmo namespace no mesmo processo.
+#
+# Este módulo não importa Gtk: é D-Bus puro.
 
 """Indicador de bandeja do sistema para o Zorin Copilot."""
 
 from __future__ import annotations
 
 import logging
-from typing import Callable
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
-HAS_APP_INDICATOR = False
-AppIndicatorModule = None
 
-for mod_name in ("AyatanaAppIndicator3", "AppIndicator3"):
+def _deferred(callback: Callable[[], None]) -> Callable[[], None]:
+    """Envolve um callback para rodar na main loop, com fallback a chamada direta.
+
+    O barramento D-Bus invoca o handler fora da thread principal; mexer em widget
+    GTK de lá é pedir por corrupção de estado.
+    """
+
+    def wrapper() -> None:
+        try:
+            import gi
+
+            gi.require_version("GLib", "2.0")
+            from gi.repository import GLib
+
+            GLib.idle_add(_safe, callback)
+        except Exception:
+            _safe(callback)
+
+    return wrapper
+
+
+def _safe(callback: Callable[[], None]) -> bool:
     try:
-        import gi
-        gi.require_version(mod_name, "0.1")
-        gi.require_version("Gtk", "3.0")
-        from gi.repository import Gtk as Gtk3
-        from gi.repository import importlib
-        AppIndicatorModule = __import__(f"gi.repository.{mod_name}", fromlist=[mod_name])
-        HAS_APP_INDICATOR = True
-        break
-    except Exception:
-        pass
+        callback()
+    except Exception as exc:
+        logger.error(f"Erro na ação da bandeja: {exc}")
+    return False  # GLib.SOURCE_REMOVE
 
 
 class SystemTrayIndicator:
-    """Gerencia o ícone e menu de contexto na bandeja do sistema operacional."""
+    """Ícone de bandeja via StatusNotifierItem, com menu D-Bus completo.
+
+    Cada callback opcional vira uma entrada no menu; callbacks ausentes simplesmente
+    não aparecem, em vez de virarem itens inúteis e desabilitados.
+    """
+
+    # Rótulos e ícones ficam aqui para a UI não precisar saber de D-Bus.
+    LABEL_HUD = "Abrir Zorin Copilot"
+    LABEL_CROP = "Recorte Inteligente"
+    LABEL_SYNC = "Sincronizar Documentos (RAG)"
+    LABEL_PREFS = "Preferências do Sistema…"
+    LABEL_KILL = "Kill Switch (Bloquear Ações Físicas)"
+    LABEL_QUIT = "Sair do Copilot"
 
     def __init__(
         self,
@@ -46,81 +80,132 @@ class SystemTrayIndicator:
         self.on_preferences = on_preferences
         self.on_kill_switch = on_kill_switch
         self.on_quit = on_quit
-        self.indicator = None
+
+        # Estado do toggle do kill switch, refletido no menu quando a barra suporta.
+        self.kill_switch_active: bool = False
+
+        self._sni: Any = None
+        self._menu: Any = None
         self._is_active = False
 
+    # ---------------------------------------------------------------- suporte
     @classmethod
     def is_available(cls) -> bool:
-        """Indica se as bibliotecas de AppIndicator estão disponíveis no sistema."""
-        return HAS_APP_INDICATOR
+        """Existe um watcher de bandeja nesta sessão (waybar, Plasma, extensão GNOME)?"""
+        from ..core.desktop.tray import watcher_present
 
+        return watcher_present()
+
+    @property
+    def is_active(self) -> bool:
+        return self._is_active
+
+    # ------------------------------------------------------------------ setup
     def setup(self) -> bool:
-        """Inicializa o ícone e menu da bandeja se suportado pelo ambiente desktop."""
-        if not HAS_APP_INDICATOR or AppIndicatorModule is None:
-            logger.info("AyatanaAppIndicator indisponível; o assistente continuará via atalhos globais.")
-            return False
+        """Publica ícone + menu. Falso quando não há watcher nem barramento."""
+        from ..core.desktop.menu import DbusMenu
+        from ..core.desktop.tray import StatusNotifierTray
 
-        try:
-            from gi.repository import Gtk as Gtk3
-
-            category = AppIndicatorModule.IndicatorCategory.APPLICATION_STATUS
-            self.indicator = AppIndicatorModule.Indicator.new(
-                "io.github.bruno.ZorinCopilot",
-                "dialog-information-symbolic",
-                category,
+        self._menu = DbusMenu(self._build_items())
+        sni = StatusNotifierTray(
+            on_activate=self.on_toggle_hud,
+            on_secondary=self.on_preferences or self.on_toggle_hud,
+            menu=self._menu,
+        )
+        if not sni.setup():
+            self._menu = None
+            logger.info(
+                "Sem bandeja disponível; o Copilot segue acessível pelos atalhos globais."
             )
-            self.indicator.set_status(AppIndicatorModule.IndicatorStatus.ACTIVE)
-            self.indicator.set_title("Zorin Copilot")
-
-            # Cria o menu de contexto
-            menu = Gtk3.Menu()
-
-            # 1. Abrir Copilot
-            item_hud = Gtk3.MenuItem(label="Abrir Zorin Copilot (Super + C)")
-            if self.on_toggle_hud:
-                item_hud.connect("activate", lambda _: self.on_toggle_hud())
-            menu.append(item_hud)
-
-            # 2. Recorte Inteligente
-            item_crop = Gtk3.MenuItem(label="Recorte Inteligente (Super + Shift + S)")
-            if self.on_crop:
-                item_crop.connect("activate", lambda _: self.on_crop())
-            menu.append(item_crop)
-
-            # 3. Sincronizar Documentos RAG
-            item_sync = Gtk3.MenuItem(label="Sincronizar Documentos (RAG)")
-            if self.on_sync_rag:
-                item_sync.connect("activate", lambda _: self.on_sync_rag())
-            menu.append(item_sync)
-
-            menu.append(Gtk3.SeparatorMenuItem())
-
-            # 4. Preferências
-            item_prefs = Gtk3.MenuItem(label="Preferências do Sistema...")
-            if self.on_preferences:
-                item_prefs.connect("activate", lambda _: self.on_preferences())
-            menu.append(item_prefs)
-
-            # 5. Kill Switch
-            item_kill = Gtk3.MenuItem(label="Kill Switch (Bloquear Ações Físicas)")
-            if self.on_kill_switch:
-                item_kill.connect("activate", lambda _: self.on_kill_switch())
-            menu.append(item_kill)
-
-            menu.append(Gtk3.SeparatorMenuItem())
-
-            # 6. Sair
-            item_quit = Gtk3.MenuItem(label="Sair do Copilot")
-            if self.on_quit:
-                item_quit.connect("activate", lambda _: self.on_quit())
-            menu.append(item_quit)
-
-            menu.show_all()
-            self.indicator.set_menu(menu)
-            self._is_active = True
-            logger.info("SystemTrayIndicator registrado com sucesso na bandeja do Zorin OS.")
-            return True
-
-        except Exception as exc:
-            logger.warning(f"Erro ao inicializar SystemTrayIndicator: {exc}")
             return False
+
+        self._sni = sni
+        self._is_active = True
+        return True
+
+    def _build_items(self) -> list[Any]:
+        """Monta a árvore do menu a partir dos callbacks recebidos."""
+        spec: list[dict[str, Any]] = []
+        next_id = 1
+
+        def add(label: str, callback: Callable[[], None] | None, icon: str = "", **extra: Any):
+            nonlocal next_id
+            if callback is None:
+                return
+            entry: dict[str, Any] = {"id": next_id, "label": label, "icon": icon}
+            entry.update(extra)
+            # O D-Bus despacha na sua própria thread; devolvemos a chamada para a
+            # main loop do GTK antes de tocar em widget.
+            entry["on_clicked"] = _deferred(callback)
+            spec.append(entry)
+            next_id += 1
+
+        def separator():
+            nonlocal next_id
+            spec.append({"id": next_id, "separator": True})
+            next_id += 1
+
+        add(self.LABEL_HUD, self.on_toggle_hud, "zorin-copilot-symbolic")
+        add(self.LABEL_CROP, self.on_crop, "edit-select-all-symbolic")
+        add(self.LABEL_SYNC, self.on_sync_rag, "folder-download-symbolic")
+        if self.on_preferences or self.on_kill_switch:
+            separator()
+        add(self.LABEL_PREFS, self.on_preferences, "preferences-system-symbolic")
+        add(
+            self.LABEL_KILL,
+            self.on_kill_switch,
+            "security-high-symbolic",
+            toggle=self.kill_switch_active,
+        )
+        if self.on_quit:
+            separator()
+        add(self.LABEL_QUIT, self.on_quit, "application-exit-symbolic")
+
+        # Sem callback nenhum o menu sairia vazio; aí é melhor não publicar menu
+        # e deixar a barra no Activate puro.
+        return [_item_from(entry) for entry in spec]
+
+    # ------------------------------------------------------------- atualização
+    def refresh_menu(self) -> None:
+        """Reconstrói o menu (ex.: depois de alternar o kill switch)."""
+        if self._menu is None:
+            return
+        self._menu.set_items(self._build_items())
+
+    def set_kill_switch_active(self, active: bool) -> None:
+        """Alterna o visto do item de kill switch no menu da bandeja."""
+        self.kill_switch_active = bool(active)
+        self.refresh_menu()
+
+    def set_icon(self, icon_name: str) -> None:
+        if self._sni is not None:
+            self._sni.set_icon(icon_name)
+
+    def teardown(self) -> None:
+        """Remove o ícone da bandeja ao encerrar."""
+        if self._sni is not None:
+            self._sni.teardown()
+            self._sni = None
+        self._menu = None
+        self._is_active = False
+
+
+def _item_from(entry: dict[str, Any]) -> Any:
+    """Converte um dict do spec em :class:`MenuItem`."""
+    from ..core.desktop.menu import MenuItem
+
+    if entry.get("separator"):
+        return MenuItem(id=entry["id"], type="separator")
+    children = [_item_from(child) for child in entry.get("children") or []]
+    toggle = entry.get("toggle")
+    return MenuItem(
+        id=entry["id"],
+        label=entry.get("label", ""),
+        icon_name=entry.get("icon", ""),
+        enabled=bool(entry.get("enabled", True)),
+        toggle_type="checkmark" if toggle is not None else "",
+        toggle_state=1 if toggle else 0,
+        children_display="submenu" if children else "",
+        children=children,
+        on_clicked=entry.get("on_clicked"),
+    )

@@ -10,10 +10,8 @@ import html
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-import gi
-
-gi.require_version("Gtk", "4.0")
-gi.require_version("Adw", "1")
+from ..gi_versions import require_gtk4  # noqa: E402
+require_gtk4()
 from gi.repository import Adw, Gdk, GLib, Gtk, Pango  # noqa: E402
 
 from ...ai.actions import ActionPlan, ActionType, DesktopAction
@@ -23,7 +21,6 @@ from ..markdown import format_markdown_to_markup  # noqa: F401 - reexportado por
 
 if TYPE_CHECKING:  # pragma: no cover - apenas para type checking
     from ..app import CopilotWindow
-
 
 def get_action_icon(action: DesktopAction) -> str:
     """Retorna o ícone semântico padrão mais adequado para a ação proposta."""
@@ -60,13 +57,13 @@ def get_action_icon(action: DesktopAction) -> str:
         return "folder-symbolic"
     return "system-run-symbolic"
 
-
 class TypingIndicator(Gtk.Box):
     """Indicador de "digitando…" estilo iMessage: três pontos que pulsam em onda.
 
     Usado na bolha pendente do assistente enquanto a IA processa. A animação roda
-    num ``GLib.timeout`` e se autocancela quando o widget é desrealizado (a bolha
-    pendente é removida assim que a resposta chega).
+    num ``GLib.timeout`` que só existe enquanto o widget está visível (map):
+    criá-lo no ``__init__`` deixava uma fonte periódica viva mesmo para
+    indicadores que nunca chegaram a ser exibidos.
     """
 
     def __init__(self, n_dots: int = 3):
@@ -80,21 +77,39 @@ class TypingIndicator(Gtk.Box):
             self.append(dot)
             self.dots.append(dot)
         self._step = 0
-        self._timer = GLib.timeout_add(300, self._tick)
-        self.connect("unrealize", self._on_unrealize)
+        self._timer = 0
+        self.connect("map", self._on_map)
+        self.connect("unmap", self._on_unmap)
+        self.connect("unrealize", self._on_unmap)
+
+    def _start(self) -> None:
+        if not self._timer:
+            # G_PRIORITY_LOW de propósito: uma animação cosmética não deve
+            # competir com a entrega da resposta da IA, que chega por
+            # GLib.idle_add. Ver "Inanição de prioridade" em
+            # docs/ENDEAVOUROS_PORT.md.
+            self._timer = GLib.timeout_add(300, self._tick, priority=GLib.PRIORITY_LOW)
+
+    def _stop(self) -> None:
+        if self._timer:
+            GLib.source_remove(self._timer)
+            self._timer = 0
+
+    def _on_map(self, *_args) -> None:
+        self._start()
+
+    def _on_unmap(self, *_args) -> None:
+        self._stop()
 
     def _tick(self) -> bool:
+        if not self.get_mapped():
+            self._stop()
+            return GLib.SOURCE_REMOVE
         self._step = (self._step + 1) % (len(self.dots) + 1)
         for i, dot in enumerate(self.dots):
             # Onda da esquerda p/ direita, com uma pausa (step == n_dots) sem brilho.
             dot.set_opacity(1.0 if self._step == i else 0.3)
         return GLib.SOURCE_CONTINUE
-
-    def _on_unrealize(self, *_args) -> None:
-        if self._timer:
-            GLib.source_remove(self._timer)
-            self._timer = None
-
 
 @dataclass
 class ActionRowHandle:
@@ -104,7 +119,6 @@ class ActionRowHandle:
     button: "Gtk.Button"
     action: DesktopAction
     key: str | None
-
 
 class ChatStreamView:
     """Fluxo rolável de mensagens com tela de boas-vindas e ações executáveis."""
