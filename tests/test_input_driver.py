@@ -163,7 +163,9 @@ class ComBackendTest(unittest.TestCase):
     def test_click_invoca_ydotool(self):
         driver = _com_backend()
         x, y = driver.fence.convert_relative_point(0.5, 0.5)
-        with mock.patch("subprocess.run") as run:
+        # subprocesso devolvendo sucesso: o driver agora checa o returncode.
+        ok_proc = mock.Mock(returncode=0, stderr="", stdout="")
+        with mock.patch("subprocess.run", return_value=ok_proc) as run:
             ok, _ = driver.click(x, y)
         self.assertTrue(ok)
         self.assertGreaterEqual(run.call_count, 2, "esperado mousemove + click")
@@ -180,7 +182,8 @@ class ComBackendTest(unittest.TestCase):
 
     def test_hotkey_mapeada_emite_comando(self):
         driver = _com_backend()
-        with mock.patch("subprocess.run") as run:
+        ok_proc = mock.Mock(returncode=0, stderr="", stdout="")
+        with mock.patch("subprocess.run", return_value=ok_proc) as run:
             ok, _ = driver.hotkey("ctrl", "c")
         self.assertTrue(ok)
         run.assert_called_once()
@@ -203,7 +206,8 @@ class WtypeBackendTest(unittest.TestCase):
 
     def test_type_text_invoca_wtype(self):
         driver = _com_wtype()
-        with mock.patch("subprocess.run") as run:
+        ok_proc = mock.Mock(returncode=0, stderr="", stdout="")
+        with mock.patch("subprocess.run", return_value=ok_proc) as run:
             ok, msg = driver.type_text("ls -la", press_enter=True)
         self.assertTrue(ok)
         self.assertIn("wtype", msg)
@@ -215,7 +219,8 @@ class WtypeBackendTest(unittest.TestCase):
 
     def test_hotkey_invoca_wtype(self):
         driver = _com_wtype()
-        with mock.patch("subprocess.run") as run:
+        ok_proc = mock.Mock(returncode=0, stderr="", stdout="")
+        with mock.patch("subprocess.run", return_value=ok_proc) as run:
             ok, msg = driver.hotkey("ctrl", "shift", "v")
         self.assertTrue(ok)
         self.assertIn("wtype", msg)
@@ -224,6 +229,75 @@ class WtypeBackendTest(unittest.TestCase):
         self.assertIn("ctrl", cmd)
         self.assertIn("shift", cmd)
         self.assertIn("v", cmd)
+
+
+class ErrosDoBackendPropagamTest(unittest.TestCase):
+    """Quando o backend EXISTE mas FALHA (sai com erro), o driver tem de contar
+    a verdade. A falha precisa chegar ao modelo, senão ele age sobre uma
+    premissa falsa — exatamente o cenário que o usuário viveu com wtype.
+
+    Até o commit anterior esses métodos ignoravam o returncode: chamavam o
+    subprocesso com check=False e devolviam sucesso mesmo se wtype/ydotool
+    saíssem com erro. Os testes abaixo travam o contrato novo.
+    """
+
+    def _proc(self, *, returncode=0, stderr="", stdout=""):
+        m = mock.Mock()
+        m.returncode = returncode
+        m.stderr = stderr
+        m.stdout = stdout
+        return m
+
+    def test_type_text_wtype_falha_propaga_erro(self):
+        driver = _com_wtype()
+        with mock.patch("subprocess.run", return_value=self._proc(returncode=1, stderr="Wayland connection failed")):
+            ok, msg = driver.type_text("sudo pacman -S spotify")
+        self.assertFalse(ok, "wtype saiu com erro e o app fingiu sucesso — regressão grave")
+        self.assertIn("wtype", msg.lower())
+        self.assertIn("Wayland connection failed", msg)
+
+    def test_type_text_wtype_sucesso_simplifica(self):
+        driver = _com_wtype()
+        with mock.patch("subprocess.run", return_value=self._proc(returncode=0)):
+            ok, msg = driver.type_text("ls")
+        self.assertTrue(ok)
+        # "ls" tem 2 caracteres.
+        self.assertIn("2 caracteres", msg)
+
+    def test_type_text_ydotool_falha_propaga_erro(self):
+        driver = _com_backend()
+        with mock.patch("subprocess.run", return_value=self._proc(returncode=2, stderr="ydotoold not running")):
+            ok, msg = driver.type_text("ls")
+        self.assertFalse(ok)
+        self.assertIn("ydotool", msg.lower())
+        self.assertIn("ydotoold not running", msg)
+
+    def test_hotkey_wtype_falha_propaga_erro(self):
+        driver = _com_wtype()
+        with mock.patch("subprocess.run", return_value=self._proc(returncode=1, stderr="permission denied")):
+            ok, msg = driver.hotkey("ctrl", "c")
+        self.assertFalse(ok)
+        self.assertIn("permission denied", msg)
+
+    def test_click_ydotool_mousemove_falha_propaga(self):
+        driver = _com_backend()
+        with mock.patch("subprocess.run", return_value=self._proc(returncode=1, stderr="no seat")):
+            x, y = driver.fence.convert_relative_point(0.5, 0.5)
+            ok, msg = driver.click(x, y)
+        self.assertFalse(ok)
+        self.assertIn("no seat", msg)
+
+    def test_type_text_com_enter_quando_enter_falha(self):
+        """A primeira chamada pode dar certo (digitar o texto), mas a segunda
+        (Enter) falhar. Tem que reportar a falha, não o sucesso parcial."""
+        driver = _com_wtype()
+        # Primeira chamada OK, segunda (Enter) falha.
+        side_effects = [self._proc(returncode=0), self._proc(returncode=1, stderr="kicked")]
+        with mock.patch("subprocess.run", side_effect=side_effects):
+            ok, msg = driver.type_text("ls", press_enter=True)
+        self.assertFalse(ok, "Enter falhou: a operação como um todo tem que falhar")
+        self.assertIn("Enter", msg)
+        self.assertIn("kicked", msg)
 
 
 if __name__ == "__main__":

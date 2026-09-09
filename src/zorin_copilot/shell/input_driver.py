@@ -112,28 +112,37 @@ class VirtualInputDriver:
         try:
             if self.ydotool_bin:
                 # Move para a coordenada absoluta
-                subprocess.run(
+                mv = subprocess.run(
                     [self.ydotool_bin, "mousemove", "-a", "-x", str(x), "-y", str(y)],
-                    capture_output=True,
-                    timeout=1.5,
-                    check=False,
+                    capture_output=True, text=True, timeout=1.5, check=False,
                 )
+                if mv.returncode != 0:
+                    err = (mv.stderr or mv.stdout or "").strip()
+                    msg = f"ydotool mousemove falhou (código {mv.returncode}" + (f": {err}" if err else "") + ")."
+                    logger.error(msg)
+                    return False, msg
                 time.sleep(0.04)
                 # Dispara clique (down e up)
-                subprocess.run(
+                ck = subprocess.run(
                     [self.ydotool_bin, "click", btn_code],
-                    capture_output=True,
-                    timeout=1.5,
-                    check=False,
+                    capture_output=True, text=True, timeout=1.5, check=False,
                 )
+                if ck.returncode != 0:
+                    err = (ck.stderr or ck.stdout or "").strip()
+                    msg = f"ydotool click falhou (código {ck.returncode}" + (f": {err}" if err else "") + ")."
+                    logger.error(msg)
+                    return False, msg
                 if double:
                     time.sleep(0.08)
-                    subprocess.run(
+                    ck2 = subprocess.run(
                         [self.ydotool_bin, "click", btn_code],
-                        capture_output=True,
-                        timeout=1.5,
-                        check=False,
+                        capture_output=True, text=True, timeout=1.5, check=False,
                     )
+                    if ck2.returncode != 0:
+                        err = (ck2.stderr or ck2.stdout or "").strip()
+                        msg = f"ydotool click (2º) falhou (código {ck2.returncode}" + (f": {err}" if err else "") + ")."
+                        logger.error(msg)
+                        return False, msg
                 msg = f"Clique físico ({button}) executado em ({x}, {y}) via ydotool."
                 logger.info(msg)
                 return True, msg
@@ -168,11 +177,24 @@ class VirtualInputDriver:
         try:
             if self.wtype_bin:
                 cmd = [self.wtype_bin, "--", text]
-                subprocess.run(cmd, capture_output=True, timeout=5.0, check=False)
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=5.0, check=False)
+                if res.returncode != 0:
+                    err = (res.stderr or res.stdout or "").strip()
+                    msg = f"wtype falhou ao digitar (código {res.returncode}" + (f": {err}" if err else "") + ")."
+                    logger.error(msg)
+                    return False, msg
 
                 if press_enter:
                     time.sleep(0.05)
-                    subprocess.run([self.wtype_bin, "-k", "Return"], capture_output=True, timeout=1.0, check=False)
+                    res_k = subprocess.run(
+                        [self.wtype_bin, "-k", "Return"],
+                        capture_output=True, text=True, timeout=1.0, check=False,
+                    )
+                    if res_k.returncode != 0:
+                        err = (res_k.stderr or res_k.stdout or "").strip()
+                        msg = f"wtype falhou ao pressionar Enter (código {res_k.returncode}" + (f": {err}" if err else "") + ")."
+                        logger.error(msg)
+                        return False, msg
 
                 msg = f"Texto digitado com sucesso ({len(text)} caracteres) via wtype."
                 logger.info(msg)
@@ -180,12 +202,25 @@ class VirtualInputDriver:
 
             if self.ydotool_bin:
                 cmd = [self.ydotool_bin, "type", "--", text]
-                subprocess.run(cmd, capture_output=True, timeout=5.0, check=False)
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=5.0, check=False)
+                if res.returncode != 0:
+                    err = (res.stderr or res.stdout or "").strip()
+                    msg = f"ydotool type falhou (código {res.returncode}" + (f": {err}" if err else "") + ")."
+                    logger.error(msg)
+                    return False, msg
 
                 if press_enter:
                     time.sleep(0.05)
                     # 28 é keycode de Enter
-                    subprocess.run([self.ydotool_bin, "key", "28:1", "28:0"], capture_output=True, timeout=1.0, check=False)
+                    res_k = subprocess.run(
+                        [self.ydotool_bin, "key", "28:1", "28:0"],
+                        capture_output=True, text=True, timeout=1.0, check=False,
+                    )
+                    if res_k.returncode != 0:
+                        err = (res_k.stderr or res_k.stdout or "").strip()
+                        msg = f"ydotool key(Enter) falhou (código {res_k.returncode}" + (f": {err}" if err else "") + ")."
+                        logger.error(msg)
+                        return False, msg
 
                 msg = f"Texto digitado com sucesso ({len(text)} caracteres)."
                 logger.info(msg)
@@ -228,7 +263,12 @@ class VirtualInputDriver:
                         main_keys.extend(["-k", key_map_wtype.get(kl, k)])
                 if mods_down or main_keys:
                     full_args = [self.wtype_bin] + mods_down + main_keys + mods_up
-                    subprocess.run(full_args, capture_output=True, timeout=2.0, check=False)
+                    res = subprocess.run(full_args, capture_output=True, text=True, timeout=2.0, check=False)
+                    if res.returncode != 0:
+                        err = (res.stderr or res.stdout or "").strip()
+                        msg = f"wtype falhou no atalho '{keys_str}' (código {res.returncode}" + (f": {err}" if err else "") + ")."
+                        logger.error(msg)
+                        return False, msg
                     return True, f"Atalho '{keys_str}' acionado com sucesso via wtype."
 
             # Mapeamento de códigos evdev comuns para ydotool
@@ -269,7 +309,12 @@ class VirtualInputDriver:
 
                 if down_seq and up_seq:
                     full_args = [self.ydotool_bin, "key"] + down_seq + up_seq
-                    subprocess.run(full_args, capture_output=True, timeout=2.0, check=False)
+                    res = subprocess.run(full_args, capture_output=True, text=True, timeout=2.0, check=False)
+                    if res.returncode != 0:
+                        err = (res.stderr or res.stdout or "").strip()
+                        msg = f"ydotool falhou no atalho '{keys_str}' (código {res.returncode}" + (f": {err}" if err else "") + ")."
+                        logger.error(msg)
+                        return False, msg
                     return True, f"Atalho '{keys_str}' acionado com sucesso."
 
                 # Backend existe, mas nenhuma das teclas pedidas tem keycode

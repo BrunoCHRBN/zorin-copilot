@@ -175,7 +175,11 @@ class VirtualInputDriverTest(unittest.TestCase):
         ]
         self.fence = ScreenFenceManager(monitors=monitors)
         self._which = mock.patch("shutil.which", return_value="/usr/bin/ydotool")
-        self._run = mock.patch("subprocess.run")
+        # subprocesso devolvendo "sucesso" (returncode=0, stderr/stdout vazios).
+        # Antes o driver ignorava o returncode e esses testes passavam mesmo
+        # com mocks quebrados — agora sim validam a emissão de verdade.
+        ok_proc = mock.Mock(returncode=0, stderr="", stdout="")
+        self._run = mock.patch("subprocess.run", return_value=ok_proc)
         self._which.start()
         self.run_mock = self._run.start()
         self.addCleanup(self._which.stop)

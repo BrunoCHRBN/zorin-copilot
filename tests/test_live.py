@@ -1,7 +1,7 @@
 """Testes unitários para o cliente de voz ao vivo (Gemini Live) e execução de ferramentas."""
 
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 from zorin_copilot.ai.live import (
     LIVE_TOOLS_DECLARATION,
@@ -187,7 +187,10 @@ class LiveVoiceClientTest(unittest.TestCase):
         (e não finge sucesso), então o backend é mockado aqui.
         """
         self.client.input_driver.ydotool_bin = "/usr/bin/ydotool"
-        with patch("subprocess.run"):
+        # subprocesso devolvendo sucesso: agora o driver checa o returncode
+        # (antes fingia sucesso, então esses testes passavam mesmo sem mock).
+        ok_proc = Mock(returncode=0, stderr="", stdout="")
+        with patch("subprocess.run", return_value=ok_proc):
             res_click = self.client._dispatch_tool("mouse_click", {"x": 0.5, "y": 0.5, "is_relative": True})
             self.assertTrue(res_click["success"])
 
