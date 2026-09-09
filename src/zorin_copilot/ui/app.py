@@ -1457,6 +1457,7 @@ class ZorinCopilotApp(Adw.Application):
         if is_background:
             # Modo autostart: sem janela, mas com bandeja — senão não há como
             # reabrir o Copilot quando o ambiente não registra atalho global.
+            self.hold()
             self._setup_background_tray(win)
             return 0
         elif is_voice:
