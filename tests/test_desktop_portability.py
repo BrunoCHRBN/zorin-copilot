@@ -295,6 +295,65 @@ class TestHyprlandShortcutFile(unittest.TestCase):
         self.assertTrue(backend.is_registered("crop"))
 
 
+class TestDecorRules(unittest.TestCase):
+    """Regras de decoração (blur/rounding) no snippet do Hyprland: idempotentes e seguras."""
+
+    def setUp(self):
+        import tempfile
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.config_home = Path(self.tmp.name)
+        self._old = os.environ.get("XDG_CONFIG_HOME")
+        os.environ["XDG_CONFIG_HOME"] = str(self.config_home)
+        (self.config_home / "hypr").mkdir(parents=True)
+        (self.config_home / "hypr" / "hyprland.conf").write_text("monitor=,preferred\n", encoding="utf-8")
+
+    def tearDown(self):
+        if self._old is None:
+            os.environ.pop("XDG_CONFIG_HOME", None)
+        else:
+            os.environ["XDG_CONFIG_HOME"] = self._old
+
+    @staticmethod
+    def _hypr_env(with_hyprctl=False):
+        bins = frozenset({"hyprctl"}) if with_hyprctl else frozenset()
+        return env_mod.Environment(desktop="hyprland", session_type="wayland", binaries=bins)
+
+    def test_escreve_bloco_e_inclui_no_config(self):
+        ok, _ = sc.ensure_decor_rules(self._hypr_env())
+        self.assertTrue(ok)
+        snippet = (self.config_home / "hypr" / "zorin-copilot.conf").read_text()
+        self.assertIn("zorin-copilot:decor", snippet)  # marcadores
+        self.assertIn("windowrule = blur,io.github.bruno.ZorinCopilot", snippet)
+        self.assertIn("layerrule = blur,zorin-copilot-pill", snippet)
+        main = (self.config_home / "hypr" / "hyprland.conf").read_text()
+        self.assertIn("zorin-copilot.conf", main)  # garantido o source
+
+    def test_idempotente_nao_duplica_bloco(self):
+        sc.ensure_decor_rules(self._hypr_env())
+        sc.ensure_decor_rules(self._hypr_env())
+        snippet = (self.config_home / "hypr" / "zorin-copilot.conf").read_text()
+        # 2 = abre e fecha do único bloco decor
+        self.assertEqual(snippet.count("zorin-copilot:decor"), 2)
+
+    def test_noop_fora_do_hyprland(self):
+        env = env_mod.Environment(desktop="gnome", session_type="wayland", binaries=frozenset())
+        ok, msg = sc.ensure_decor_rules(env)
+        self.assertFalse(ok)
+        self.assertFalse((self.config_home / "hypr" / "zorin-copilot.conf").exists())
+
+    def test_aplica_ao_vivo_via_hyprctl(self):
+        env = self._hypr_env(with_hyprctl=True)
+        with patch.object(sc.subprocess, "run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stderr="")
+            ok, _ = sc.ensure_decor_rules(env)
+        self.assertTrue(ok)
+        joined = " ".join(" ".join(c.args[0]) for c in mock_run.call_args_list)
+        self.assertIn("hyprctl keyword windowrule blur,io.github.bruno.ZorinCopilot", joined)
+        self.assertIn("hyprctl keyword layerrule blur,zorin-copilot-pill", joined)
+
+
 class TestAutostart(unittest.TestCase):
     def setUp(self):
         import tempfile

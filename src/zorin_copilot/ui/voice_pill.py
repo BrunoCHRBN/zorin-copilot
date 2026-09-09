@@ -22,6 +22,8 @@ import os
 import time
 from typing import Any, Callable, Optional
 
+import cairo
+
 import gi
 
 from .gi_versions import require_gtk4  # noqa: E402
@@ -32,6 +34,8 @@ from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango  # noqa: E402
 from ..ai.live import GeminiLiveClient, LiveVoiceState
 from ..ai.local_voice import LocalLiveVoiceClient
 from ..core.config import CopilotConfig
+from ..core.desktop.env import current_environment
+from .hyprland_effects import hyprland_effects
 from .style import setup_glass_pill_window
 
 logger = logging.getLogger("zorin_copilot.ui.voice_pill")
@@ -90,6 +94,8 @@ class VoicePillWindow(Gtk.Window):
         # ---- Estado interno ----
         self.config = CopilotConfig.load()
         self._alive: bool = True
+        # Namespace estável para o Hyprland casar `layerrule blur` na pílula.
+        self._blur_namespace: str = current_environment().blur_namespace()
 
         # Ancoragem Wayland. Em layer-shell a superfície é posicionada por âncoras
         # e margens, e precisa ser configurada antes de a janela ser realizada —
@@ -180,6 +186,11 @@ class VoicePillWindow(Gtk.Window):
         """
         self._alive = False
         self._release_sources()
+        # Revoga o blur do compositor (best-effort) para não sujar a sessão.
+        try:
+            hyprland_effects.remove_layer_blur(self._blur_namespace)
+        except Exception:
+            pass
 
     def do_unrealize(self) -> None:  # type: ignore[override]
         """Teardown definitivo.
@@ -226,10 +237,15 @@ class VoicePillWindow(Gtk.Window):
         if not _session_type_is_wayland():
             return False
         try:
+            from . import layer_shell
             from .layer_shell import anchor_corner
 
             corner = str(getattr(self.config, "pill_corner", "top-center"))
-            return anchor_corner(self, corner, self._pill_margin)
+            ok = anchor_corner(self, corner, self._pill_margin)
+            if ok:
+                # Namespace estável para o Hyprland casar `layerrule blur/rounding`.
+                layer_shell.set_namespace(self, self._blur_namespace)
+            return ok
         except Exception as exc:
             logger.debug("layer-shell indisponível, usando posicionamento do WM: %s", exc)
             return False
@@ -510,7 +526,27 @@ class VoicePillWindow(Gtk.Window):
     def _color_for(self, state: LiveVoiceState) -> tuple[float, float, float]:
         if not self._palette_resolved:
             self._resolve_theme_colors()
-        return self._palette.get(state, _FALLBACK_PALETTE[LiveVoiceState.LISTENING])
+        rgb = self._palette.get(state, _FALLBACK_PALETTE[LiveVoiceState.LISTENING])
+        self._set_glow_color(rgb)
+        return rgb
+
+    def _set_glow_color(self, rgb: tuple[float, float, float]) -> None:
+        """Espelha a cor do estado na variável CSS `--pill-glow-color`.
+
+        A CSS usa essa var na `box-shadow` da pílula — assim o brilho externo
+        acompanha o estado (fala/pensando/executando) com `transition` suave.
+        Só reescreve quando a cor muda (evita churn de propriedade a cada frame).
+        """
+        cache = getattr(self, "_glow_color_cache", None)
+        if cache == rgb:
+            return
+        self._glow_color_cache = rgb
+        try:
+            r, g, b = rgb
+            rgba = "rgba({:.0f},{:.0f},{:.0f},0.55)".format(r * 255, g * 255, b * 255)
+            self.container.set_css_property("--pill-glow-color", rgba)
+        except Exception:
+            pass
 
     def _invalidate_palette(self) -> None:
         """Esquece as cores resolvidas; serão relidas no próximo _color_for()."""
@@ -547,6 +583,8 @@ class VoicePillWindow(Gtk.Window):
         if not self.get_visible():
             self.present()
         self.place_smart()
+        # Blur real da pílula (Hyprland): aplica uma vez por sessão, se suportado.
+        hyprland_effects.ensure_layer_blur(self._blur_namespace)
         self.drawing_area.queue_draw()
 
     def _ui_on_state_change(self, state: LiveVoiceState, msg: str) -> bool:
@@ -992,6 +1030,47 @@ class VoicePillWindow(Gtk.Window):
             self._draw_waves(cr, pad_x, eff_w, cy, height, lvl, t, r, g, b)
         cr.restore()
 
+    # ------------------------------------------------------------------
+    # Helpers de desenho (spline Bézier + glow local)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _smooth_curve(cr, pts: list) -> None:
+        """Desenha uma curva suave através dos pontos via Catmull-Rom→Bézier cúbica.
+
+        Substitui o `line_to` segmentado por curvas contínuas — o ondulado ganha
+        a suavidade de uma onda real em vez de um polilineo.
+        """
+        if len(pts) < 2:
+            return
+        cr.move_to(pts[0][0], pts[0][1])
+        n = len(pts)
+        for i in range(n - 1):
+            p0 = pts[i - 1] if i > 0 else pts[i]
+            p1 = pts[i]
+            p2 = pts[i + 1]
+            p3 = pts[i + 2] if i + 2 < n else p2
+            c1x = p1[0] + (p2[0] - p0[0]) / 6.0
+            c1y = p1[1] + (p2[1] - p0[1]) / 6.0
+            c2x = p2[0] - (p3[0] - p1[0]) / 6.0
+            c2y = p2[1] - (p3[1] - p1[1]) / 6.0
+            cr.curve_to(c1x, c1y, c2x, c2y, p2[0], p2[1])
+
+    @staticmethod
+    def _stroke_with_glow(cr, r, g, b, lvl, alpha, width) -> None:
+        """Traça o path atual duas vezes: um halo largo e fraco + o traço nítido.
+
+        A intensidade do halo escala com `lvl` (nível de áudio) — é assim que o
+        "blur dinâmico" reage à fala sem tocar no compositor (decisão do redesign:
+        glow local reativo, sem `hyprctl` por frame).
+        """
+        glow_alpha = max(0.05, alpha * (0.22 + 0.6 * lvl))
+        cr.set_line_width(width + 3.0 + 4.0 * lvl)
+        cr.set_source_rgba(r, g, b, glow_alpha)
+        cr.stroke()
+        cr.set_line_width(width)
+        cr.set_source_rgba(r, g, b, alpha)
+        cr.stroke()
+
     def _draw_waves(
         self, cr, pad_x, eff_w, cy, height, lvl, t, r, g, b
     ) -> None:
@@ -1002,10 +1081,11 @@ class VoicePillWindow(Gtk.Window):
             phase = t * 4.2 + norm_k * 0.85
             layer_amp = total_amp * (1.0 - 0.22 * abs(norm_k))
             alpha = max(0.25, (0.5 + 0.5 * lvl) * (1.0 - abs(norm_k) * 0.32))
-            cr.set_line_width(1.7 - 0.3 * abs(norm_k))
-            cr.set_source_rgba(r, g, b, alpha)
-            cr.move_to(pad_x, cy)
-            step_px = 2
+            width = 1.7 - 0.3 * abs(norm_k)
+
+            # Amostra a onda em pontos; a curva Bézier suaviza depois.
+            pts: list = []
+            step_px = 3
             for step_i in range(0, int(eff_w) + 1, step_px):
                 x = pad_x + step_i
                 norm_x = step_i / eff_w
@@ -1014,8 +1094,24 @@ class VoicePillWindow(Gtk.Window):
                     4.0 * math.pi * norm_x - phase * 0.7
                 )
                 y = cy + env * layer_amp * w
-                cr.line_to(x, y)
-            cr.stroke()
+                pts.append((x, y))
+
+            self._smooth_curve(cr, pts)
+
+            if k == 0:
+                # Preenchimento em gradiente sob a curva (só na camada principal).
+                grad = cairo.LinearGradient(0, cy - total_amp, 0, cy + total_amp)
+                grad.add_color_stop_rgba(0, r, g, b, 0.16 * alpha)
+                grad.add_color_stop_rgba(1, r, g, b, 0.0)
+                cr.line_to(pad_x + eff_w, cy + total_amp + 4)
+                cr.line_to(pad_x, cy + total_amp + 4)
+                cr.close_path()
+                cr.set_source(grad)
+                cr.fill()
+                cr.new_path()
+                self._smooth_curve(cr, pts)
+
+            self._stroke_with_glow(cr, r, g, b, lvl, alpha, width)
 
     def _draw_bars(
         self, cr, pad_x, eff_w, cy, height, lvl, t, r, g, b
@@ -1024,7 +1120,6 @@ class VoicePillWindow(Gtk.Window):
         bar_w = max(1.5, eff_w / (n_bars * 1.6))
         gap = (eff_w - bar_w * n_bars) / max(1, n_bars - 1)
         max_amp = height * 0.42
-        cr.set_source_rgba(r, g, b, 0.85)
         for i in range(n_bars):
             # fase por barra + envelope gaussiano no centro
             x = pad_x + i * (bar_w + gap)
@@ -1032,6 +1127,12 @@ class VoicePillWindow(Gtk.Window):
             wave = 0.5 + 0.5 * math.sin(local_phase)
             env = math.exp(-((i - n_bars / 2) ** 2) / (2 * (n_bars / 3) ** 2))
             amp = max(2.0, max_amp * (0.25 + 0.75 * lvl) * env * (0.4 + 0.6 * wave))
+            # halo (glow local, reage ao áudio)
+            cr.set_source_rgba(r, g, b, 0.18 * (0.4 + 0.6 * lvl))
+            cr.rectangle(x - 1.5, cy - amp - 1.5, bar_w + 3, 2 * amp + 3)
+            cr.fill()
+            # barra nítida
+            cr.set_source_rgba(r, g, b, 0.85)
             cr.rectangle(x, cy - amp, bar_w, 2 * amp)
             cr.fill()
 
@@ -1058,6 +1159,14 @@ class VoicePillWindow(Gtk.Window):
     ) -> None:
         cx = pad_x + eff_w / 2
         radius = min(eff_w, height) * 0.30 * (0.6 + 0.4 * lvl)
+        # halo (glow radial reagindo ao áudio)
+        glow = cairo.RadialGradient(cx, cy, radius * 0.2, cx, cy, radius * 1.9)
+        glow.add_color_stop_rgba(0, r, g, b, 0.30 * (0.4 + 0.6 * lvl))
+        glow.add_color_stop_rgba(1, r, g, b, 0.0)
+        cr.set_source(glow)
+        cr.arc(cx, cy, radius * 1.9, 0, 2 * math.pi)
+        cr.fill()
+        # núcleo
         cr.set_source_rgba(r, g, b, 0.15)
         cr.arc(cx, cy, radius, 0, 2 * math.pi)
         cr.fill()

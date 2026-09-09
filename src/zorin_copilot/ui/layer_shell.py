@@ -170,6 +170,23 @@ def set_exclusive_zone(window: Any, pixels: int) -> bool:
         return False
 
 
+def set_namespace(window: Any, namespace: str) -> bool:
+    """Define o namespace da superfície layer-shell.
+
+    O Hyprland casa `layerrule` pelo namespace, não por título — sem isso o
+    `blur`/`rounding` da pílula não teria alvo. Ausente antes deste redesign.
+    """
+    mod = _load()
+    if mod is None:
+        return False
+    try:
+        mod.set_namespace(window, namespace)
+        return True
+    except Exception as exc:
+        logger.debug("set_namespace(%s) falhou: %s", namespace, exc)
+        return False
+
+
 def anchors_for_corner(corner: str) -> tuple[str, ...]:
     """Bordas que devem ser ancoradas para o canto pedido (padrão: top-center)."""
     return _CORNER_ANCHORS.get(corner, ("top",))

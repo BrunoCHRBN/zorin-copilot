@@ -53,6 +53,7 @@ window.glass-window,
 window.glass-window.background,
 window.glass-window > contents {
     background-color: @zc_gray_50;
+    border-radius: 18px;
 }
 
 window.light-glass,
@@ -67,6 +68,58 @@ window.dark-glass.background,
 window.dark-glass > contents {
     background-color: @zc_gray_900;
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 24px 56px rgba(0, 0, 0, 0.55);
+}
+
+/* --- Blur real do compositor vs. fallback de opacidade ---
+   O GTK4 não tem backdrop-filter, então o "vidro" depende do compositor.
+   Quando o compositor desfoca a janela (Hyprland/wlroots, classe .blur-real),
+   baixamos a opacidade do fundo para o desfoque atrás aparecer. Sem suporte
+   (GNOME/Mutter/X11, .blur-fallback) mantemos o fundo quasi-opaco atual. */
+window.glass-window.blur-real,
+window.glass-window.blur-real.background,
+window.glass-window.blur-real > contents {
+    background-color: rgba(245, 245, 247, 0.42);
+}
+window.light-glass.blur-real,
+window.light-glass.blur-real.background,
+window.light-glass.blur-real > contents {
+    background-color: rgba(245, 245, 247, 0.42);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 1.0), 0 20px 48px rgba(0, 0, 0, 0.14);
+}
+window.dark-glass.blur-real,
+window.dark-glass.blur-real.background,
+window.dark-glass.blur-real > contents {
+    background-color: rgba(23, 23, 26, 0.45);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 24px 56px rgba(0, 0, 0, 0.55);
+}
+
+window.glass-window.blur-fallback,
+window.glass-window.blur-fallback.background,
+window.glass-window.blur-fallback > contents {
+    background-color: @zc_gray_50;
+}
+window.light-glass.blur-fallback,
+window.light-glass.blur-fallback.background,
+window.light-glass.blur-fallback > contents {
+    background-color: @zc_gray_50;
+}
+window.dark-glass.blur-fallback,
+window.dark-glass.blur-fallback.background,
+window.dark-glass.blur-fallback > contents {
+    background-color: @zc_gray_900;
+}
+
+/* Sombra dinâmica: janela em segundo plano (backdrop) ganha sombra mais leve e
+   transição suave — dá a sensação de profundidade conforme o foco muda. */
+window.glass-window,
+window.glass-window.background,
+window.glass-window > contents {
+    transition: background-color 200ms ease, box-shadow 220ms ease;
+}
+window.glass-window:backdrop,
+window.glass-window:backdrop.background,
+window.glass-window:backdrop > contents {
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.10), 0 8px 24px rgba(0, 0, 0, 0.30);
 }
 
 /* --- Unificação e Blindagem de Cores dos Ícones (Monocromático Neutro) --- */
@@ -177,13 +230,16 @@ window.glass-window .glass-submit-btn image {
     color: #ffffff;
 }
 
-/* --- HeaderBar Nativa Sólida com Alto Contraste (Blindagem Anti-Vazamento) --- */
-window.glass-window headerbar {
+/* --- HeaderBar Nativa — transparente para o vidro da janela aparecer --- */
+window.glass-window headerbar,
+window.glass-window headerbar.transparent-header {
     box-shadow: none;
+    background-color: transparent;
+    transition: background-color 200ms ease, border-color 200ms ease;
 }
 
 window.light-glass headerbar {
-    background-color: @zc_gray_50;
+    background-color: transparent;
     border-bottom: 1px solid alpha(@zc_gray_800, 0.08);
 }
 
@@ -197,7 +253,7 @@ window.light-glass headerbar windowtitle .subtitle {
 }
 
 window.dark-glass headerbar {
-    background-color: @zc_gray_900;
+    background-color: transparent;
     border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 
@@ -537,20 +593,25 @@ scrollbar slider:hover {
     background-color: alpha(@window_fg_color, 0.45);
 }
 
-/* --- Painel Lateral de Conversas (Estilo Gemini) --- */
-.sidebar-panel {
+/* --- Painel Lateral de Conversas (vidro separado) --- */
+.sidebar-panel,
+.glass-panel {
     padding: 10px;
-    transition: all 200ms ease;
+    border-radius: 16px;
+    margin: 8px 8px 8px 8px;
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+    transition: background-color 200ms ease, box-shadow 200ms ease, border-color 200ms ease;
 }
 
 window.light-glass .sidebar-panel {
-    background-color: @zc_gray_100;
-    border-right: 1px solid alpha(@zc_gray_800, 0.08);
+    background-color: rgba(255, 255, 255, 0.55);
+    border-right: 1px solid alpha(@zc_gray_800, 0.12);
 }
 
 window.dark-glass .sidebar-panel {
-    background-color: @zc_gray_900;
-    border-right: 1px solid rgba(255, 255, 255, 0.08);
+    background-color: rgba(30, 30, 34, 0.55);
+    border-right: 1px solid rgba(255, 255, 255, 0.10);
 }
 
 /* Linhas de chat na barra lateral */
@@ -619,32 +680,34 @@ window.dark-glass .assistant-message-card {
 }
 
 /* --- Barra de Entrada Inferior (Estilo Gemini / Apple Pill) --- */
-.prompt-bar-card {
+.prompt-bar-card,
+.glass-floating {
     border-radius: 28px;
     padding: 4px 8px 4px 12px;
-    transition: all 180ms ease;
+    margin-bottom: 10px;
+    transition: all 180ms ease, box-shadow 200ms ease;
 }
 
 window.light-glass .prompt-bar-card {
-    background-color: rgba(255, 255, 255, 0.98);
+    background-color: rgba(255, 255, 255, 0.85);
     border: 1px solid alpha(@zc_gray_800, 0.12);
-    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.08), inset 0 1px 0 rgba(255, 255, 255, 1.0);
+    box-shadow: 0 14px 36px rgba(0, 0, 0, 0.12), inset 0 1px 0 rgba(255, 255, 255, 1.0);
 }
 
 window.light-glass .prompt-bar-card:focus-within {
     border: 1px solid @accent_color;
-    box-shadow: 0 14px 36px rgba(0, 0, 0, 0.12), inset 0 1px 0 rgba(255, 255, 255, 1.0);
+    box-shadow: 0 16px 42px rgba(0, 0, 0, 0.16), inset 0 1px 0 rgba(255, 255, 255, 1.0);
 }
 
 window.dark-glass .prompt-bar-card {
-    background-color: alpha(@zc_gray_800, 0.96);
+    background-color: rgba(40, 40, 46, 0.80);
     border: 1px solid rgba(255, 255, 255, 0.14);
-    box-shadow: 0 14px 36px rgba(0, 0, 0, 0.40), inset 0 1px 0 rgba(255, 255, 255, 0.10);
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.10);
 }
 
 window.dark-glass .prompt-bar-card:focus-within {
     border: 1px solid @zc_gray_400;
-    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.50), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+    box-shadow: 0 18px 46px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.12);
 }
 
 .prompt-bar-card entry {
@@ -762,14 +825,46 @@ window.voice-pill-window > contents {
     border: 1px solid rgba(255, 255, 255, 0.14);
     border-radius: 20px;
     padding: 8px 16px;
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16), 0 16px 40px rgba(0, 0, 0, 0.50);
-    transition: background-image 180ms ease-in-out, border-color 180ms ease-in-out;
+    /* 0 0 16px var(--pill-glow-color): brilho externo colorido por estado,
+       definido em runtime via --pill-glow-color (transparente = sem brilho). */
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16),
+                0 0 16px var(--pill-glow-color),
+                0 16px 40px rgba(0, 0, 0, 0.50);
+    transition: background-image 180ms ease-in-out, border-color 180ms ease-in-out,
+                box-shadow 220ms ease-in-out;
 }
 
 window.light-glass.voice-pill-window .voice-pill-container {
     background-color: rgba(255, 255, 255, 0.94);
     border: 1px solid rgba(0, 0, 0, 0.08);
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 1.0), 0 12px 32px rgba(0, 0, 0, 0.12);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 1.0),
+                0 0 16px var(--pill-glow-color),
+                0 12px 32px rgba(0, 0, 0, 0.12);
+}
+
+/* Com blur real do compositor (Hyprland), baixa a opacidade para o desfoque
+   atrás aparecer; sem suporte, mantém o fundo quasi-opaco (fallback). */
+.voice-pill-container {
+    --pill-glow-color: alpha(@accent_color, 0.0);
+}
+window.voice-pill-window.blur-real .voice-pill-container {
+    background-color: alpha(@zc_gray_900, 0.40);
+}
+window.light-glass.voice-pill-window.blur-real .voice-pill-container {
+    background-color: rgba(255, 255, 255, 0.42);
+}
+window.voice-pill-window.blur-fallback .voice-pill-container {
+    background-color: alpha(@zc_gray_900, 0.92);
+}
+window.light-glass.voice-pill-window.blur-fallback .voice-pill-container {
+    background-color: rgba(255, 255, 255, 0.94);
+}
+
+/* Em segundo plano a pílula relaxa o brilho e a sombra (sombra dinâmica). */
+.voice-pill-container:backdrop {
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16),
+                0 0 8px rgba(0, 0, 0, 0.0),
+                0 10px 28px rgba(0, 0, 0, 0.40);
 }
 
 .voice-pill-avatar {

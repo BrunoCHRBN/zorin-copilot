@@ -131,6 +131,7 @@ class PromptBar:
         ctx = self.ctx
         self.prompt_bar_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         self.prompt_bar_box.add_css_class("prompt-bar-card")
+        self.prompt_bar_box.add_css_class("glass-floating")
 
         self.vision_btn = self._build_vision_button()
         self.prompt_bar_box.append(self.vision_btn)

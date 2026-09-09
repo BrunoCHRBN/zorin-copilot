@@ -123,10 +123,26 @@ def apply_glass_theme(display: Gdk.Display | None = None) -> None:
 
     _provider_installed = True
 
+def _add_compositor_class(window: Gtk.Widget) -> None:
+    """Marca a janela conforme a capacidade de blur do compositor.
+
+    `blur-real` quando o compositor consegue desfocar a janela (Hyprland/wlroots);
+    `blur-fallback` quando não (GNOME/Mutter/X11) — aí o CSS usa opacidade maior
+    para simular vidro, já que o GTK4 não tem `backdrop-filter`.
+    """
+    from ..core.desktop.env import current_environment
+
+    if current_environment().supports_compositor_blur:
+        window.add_css_class("blur-real")
+    else:
+        window.add_css_class("blur-fallback")
+
+
 def setup_glass_window(window: Adw.ApplicationWindow) -> None:
     """Configura o efeito glassmorphism na janela e sincroniza tema claro/escuro."""
     apply_glass_theme(window.get_display())
     window.add_css_class("glass-window")
+    _add_compositor_class(window)
 
     style_manager = Adw.StyleManager.get_default()
 
@@ -145,6 +161,7 @@ def setup_glass_pill_window(window: Gtk.Window) -> None:
     """Configura o efeito glassmorphism na janela flutuante da pílula de voz e sincroniza temas."""
     apply_glass_theme(window.get_display())
     window.add_css_class("voice-pill-window")
+    _add_compositor_class(window)
 
     style_manager = Adw.StyleManager.get_default()
 

@@ -18,6 +18,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 from zorin_copilot.ai.live import LiveVoiceState
 from zorin_copilot.ui.voice_pill import VoicePillWindow
 
+import cairo
+import math
+
 
 class TestVoicePillWindow(unittest.TestCase):
     @classmethod
@@ -263,6 +266,75 @@ class TestVoicePillWindow(unittest.TestCase):
         first = dict(self.pill._palette)
         self.pill.refresh_theme_colors()
         self.assertEqual(first, self.pill._palette)
+
+
+class TestWaveformGlow(unittest.TestCase):
+    """O visualizador desenha via cairo; validamos sem GTK (surface em memória)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = Adw.Application(application_id="org.zorin.copilot.test.voice_pill.glow")
+
+    def setUp(self):
+        client = MagicMock()
+        client.is_active.return_value = True
+        client.toggle_mute.return_value = True
+        client.is_muted.return_value = False
+        self.pill = VoicePillWindow(
+            application=self.app,
+            live_client=client,
+            on_expand=lambda: None,
+            on_close=lambda: None,
+        )
+
+    def _ctx(self, w=80, h=26):
+        surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, w, h)
+        return surf, cairo.Context(surf)
+
+    def test_smooth_curve_emits_bezier(self):
+        """A spline Catmull-Rom→Bézier deve produzir segmentos curve_to."""
+        _, cr = self._ctx()
+        pts = [(float(x), 13.0 + math.sin(x / 5.0) * 4.0) for x in range(0, 80, 4)]
+        VoicePillWindow._smooth_curve(cr, pts)
+        kinds = [seg[0] for seg in cr.copy_path()]
+        self.assertIn(cairo.PATH_CURVE_TO, kinds)
+        self.assertIn(cairo.PATH_MOVE_TO, kinds)
+
+    def test_smooth_curve_handles_few_points(self):
+        _, cr = self._ctx()
+        # 1 ponto ou 0 não devem levantar.
+        VoicePillWindow._smooth_curve(cr, [])
+        VoicePillWindow._smooth_curve(cr, [(10.0, 13.0)])
+
+    def test_draw_waves_no_crash_silent_and_active(self):
+        """Fluxo real de desenho não pode quebrar em silêncio (lvl=0) nem pico (lvl=1)."""
+        surf, cr = self._ctx()
+        self.pill._draw_waves(cr, 4, 72, 13, 26, 0.0, 1.0, 0.5, 0.4, 0.8)
+        surf2, cr2 = self._ctx()
+        self.pill._draw_waves(cr2, 4, 72, 13, 26, 1.0, 3.0, 0.5, 0.4, 0.8)
+
+    def test_draw_bars_and_orb_no_crash(self):
+        surf, cr = self._ctx()
+        self.pill._draw_bars(cr, 4, 72, 13, 26, 0.6, 2.0, 0.5, 0.4, 0.8)
+        surf2, cr2 = self._ctx()
+        self.pill._draw_orb(cr2, 4, 72, 13, 26, 0.6, 2.0, 0.5, 0.4, 0.8)
+
+    def test_glow_color_cache_avoid_churn(self):
+        """Mesma cor não reescreve a propriedade CSS (evita churn a cada frame)."""
+        calls = []
+
+        def fake_set(prop, val):
+            calls.append((prop, val))
+
+        self.pill.container.set_css_property = fake_set  # type: ignore[assignment]
+        self.pill._glow_color_cache = None
+        self.pill._set_glow_color((0.5, 0.4, 0.8))
+        self.pill._set_glow_color((0.5, 0.4, 0.8))  # repetida → sem novo set
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0][0] == "--pill-glow-color")
+        # cor diferente → reescreve
+        self.pill._set_glow_color((0.1, 0.9, 0.2))
+        self.assertEqual(len(calls), 2)
 
 
 if __name__ == "__main__":

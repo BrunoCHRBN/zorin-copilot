@@ -44,6 +44,7 @@ from ..shell.executor import ActionExecutor, ExecutionReport
 from ..shell.undo import UndoEntry
 from ..shell.wake_word import WakeWordEngine, default_backend
 from ..ai.local_voice import LocalLiveVoiceClient
+from .hyprland_effects import hyprland_effects
 from .live_view import LiveVoiceWidget
 from .preferences import PreferencesDialog
 from .style import setup_glass_window
@@ -160,6 +161,9 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.chat_stream.rebuild()
         self.sidebar.populate()
         self.connect("close-request", self._on_close_request)
+        # Blur real da janela principal (Hyprland): aplica no realize, quando a
+        # superfície XDG já existe e o compositor pode casar a windowrule.
+        self.connect("realize", self._on_realize_window)
         self._init_wake_word()
 
     # ------------------------------------------------------------------
@@ -756,6 +760,13 @@ class CopilotWindow(Adw.ApplicationWindow):
     # ------------------------------------------------------------------
     # Ciclo de vida e HUD
     # ------------------------------------------------------------------
+    def _on_realize_window(self, _win) -> None:
+        """Aplica blur/rounding reais do compositor (Hyprland) à janela principal."""
+        try:
+            hyprland_effects.ensure_window_blur(__app_id__)
+        except Exception as exc:  # nunca deve derrubar a janela
+            logger.debug("não foi possível aplicar blur do compositor: %s", exc)
+
     def _on_close_request(self, _win) -> bool:
         """Em modo HUD, oculta a janela sem matar o processo em segundo plano."""
         if self.live_client and self.live_client.is_active():
@@ -1589,6 +1600,10 @@ class ZorinCopilotApp(Adw.Application):
                 win._cancel_pending_end_session()
                 if win.wake_word_engine is not None:
                     win.wake_word_engine.stop()
+                try:
+                    hyprland_effects.remove_window_blur(__app_id__)
+                except Exception:
+                    pass
         Adw.Application.do_shutdown(self)
 
     def do_activate(self):

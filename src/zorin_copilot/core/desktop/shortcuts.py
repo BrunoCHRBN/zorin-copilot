@@ -787,6 +787,84 @@ def ensure_snippet_sourced(desktop: str, snippet: Path) -> tuple[bool, str]:
         return False, f"Adicione manualmente `{line}` em {main}: {exc}"
 
 
+#: Slot do bloco de decoração (blur/rounding) no snippet do Hyprland.
+SLOT_DECOR: Final = "decor"
+
+#: app_id da janela principal (deve casar com `class:` do Hyprland).
+_DECOR_APP_ID: Final = "io.github.bruno.ZorinCopilot"
+
+
+def _decor_directive() -> str:
+    """Bloco idempotente de regras de vidro/arredondamento para o Hyprland.
+
+    Casa a janela principal pelo ``class:`` (app_id) e a pílula pelo ``namespace``
+    da layer-shell. São regras do app próprio — não globais — e podem ser removidas
+    sem afetar o resto do sistema.
+    """
+    ns = current_environment().blur_namespace()
+    return (
+        f"windowrule = blur,{_DECOR_APP_ID}\n"
+        f"windowrule = rounding,{_DECOR_APP_ID}\n"
+        f"layerrule = blur,{ns}\n"
+        f"layerrule = rounding,{ns}\n"
+    )
+
+
+def _apply_decor_live(directive: str) -> bool:
+    """Aplica cada regra na sessão atual via `hyprctl keyword` (sem reload global)."""
+    ok = True
+    for line in directive.strip().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        # Formato "key = value" -> `hyprctl keyword key value`
+        key, _, value = line.partition("=")
+        args = [key.strip(), *value.strip().split()]
+        try:
+            res = subprocess.run(
+                ["hyprctl", "keyword", *args],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            ok = ok and res.returncode == 0
+        except (OSError, subprocess.SubprocessError) as exc:
+            logger.debug("hyprctl keyword %s falhou: %s", args, exc)
+            ok = False
+    return ok
+
+
+def ensure_decor_rules(env: Environment | None = None) -> tuple[bool, str]:
+    """Escreve (idempotente) e aplica as regras de vidro/arredondamento no Hyprland.
+
+    Gerado no snippet ``zorin-copilot.conf`` (mesmo dos atalhos) e incluído no
+    ``hyprland.conf`` via :func:`ensure_snippet_sourced`. Aplicado ao vivo com
+    ``hyprctl keyword`` para valer na sessão atual. Sem Hyprland, é no-op seguro.
+    """
+    env = env or current_environment()
+    if not env.is_hyprland:
+        return False, "decoração de compositor só é suportada no Hyprland"
+    backend = HyprlandShortcutBackend(env)
+    snippet = backend.snippet_path()
+    try:
+        snippet.parent.mkdir(parents=True, exist_ok=True)
+        existing = snippet.read_text(encoding="utf-8") if snippet.exists() else ""
+        written = backend._rewrite_snippet(existing, SLOT_DECOR, _decor_directive())
+        snippet.write_text(written, encoding="utf-8")
+    except OSError as exc:
+        return False, f"não foi possível gravar {snippet}: {exc}"
+
+    sourced, source_msg = ensure_snippet_sourced(env.desktop, snippet)
+    applied = _apply_decor_live(_decor_directive()) if env.has("hyprctl") else False
+    msg = f"regras de decoração em {snippet}"
+    if applied:
+        msg += " (aplicadas na sessão)"
+    if source_msg:
+        msg += f"; {source_msg}"
+    return True, msg
+
+
 def iter_backends(env: Environment | None = None) -> list[ShortcutBackend]:
     """Backends conhecidos, em ordem de preferência."""
     env = env or current_environment()

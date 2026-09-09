@@ -28,6 +28,7 @@ class HeaderBarWidget:
     def __init__(self, ctx: "CopilotWindow"):
         self.ctx = ctx
         self.header = Adw.HeaderBar()
+        self.header.add_css_class("transparent-header")
 
         self.window_title = Adw.WindowTitle(title="Zorin Copilot", subtitle="Assistente Inteligente")
         self.header.set_title_widget(self.window_title)

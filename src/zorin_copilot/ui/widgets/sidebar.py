@@ -51,6 +51,7 @@ class SidebarPanel:
 
         self.panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         self.panel.add_css_class("sidebar-panel")
+        self.panel.add_css_class("glass-panel")
         self.panel.set_size_request(260, -1)
         self.panel.set_hexpand(False)
 

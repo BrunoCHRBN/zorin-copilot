@@ -304,6 +304,19 @@ print("  Autostart habilitado." if ok else "  Falha ao configurar autostart.")
 PY
 
 # -----------------------------------------------------------------------------
+# 7b. Regras de decoração no Hyprland (blur/rounding por app_id e namespace da pílula)
+# -----------------------------------------------------------------------------
+if [ "$DESKTOP_ENV" = "hyprland" ]; then
+    step "7b/7 Vidro real no Hyprland (blur/rounding)"
+    "$VENV/bin/python3" - <<PY
+from zorin_copilot.core.desktop.env import current_environment
+from zorin_copilot.core.shortcuts import ensure_decor_rules
+ok, msg = ensure_decor_rules(current_environment())
+print("  " + msg)
+PY
+fi
+
+# -----------------------------------------------------------------------------
 # Diagnóstico final
 # -----------------------------------------------------------------------------
 step "Validação e Diagnóstico do Sistema"

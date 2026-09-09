@@ -200,6 +200,30 @@ class Environment:
     def is_kde(self) -> bool:
         return self.desktop == "kde"
 
+    @property
+    def is_hyprland(self) -> bool:
+        """Roda sobre o Hyprland? É o único compositor alvo do blur real (layerrule)."""
+        return self.desktop == "hyprland"
+
+    @property
+    def supports_compositor_blur(self) -> bool:
+        """O compositor consegue desfocar esta janela por app_id/namespace?
+
+        Só wlroots com ``hyprctl`` expõe isso de forma confiável hoje (Hyprland via
+        ``layerrule``/``windowrule``). GNOME/Mutter e X11 não desfocam janelas de
+        app por id — nesses casos a UI recorre a um fallback CSS de opacidade.
+        """
+        return self.is_wlroots and self.has("hyprctl")
+
+    @staticmethod
+    def blur_namespace() -> str:
+        """Namespace estável da pílula de voz para ``layerrule`` do Hyprland.
+
+        Precisa ser constante entre execuções: o ``layerrule blur,<ns>`` é casado
+        pelo namespace da superfície layer-shell, não por título.
+        """
+        return "zorin-copilot-pill"
+
     def has(self, *binaries: str) -> bool:
         """Algum dos binários informados está disponível?"""
         return any(b in self.binaries for b in binaries)
