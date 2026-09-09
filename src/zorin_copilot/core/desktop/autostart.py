@@ -102,7 +102,19 @@ def _enable_compositor(env: Environment, command: str) -> tuple[bool, str]:
     except OSError as exc:
         return False, f"Falha ao gravar {snippet}: {exc}"
 
-    return True, f"Compositor: {snippet}"
+    # O snippet sozinho não faz nada: Hyprland/Sway só leem o config principal.
+    # Sem esta linha o autostart fica "ativo" no relatório e morto no próximo
+    # login. A regra é a mesma dos atalhos, por isso vem do mesmo lugar.
+    from .shortcuts import ensure_snippet_sourced
+
+    sourced, source_msg = ensure_snippet_sourced(env.desktop, snippet)
+    location = f"Compositor: {snippet}"
+    if not sourced:
+        return True, f"{location} — ATENÇÃO: {source_msg}"
+    if source_msg:
+        return True, f"{location} · {source_msg}"
+
+    return True, location
 
 
 def disable(env: Environment | None = None) -> tuple[bool, str]:

@@ -565,21 +565,38 @@ def cmd_rag(args: argparse.Namespace) -> int:
     return 0
 
 
+#: Rótulos legíveis dos backends de atalho. O nome interno do backend é um
+#: identificador ("gnome-media-keys", "hyprland"), não uma frase — e no Zorin
+#: Copilot fora do GNOME dizer "atalhos GNOME" era simplesmente falso.
+_SHORTCUT_BACKEND_LABELS: dict[str, str] = {
+    "gnome-media-keys": "GNOME (media-keys)",
+    "hyprland": "Hyprland (hyprland.conf)",
+    "sway": "Sway (config)",
+    "kde-kglobalaccel": "KDE Plasma (kglobalshortcutsrc)",
+    "global-shortcuts-portal": "Portal XDG (GlobalShortcuts)",
+    "none": "nenhum backend disponível",
+}
+
+
 def cmd_setup(args: argparse.Namespace) -> int:
     did_something = False
 
     if args.all or args.shortcut:
         did_something = True
-        print("Configurando atalhos globais GNOME (<Super>c, <Super><Shift>s e <Super><Shift>v)...")
+        backend = ShortcutManager.backend_name()
+        label = _SHORTCUT_BACKEND_LABELS.get(backend, backend)
+        print(f"Configurando atalhos globais via {label} (<Super>c, <Super><Shift>s e <Super><Shift>v)...")
         ok1 = ShortcutManager.register()
         ok2 = ShortcutManager.register_crop()
         ok3 = ShortcutManager.register_voice()
         if ok1 and ok2 and ok3:
-            print("  ✓ Atalhos globais GNOME registrados com sucesso!")
+            print(f"  ✓ Atalhos registrados no backend {label}.")
         elif ok1 or ok2 or ok3:
             print("  ✓ Atalhos globais registrados com avisos.")
+            print(f"   Detalhe: {ShortcutManager.last_message}")
         else:
-            print("  ✗ Falha ao registrar atalhos via gsettings. Verifique permissões do GNOME.")
+            print(f"  ✗ Falha ao registrar atalhos no backend {label}.")
+            print(f"   Detalhe: {ShortcutManager.last_message}")
 
     if args.all or args.autostart:
         did_something = True

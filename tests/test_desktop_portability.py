@@ -330,6 +330,44 @@ class TestAutostart(unittest.TestCase):
         snippet = (self.config_home / "sway" / "zorin-copilot.conf").read_text()
         self.assertIn("exec zorin-copilot --background", snippet)
 
+    def test_autostart_garante_source_no_hyprland_conf(self):
+        """Regressão: o snippet sozinho é ignorado pelo Hyprland.
+
+        `setup --autostart` gravava o arquivo e respondia "ativo", mas o
+        `hyprland.conf` nunca ganhava o `source =` — o app não subia no login
+        e nada na saída indicava o problema.
+        """
+        hypr = self.config_home / "hypr"
+        hypr.mkdir(parents=True, exist_ok=True)
+        (hypr / "hyprland.conf").write_text("monitor=,preferred\n", encoding="utf-8")
+
+        env = env_mod.Environment(desktop="hyprland", session_type="wayland")
+        ok, msg = auto.enable("zorin-copilot", env)
+
+        self.assertTrue(ok)
+        main = (hypr / "hyprland.conf").read_text()
+        self.assertIn("source =", main)
+        self.assertIn("zorin-copilot.conf", main)
+        # Aviso de "adicione manualmente" não deve aparecer quando deu certo.
+        self.assertNotIn("ATENÇÃO", msg)
+
+    def test_autostart_e_atalho_conviven_no_mesmo_snippet(self):
+        """Os dois mecanismos gravam no mesmo arquivo e exigem um só `source`."""
+        hypr = self.config_home / "hypr"
+        hypr.mkdir(parents=True, exist_ok=True)
+        (hypr / "hyprland.conf").write_text("monitor=,preferred\n", encoding="utf-8")
+
+        env = env_mod.Environment(desktop="hyprland", session_type="wayland")
+        sc.HyprlandShortcutBackend(env).register("hud", "<Super>c", "zorin-copilot --toggle")
+        auto.enable("zorin-copilot", env)
+
+        snippet = (hypr / "zorin-copilot.conf").read_text()
+        self.assertIn("bind = SUPER, c, exec, zorin-copilot --toggle", snippet)
+        self.assertIn("exec-once = zorin-copilot --background", snippet)
+
+        main = (hypr / "hyprland.conf").read_text()
+        self.assertEqual(main.count("source ="), 1)
+
     def test_gnome_usa_apenas_xdg(self):
         env = env_mod.Environment(desktop="gnome", session_type="wayland")
         auto.enable("zorin-copilot", env)

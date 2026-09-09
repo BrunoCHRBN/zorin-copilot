@@ -339,34 +339,13 @@ class _ConfigFileBackend(ShortcutBackend, ABC):
         raise NotImplementedError
 
     def _ensure_sourced(self, snippet: Path) -> tuple[bool, str]:
-        """Garante que o config principal inclui o snippet, sem destruir nada.
+        """Delega para :func:`ensure_snippet_sourced`.
 
-        Se já houver uma inclusão do snippet (ou um glob de ``conf.d`` que o
-        cubra), não mexe em nada. Caso contrário acrescenta a linha ao final,
-        guardando um backup.
+        Atalhos e autostart gravam no *mesmo* snippet. A inclusão no config
+        principal tem de ser garantida pelos dois caminhos, por isso a regra
+        vive numa função só em vez de morar dentro desta classe.
         """
-        main = self.main_config()
-        if not main.exists():
-            return False, f"{main} não existe; adicione `{self._source_line(snippet)}` manualmente."
-
-        try:
-            content = main.read_text(encoding="utf-8")
-        except OSError:
-            return False, f"Não foi possível ler {main}."
-
-        if snippet.name in content or "conf.d" in content:
-            return True, ""
-
-        line = f"{self._source_line(snippet)}\n"
-        try:
-            backup = main.with_suffix(main.suffix + ".bak-copilot")
-            if not backup.exists():
-                backup.write_text(content, encoding="utf-8")
-            with open(main, "a", encoding="utf-8") as handle:
-                handle.write(f"\n{line}")
-            return True, f"Linha adicionada em {main} (backup: {backup.name})."
-        except OSError as exc:
-            return False, f"Adicione manualmente `{line.strip()}` em {main}: {exc}"
+        return ensure_snippet_sourced(self.env.desktop, snippet)
 
     def unregister(self, slot: str) -> ShortcutResult:
         path = self.snippet_path()
@@ -759,6 +738,53 @@ class NullShortcutBackend(ShortcutBackend):
 
     def hint(self) -> str:
         return "Registre manualmente no seu compositor um atalho para `zorin-copilot --toggle`."
+
+
+def ensure_snippet_sourced(desktop: str, snippet: Path) -> tuple[bool, str]:
+    """Garante que o config principal do compositor inclui ``snippet``.
+
+    Hyprland e Sway leem apenas o config principal (``hyprland.conf`` /
+    ``config``); um arquivo solto no diretório de configuração é ignorado
+    silenciosamente. Gravar o snippet sem esta linha produz o pior tipo de
+    falha: o ``setup`` responde "ativo" e nada acontece no próximo login.
+
+    Atalhos e autostart gravam no mesmo arquivo, então a regra tem de viver
+    fora das classes — os dois caminhos chamam esta função.
+
+    Devolve ``(incluído, mensagem)``. A mensagem diz o que fazer quando não é
+    possível tocar no config do usuário.
+    """
+    base = Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config"))
+    if desktop == "hyprland":
+        main = base / "hypr" / "hyprland.conf"
+    elif desktop == "sway":
+        main = base / "sway" / "config"
+    else:
+        return True, ""
+
+    line = f"source = {snippet}" if desktop == "hyprland" else f"include {snippet}"
+
+    if not main.exists():
+        return False, f"{main} não existe; adicione `{line}` manualmente."
+
+    try:
+        content = main.read_text(encoding="utf-8")
+    except OSError:
+        return False, f"Não foi possível ler {main}."
+
+    # Já incluído (direto ou por um glob de conf.d): não mexe em nada.
+    if snippet.name in content or "conf.d" in content:
+        return True, ""
+
+    try:
+        backup = main.with_suffix(main.suffix + ".bak-copilot")
+        if not backup.exists():
+            backup.write_text(content, encoding="utf-8")
+        with open(main, "a", encoding="utf-8") as handle:
+            handle.write(f"\n{line}\n")
+        return True, f"Linha adicionada em {main} (backup: {backup.name})."
+    except OSError as exc:
+        return False, f"Adicione manualmente `{line}` em {main}: {exc}"
 
 
 def iter_backends(env: Environment | None = None) -> list[ShortcutBackend]:

@@ -159,6 +159,50 @@ Para ícone na bandeja, adicione o módulo `tray` à sua waybar.
 ~/.local/share/zorin-copilot/venv/bin/pip install -e ".[voice]"
 ```
 
+### Checklist para rodar limpo e sem interrupção
+
+A instalação sozinha não sustenta o app de pé. Esta é a lista do que cada
+recurso exige em Hyprland, verificada contra o código (não contra a memória):
+
+| Recurso | Exige | Se faltar |
+|---|---|---|
+| App abre | `python-gobject`, `gtk4`, `libadwaita`, `at-spi2-core` | GTK **aborta** sem o barramento AT-SPI (`dbind-ERROR`) |
+| Captura de tela | `grim` + `slurp` | cai no portal XDG; sem `xdg-desktop-portal-hyprland` a chamada D-Bus estoura |
+| Recorte (área) | `slurp` | `grim` é chamado sem geometria, ou erro explícito |
+| Atalho global | backend `hyprland` + `hyprctl` | grava o `bind` mas não aplica na sessão atual |
+| Persistência do atalho | `source` do snippet no `hyprland.conf` | funciona até o reboot e depois desaparece |
+| Autostart | `exec-once` **e** `source` do snippet | `setup --status` diz "ativo" e nada sobe no login |
+| Ícone na bandeja | watcher SNI (módulo `tray` da waybar) | `--background` fica invisível e inalcançável |
+| Notificações | `libnotify` (`notify-send`) ou mako | ação de notificar falha |
+| Área de transferência | `wl-clipboard` | copiar/colar em Wayland não funciona |
+| Volume / áudio | `wireplumber` + `pipewire-pulse` (`wpctl`) | controles de áudio ficam mudos |
+| Bloqueio de tela | `hyprlock` (ou `swaylock`) | cai para `loginctl lock-session` |
+| Injeção de input | `ydotool` + usuário no grupo `input` | cliques/digitação não acontecem |
+
+```bash
+sudo pacman -S --needed python-gobject gtk4 libadwaita poppler at-spi2-core \
+    grim slurp wl-clipboard libnotify wireplumber pipewire-pulse hyprlock \
+    xdg-desktop-portal xdg-desktop-portal-hyprland
+yay -S ydotool && sudo usermod -aG input "$USER"   # requer relogin
+```
+
+Depois de instalar, o próprio app diz o que falta:
+
+```bash
+zorin-copilot-cli doctor     # 14 verificações, com ✓/✗ por item
+```
+
+**Dois defeitos corrigidos nesta leva** (ambos silenciosos, ambos descobertos
+rodando o caminho Hyprland de verdade, não lendo o código):
+
+1. `setup --autostart` gravava `~/.config/hypr/zorin-copilot.conf` mas **não
+   acrescentava o `source =` ao `hyprland.conf`**. O relatório dizia
+   "Autostart: ✓ Ativo" e o app nunca subia no login. Agora autostart e atalhos
+   chamam a mesma função (`ensure_snippet_sourced`), então não há mais como um
+   caminho garantir a inclusão e o outro esquecer.
+2. `setup --all` imprimia "Atalhos globais **GNOME** registrados" mesmo quando
+   o backend usado era o Hyprland. A saída agora cita o backend real.
+
 ### Pelo pacote Arch (`makepkg`)
 
 ```bash

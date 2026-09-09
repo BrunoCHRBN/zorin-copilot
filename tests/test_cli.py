@@ -46,7 +46,9 @@ class CLISubcommandsTest(unittest.TestCase):
         code = main(["setup", "--shortcut"])
         self.assertEqual(code, 0)
         out = mock_stdout.getvalue()
-        self.assertIn("registrados com sucesso", out)
+        # A mensagem cita o backend real; "GNOME" cravado seria mentira em
+        # Hyprland/Sway/KDE — e era exatamente o que a saída antiga dizia.
+        self.assertIn("Atalhos registrados", out)
 
     @patch("zorin_copilot.core.shortcuts.AutostartManager.enable", return_value=True)
     @patch("sys.stdout", new_callable=io.StringIO)
