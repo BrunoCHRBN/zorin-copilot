@@ -199,5 +199,45 @@ class LiveBlocklistTest(unittest.TestCase):
         self.assertEqual(out["app"], "Navegador")
 
 
+class EndSessionRiskTest(unittest.TestCase):
+    """`end_session` é classificado pelo ARGUMENTO, não só pelo nome.
+
+    Entrar em HIGH_RISK_TOOLS travaria o modo standby — que é justamente o
+    caminho seguro que não pode exigir confirmação a cada despedida.
+    """
+
+    def setUp(self):
+        self.policy = RiskPolicy()
+
+    def test_standby_is_safe(self):
+        self.assertEqual(self.policy.classify("end_session", {"mode": "standby"})[0], RiskLevel.SAFE)
+
+    def test_mode_omitido_eh_standby_e_portanto_seguro(self):
+        self.assertEqual(self.policy.classify("end_session", {})[0], RiskLevel.SAFE)
+        self.assertEqual(self.policy.classify("end_session", None)[0], RiskLevel.SAFE)
+
+    def test_maiusculo_eh_normalizado(self):
+        self.assertEqual(self.policy.classify("end_session", {"mode": "STANDBY"})[0], RiskLevel.SAFE)
+        self.assertEqual(self.policy.classify("end_session", {"mode": " Quit "})[0], RiskLevel.CONFIRM)
+
+    def test_quit_requires_confirmation(self):
+        level, desc = self.policy.classify("end_session", {"mode": "quit"})
+        self.assertEqual(level, RiskLevel.CONFIRM)
+        self.assertIn("aplicativo", desc)
+
+    def test_end_session_nao_esta_em_high_risk_tools(self):
+        from zorin_copilot.shell.risk import HIGH_RISK_TOOLS
+
+        self.assertNotIn("end_session", HIGH_RISK_TOOLS)
+
+    def test_end_session_declarada(self):
+        names = {
+            f["name"]
+            for grp in LIVE_TOOLS_DECLARATION
+            for f in grp["functionDeclarations"]
+        }
+        self.assertIn("end_session", names)
+
+
 if __name__ == "__main__":
     unittest.main()

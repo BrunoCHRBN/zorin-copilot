@@ -71,6 +71,22 @@ class CopilotConfig:
     wake_phrases: list = field(default_factory=lambda: ["ok copilot", "olá copilot"])
     wake_word_model_path: str = ""  # caminho do modelo Vosk (ex.: pt-BR)
 
+    # Ajustes finos da palavra de ativação.
+    # O cooldown existe porque o Vosk reemite o mesmo texto várias vezes por
+    # segundo enquanto a fala acontece: sem ele, uma única frase "ok copilot"
+    # disparava a ativação várias vezes seguidas.
+    wake_word_cooldown_sec: float = 4.0  # intervalo mínimo entre duas ativações
+    wake_word_echo_delay_sec: float = 1.2  # fica "surdo" após a IA falar (anti-eco)
+    wake_word_sensitivity: float = 0.5  # 0..1 (1 = detecta até voz baixa)
+    wake_word_vad_enabled: bool = True  # ignora silêncio: menos CPU e menos falsos positivos
+    wake_word_device: str = ""  # alvo opcional do pw-record/arecord; vazio = padrão
+    wake_word_match_partials: bool = False  # casar em resultados parciais (mais rápido, menos preciso)
+
+    # Encerramento autônomo da sessão pelo agente (ferramenta `end_session`).
+    # Fechar o aplicativo SEMPRE pede confirmação verbal, independente daqui.
+    end_session_enabled: bool = True  # False = a ferramenta não é oferecida ao modelo
+    end_session_grace_sec: float = 4.0  # espera a despedida falada antes de encerrar (0..15)
+
     # Configurações de Voz Local (Piper TTS + faster-whisper)
     piper_voice_model: str = "pt_BR-faber-medium"
     whisper_model: str = "small"

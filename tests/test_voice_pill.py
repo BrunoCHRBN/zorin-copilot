@@ -9,7 +9,7 @@ import gi
 
 from zorin_copilot.ui.gi_versions import require_gtk4  # noqa: E402
 require_gtk4()
-from gi.repository import Adw, Gtk  # noqa: E402
+from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
 Adw.init()
 
@@ -146,7 +146,124 @@ class TestVoicePillWindow(unittest.TestCase):
         except Exception as exc:  # pragma: no cover
             self.fail(f"place_smart não deveria levantar, levantou: {exc}")
 
+    # --- ciclo de vida / teardown (sem vazamento de frame clock) ---
+
+    def test_tick_paused_while_hidden(self):
+        """Esconder a pílula remove o tick; reexibir religa. `_alive` continua True.
+
+        A pílula é reaproveitada entre sessões, então pausar não pode matá-la.
+        """
+        self.pill.present()
+        self.assertTrue(self.pill.get_visible())
+
+        self.pill.set_visible(False)
+        self.assertEqual(self.pill._tick_id, 0)
+        self.assertTrue(self.pill._alive, "esconder não deve matar a pílula")
+
+        self.pill.set_visible(True)
+        self.assertNotEqual(self.pill._tick_id, 0)
+
+    def test_start_tick_is_idempotent(self):
+        """_start_tick() repetido não empilha callbacks."""
+        self.pill.present()
+        first = self.pill._tick_id
+        self.pill._start_tick()
+        self.pill._start_tick()
+        self.assertEqual(self.pill._tick_id, first)
+
+    def test_close_request_hides_without_destroying(self):
+        """do_close_request apenas esconde (retorna True) e avisa o callback.
+
+        Destruir aqui faria a próxima invocação recriar a janela do zero — e
+        perder o posicionamento/estado já resolvidos.
+        """
+        self.pill.present()
+        handled = self.pill.do_close_request()
+        self.assertTrue(handled)
+        self.assertFalse(self.pill.get_visible())
+        self.assertTrue(self.pill._alive, "fechar não deve destruir a pílula")
+        self.assertTrue(self.close_called)
+
+    def test_teardown_zeroes_source_ids(self):
+        """_teardown() mata tick + os dois timers e marca _alive=False."""
+        self.pill.present()
+        # Cria timers reais para provar que são removidos (e não só esquecidos).
+        self.pill._session_timer_id = GLib.timeout_add_seconds(60, lambda: GLib.SOURCE_REMOVE)
+        self.pill._chip_restore_id = GLib.timeout_add_seconds(60, lambda: GLib.SOURCE_REMOVE)
+        self.assertNotEqual(self.pill._tick_id, 0)
+
+        self.pill._teardown()
+
+        self.assertFalse(self.pill._alive)
+        self.assertEqual(self.pill._tick_id, 0)
+        self.assertEqual(self.pill._session_timer_id, 0)
+        self.assertEqual(self.pill._chip_restore_id, 0)
+
+    def test_teardown_is_idempotent(self):
+        """Chamar _teardown() duas vezes não levanta."""
+        self.pill._teardown()
+        self.pill._teardown()
+        self.assertFalse(self.pill._alive)
+
+    def test_destroy_runs_teardown(self):
+        """destroy() dispara do_unrealize → teardown.
+
+        No GTK4 não existe sinal "destroy" em widget; `unrealize` é o único
+        ponto seguro. Sem ele cada pílula criada deixava um tick callback
+        rodando para sempre.
+        """
+        self.pill.present()
+        self.assertTrue(self.pill.get_realized())
+        self.pill.destroy()
+        self.assertFalse(self.pill._alive)
+        self.assertEqual(self.pill._tick_id, 0)
+
+    # --- "Preparando..." (feedback imediato na invocação) ---
+
+    def test_show_preparing_then_listening(self):
+        """show_preparing() mostra a pílula na hora; o estado real substitui o texto."""
+        self.pill.show_preparing()
+        self.assertEqual(self.pill.status_lbl.get_text(), "Preparando...")
+        self.assertTrue(self.pill._preparing)
+
+        # CONNECTING é o estado "ainda preparando" — não deve limpar a flag.
+        self.pill._ui_on_state_change(LiveVoiceState.CONNECTING, "")
+        self.assertTrue(self.pill._preparing)
+
+        # Qualquer estado real encerra o provisório.
+        self.pill._ui_on_state_change(LiveVoiceState.LISTENING, "")
+        self.assertEqual(self.pill.status_lbl.get_text(), "Ouvindo você...")
+        self.assertFalse(self.pill._preparing)
+
+    def test_show_preparing_presents_window(self):
+        """show_preparing() deve tornar a pílula visível imediatamente."""
+        self.assertFalse(self.pill.get_visible())
+        self.pill.show_preparing()
+        self.assertTrue(self.pill.get_visible())
+
+    # --- paleta (re-resolução na troca de tema) ---
+
+    def test_palette_invalidated_on_theme_change(self):
+        """Trocar de tema invalida o cache; refresh_theme_colors() resolve de novo."""
+        self.pill._color_for(LiveVoiceState.LISTENING)
+        self.assertTrue(self.pill._palette_resolved)
+        self.assertTrue(self.pill._palette)
+
+        self.pill._on_theme_changed()
+        self.assertFalse(self.pill._palette_resolved)
+        self.assertEqual(self.pill._palette, {})
+
+        self.pill.refresh_theme_colors()
+        self.assertTrue(self.pill._palette_resolved)
+        self.assertTrue(self.pill._palette)
+
+    def test_palette_reresolve_replaces_instead_of_merging(self):
+        """Re-resolver não pode mesclar lixo da resolução anterior."""
+        self.pill.refresh_theme_colors()
+        first = dict(self.pill._palette)
+        self.pill.refresh_theme_colors()
+        self.assertEqual(first, self.pill._palette)
+
 
 if __name__ == "__main__":
-    unittest.main()
     unittest.main()

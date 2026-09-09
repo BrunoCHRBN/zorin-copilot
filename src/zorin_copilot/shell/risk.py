@@ -16,6 +16,8 @@ class RiskLevel(Enum):
 
 
 # Ferramentas que, por natureza, podem causar efeitos difíceis de desfazer ou expor dados.
+# NOTA: `end_session` NÃO entra aqui — o risco depende do argumento `mode`
+# (standby é seguro, quit não). Ver `RiskPolicy.classify`.
 HIGH_RISK_TOOLS = {
     "email_compose",
     "write_document",
@@ -27,6 +29,7 @@ RISK_DESCRIPTION = {
     "email_compose": "envio de e-mail",
     "write_document": "escrita/sobrescrita de arquivo",
     "organize_directory": "reorganização de arquivos",
+    "end_session": "encerramento completo do aplicativo",
 }
 
 # Atalhos cuja execução tipicamente fecha/encerra aplicativos ou perde estado.
@@ -64,6 +67,15 @@ class RiskPolicy:
             hotkey = _normalize_hotkey(args.get("keys"))
             if hotkey in DESTRUCTIVE_HOTKEYS:
                 return RiskLevel.CONFIRM, "atalho destrutivo (fecha/encerra aplicativo)"
+
+        # Arg-aware de propósito: "standby" só encerra a chamada e deixa o
+        # Copilot em espera ouvindo a palavra de ativação — é seguro e não pode
+        # exigir confirmação, senão toda despedida viraria uma pergunta chata.
+        # Só "quit" mata o processo, e esse passa pelo gate.
+        if name == "end_session":
+            mode = str(args.get("mode", "standby") or "standby").strip().lower()
+            if mode == "quit":
+                return RiskLevel.CONFIRM, RISK_DESCRIPTION.get(name, "encerramento do aplicativo")
 
         return RiskLevel.SAFE, ""
 

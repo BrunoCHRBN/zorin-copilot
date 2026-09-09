@@ -123,10 +123,93 @@ class VoicePillWindow(Gtk.Window):
         self._video_streaming: bool = False
         self._privacy_shielded: bool = False
 
+        # "Preparando...": mostrado no instante em que a wake word/atalho
+        # invoca o Copilot, antes de o WebSocket conectar. Sem isso a pílula só
+        # aparecia segundos depois e parecia que o comando não tinha sido ouvido.
+        self._preparing: bool = False
+
         self._build_ui()
         setup_glass_pill_window(self)
         self._connect_client_events()
         self._install_global_handlers()
+        # Não faz sentido animar a 60fps uma janela invisível.
+        self.connect("notify::visible", self._on_visible_changed)
+
+    # ------------------------------------------------------------------
+    # Ciclo de vida (teardown sem vazamentos)
+    # ------------------------------------------------------------------
+    def _start_tick(self) -> None:
+        """Liga o callback de frame clock (idempotente)."""
+        if self._tick_id == 0 and self._alive and self.drawing_area is not None:
+            try:
+                self._tick_id = self.drawing_area.add_tick_callback(self._on_visualizer_tick)
+            except Exception:
+                self._tick_id = 0
+
+    def _stop_tick(self) -> None:
+        """Desliga o callback de frame clock (idempotente)."""
+        if self._tick_id:
+            try:
+                self.drawing_area.remove_tick_callback(self._tick_id)
+            except Exception:
+                pass
+            self._tick_id = 0
+
+    def _release_sources(self) -> None:
+        """Para animação e timers **sem** matar a pílula.
+
+        A pílula é reutilizada entre sessões (só é escondida, nunca destruída),
+        então fechar não pode zerar `_alive` — do contrário ela voltaria morta
+        na próxima invocação.
+        """
+        self._stop_tick()
+        for attr in ("_session_timer_id", "_chip_restore_id"):
+            src = getattr(self, attr, 0)
+            if src:
+                try:
+                    GLib.source_remove(src)
+                except Exception:
+                    pass
+                setattr(self, attr, 0)
+
+    def _teardown(self) -> None:
+        """Teardown definitivo: a pílula não volta a ser usada. Idempotente.
+
+        Antes `_alive` nunca virava False e `_tick_id` nunca era removido — cada
+        pílula criada deixava um callback de frame clock rodando para sempre.
+        """
+        self._alive = False
+        self._release_sources()
+
+    def do_unrealize(self) -> None:  # type: ignore[override]
+        """Teardown definitivo.
+
+        No GTK4 o widget **não** tem mais sinal "destroy" (e `do_destroy` não é
+        vfunc); `unrealize` é o ponto em que a janela está sendo desmontada de
+        verdade. Sem isto o callback de frame clock vazava por pílula criada.
+        """
+        try:
+            self._teardown()
+        except Exception:
+            pass
+        try:
+            Gtk.Window.do_unrealize(self)
+        except Exception:
+            pass
+
+    def do_close_request(self) -> bool:  # type: ignore[override]
+        """Fechar apenas esconde: a pílula é reaproveitada na próxima sessão."""
+        self._release_sources()
+        self.set_visible(False)
+        if self.on_close_cb:
+            self.on_close_cb()
+        return True  # True = tratamos nós; não destruir a janela
+
+    def _on_visible_changed(self, *_args) -> None:
+        if self.get_visible():
+            self._start_tick()
+        else:
+            self._release_sources()
 
     # ------------------------------------------------------------------
     # Construção
@@ -233,7 +316,7 @@ class VoicePillWindow(Gtk.Window):
         self.drawing_area.set_content_height(26)
         self.drawing_area.set_valign(Gtk.Align.CENTER)
         self.drawing_area.set_draw_func(self._draw_wave_func)
-        self._tick_id = self.drawing_area.add_tick_callback(self._on_visualizer_tick)
+        self._start_tick()
         self.container.append(self.drawing_area)
 
         # 4. Separador sutil
@@ -353,6 +436,15 @@ class VoicePillWindow(Gtk.Window):
             self.set_keep_above(bool(getattr(self.config, "pill_pinned", True)))
         except Exception:
             pass
+        # Re-resolver a paleta quando o tema claro/escuro (ou alto contraste)
+        # mudar; sem isto as cores ficavam presas na primeira resolução.
+        try:
+            sm = Adw.StyleManager.get_default()
+            sm.connect("notify::dark", self._on_theme_changed)
+            if hasattr(sm, "get_high_contrast"):
+                sm.connect("notify::high-contrast", self._on_theme_changed)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Helpers de estado
@@ -394,6 +486,7 @@ class VoicePillWindow(Gtk.Window):
         if self._palette_resolved:
             return
         self._palette_resolved = True
+        self._palette.clear()  # re-resolução substitui em vez de mesclar
         for state, probe in self._probes.items():
             try:
                 color = probe.get_color()
@@ -419,13 +512,50 @@ class VoicePillWindow(Gtk.Window):
             self._resolve_theme_colors()
         return self._palette.get(state, _FALLBACK_PALETTE[LiveVoiceState.LISTENING])
 
+    def _invalidate_palette(self) -> None:
+        """Esquece as cores resolvidas; serão relidas no próximo _color_for()."""
+        self._palette_resolved = False
+        self._palette.clear()
+        self.drawing_area.queue_draw()
+
+    def _on_theme_changed(self, *_args) -> None:
+        # Sem isto a paleta ficava travada na primeira resolução: trocar para
+        # claro/escuro (ou recarregar o CSS do usuário) não mudava as cores.
+        self._invalidate_palette()
+
+    def refresh_theme_colors(self) -> None:
+        """Recarrega a paleta agora (tema trocado / CSS recarregado)."""
+        self._invalidate_palette()
+        self._resolve_theme_colors()
+
     # ------------------------------------------------------------------
     # Handlers de estado / sinal (chamados via GLib.idle_add)
     # ------------------------------------------------------------------
+    def show_preparing(self) -> None:
+        """Mostra a pílula na hora, antes de o WebSocket conectar.
+
+        Chamada no instante da invocação (wake word/atalho). Sem isso a pílula
+        só surgia quando o Live já estava de pé — segundos de tela vazia que
+        pareciam "ele não me ouviu".
+        """
+        self._preparing = True
+        self._bump_activity()
+        self._set_idle(False)
+        self.status_lbl.set_text("Preparando...")
+        self.avatar_icon.set_from_icon_name("network-transmit-receive-symbolic")
+        self._current_state = LiveVoiceState.CONNECTING
+        if not self.get_visible():
+            self.present()
+        self.place_smart()
+        self.drawing_area.queue_draw()
+
     def _ui_on_state_change(self, state: LiveVoiceState, msg: str) -> bool:
         if not self._alive:
             return GLib.SOURCE_REMOVE
         self._current_state = state
+        # Qualquer estado real encerra o "Preparando..." provisório.
+        if state != LiveVoiceState.CONNECTING:
+            self._preparing = False
         self._bump_activity()
 
         # Map estado → (status, icon) — preserve EXACTAMENTE os textos que os testes pinam

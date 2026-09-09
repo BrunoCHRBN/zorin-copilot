@@ -392,6 +392,74 @@ class PreferencesDialog(Adw.PreferencesDialog):
         self.wake_model_row = Adw.EntryRow(title="Caminho do Modelo Vosk (ex.: ~/modelos/vosk-pt)")
         wake_group.add(self.wake_model_row)
 
+        # --- Ajustes finos -------------------------------------------------
+        # O Vosk reemite o mesmo texto várias vezes por segundo enquanto a fala
+        # acontece; sem estes controles uma única frase disparava a ativação
+        # várias vezes seguidas.
+        self.wake_sensitivity_row = Adw.ActionRow(
+            title="Sensibilidade do Microfone",
+            subtitle="Mais alta: detecta até voz baixa (pode gerar falsos positivos). "
+            "Mais baixa: exige fala mais alta.",
+        )
+        self.wake_sensitivity_scale = Gtk.Scale.new_with_range(
+            Gtk.Orientation.HORIZONTAL, 0.0, 1.0, 0.05
+        )
+        self.wake_sensitivity_scale.set_draw_value(True)
+        self.wake_sensitivity_scale.set_digits(2)
+        self.wake_sensitivity_scale.set_size_request(150, -1)
+        self.wake_sensitivity_row.add_suffix(self.wake_sensitivity_scale)
+        wake_group.add(self.wake_sensitivity_row)
+
+        self.wake_cooldown_row = Adw.ActionRow(
+            title="Intervalo entre Ativações (s)",
+            subtitle="Tempo mínimo entre duas ativações — evita disparos repetidos da mesma fala.",
+        )
+        self.wake_cooldown_spin = Gtk.SpinButton.new_with_range(0.0, 30.0, 0.5)
+        self.wake_cooldown_spin.set_digits(1)
+        self.wake_cooldown_spin.set_valign(Gtk.Align.CENTER)
+        self.wake_cooldown_row.add_suffix(self.wake_cooldown_spin)
+        wake_group.add(self.wake_cooldown_row)
+
+        self.wake_echo_row = Adw.ActionRow(
+            title="Espera Após a Resposta (s)",
+            subtitle="Fica surdo por esse tempo depois que a IA fala — evita que a própria "
+            "resposta reative o Copilot.",
+        )
+        self.wake_echo_spin = Gtk.SpinButton.new_with_range(0.0, 10.0, 0.1)
+        self.wake_echo_spin.set_digits(1)
+        self.wake_echo_spin.set_valign(Gtk.Align.CENTER)
+        self.wake_echo_row.add_suffix(self.wake_echo_spin)
+        wake_group.add(self.wake_echo_row)
+
+        self.wake_vad_row = Adw.SwitchRow(
+            title="Ignorar Silêncio (VAD)",
+            subtitle="Só processa o áudio quando há fala — menos CPU e menos falsos positivos.",
+        )
+        wake_group.add(self.wake_vad_row)
+
+        self.wake_device_row = Adw.EntryRow(
+            title="Dispositivo de Microfone (opcional)",
+        )
+        self.wake_device_row.set_tooltip_text(
+            "Nome ou alvo do PipeWire/ALSA. Vazio = padrão do sistema."
+        )
+        wake_group.add(self.wake_device_row)
+
+        # Teste de nível: o usuário confere o microfone antes de sair falando.
+        self.wake_test_row = Adw.ActionRow(
+            title="Testar Microfone",
+            subtitle="Clique em Testar e fale: a barra mostra o nível capturado.",
+        )
+        self.wake_level_bar = Gtk.LevelBar.new_for_interval(0.0, 1.0)
+        self.wake_level_bar.set_size_request(120, -1)
+        self.wake_level_bar.set_valign(Gtk.Align.CENTER)
+        self.wake_test_button = Gtk.Button(label="Testar")
+        self.wake_test_button.set_valign(Gtk.Align.CENTER)
+        self.wake_test_button.connect("clicked", self._on_test_microphone)
+        self.wake_test_row.add_suffix(self.wake_level_bar)
+        self.wake_test_row.add_suffix(self.wake_test_button)
+        wake_group.add(self.wake_test_row)
+
         wake_info_row = Adw.ActionRow(
             title="Como Funciona a Palavra de Ativação",
             subtitle="Diga uma das frases (ex.: \"ok copilot\") para iniciar a conversa por voz. "
@@ -401,6 +469,50 @@ class PreferencesDialog(Adw.PreferencesDialog):
         wake_info_row.set_subtitle_lines(4)
         wake_group.add(wake_info_row)
         page.add(wake_group)
+
+    def _on_test_microphone(self, _btn: Gtk.Button) -> None:
+        """Amostra o microfone por ~2,5s em thread e mostra o nível na barra.
+
+        Roda em thread porque `sample_level()` bloqueia lendo o PCM; o resultado
+        volta para a main thread via GLib.idle_add.
+        """
+        if getattr(self, "_mic_test_running", False):
+            return
+        self._mic_test_running = True
+        self.wake_test_button.set_label("Ouvindo...")
+        self.wake_test_button.set_sensitive(False)
+        self.wake_test_row.set_subtitle("Fale agora...")
+        device = self.wake_device_row.get_text().strip()
+
+        def _sample() -> None:
+            peak = 0.0
+            err = ""
+            try:
+                from ..shell.wake_word import VoskWakeWordBackend
+
+                # model_path vazio de propósito: medir o nível não depende do
+                # modelo, e assim não pagamos o custo de carregá-lo.
+                backend = VoskWakeWordBackend(model_path="", vad_enabled=False, device=device)
+                peak = backend.sample_level(2.5)
+            except Exception as exc:
+                err = str(exc)
+            GLib.idle_add(self._finish_mic_test, peak, err)
+
+        threading.Thread(target=_sample, daemon=True, name="mic-level-test").start()
+
+    def _finish_mic_test(self, peak: float, err: str) -> bool:
+        """(main thread) Mostra o resultado da amostragem do microfone."""
+        self._mic_test_running = False
+        self.wake_test_button.set_label("Testar")
+        self.wake_test_button.set_sensitive(True)
+        self.wake_level_bar.set_value(peak)
+        if err:
+            self.wake_test_row.set_subtitle(f"Não foi possível abrir o microfone: {err}")
+        elif peak < 0.05:
+            self.wake_test_row.set_subtitle("Nenhum som detectado. Verifique o microfone.")
+        else:
+            self.wake_test_row.set_subtitle(f"Nível máximo capturado: {int(peak * 100)}%")
+        return GLib.SOURCE_REMOVE
 
     def _make_provider_button(self, key: str, label: str) -> Gtk.ToggleButton:
         """Cria um botão do controle segmentado de provedores."""
@@ -653,6 +765,19 @@ class PreferencesDialog(Adw.PreferencesDialog):
         phrases = getattr(self.config, "wake_phrases", None) or ["ok copilot", "olá copilot"]
         self.wake_phrases_row.set_text(", ".join(phrases))
         self.wake_model_row.set_text(getattr(self.config, "wake_word_model_path", ""))
+        # Ajustes finos — sempre com getattr + default para não quebrar
+        # configurações antigas (salvas antes de estes campos existirem).
+        self.wake_sensitivity_scale.set_value(
+            float(getattr(self.config, "wake_word_sensitivity", 0.5) or 0.0)
+        )
+        self.wake_cooldown_spin.set_value(
+            float(getattr(self.config, "wake_word_cooldown_sec", 4.0) or 0.0)
+        )
+        self.wake_echo_spin.set_value(
+            float(getattr(self.config, "wake_word_echo_delay_sec", 1.2) or 0.0)
+        )
+        self.wake_vad_row.set_active(bool(getattr(self.config, "wake_word_vad_enabled", True)))
+        self.wake_device_row.set_text(str(getattr(self.config, "wake_word_device", "") or ""))
 
         # Atalho Global de Conversa por Voz
         self.voice_shortcut_switch_row.set_active(getattr(self.config, "voice_shortcut_enabled", True))
@@ -762,6 +887,21 @@ class PreferencesDialog(Adw.PreferencesDialog):
         phrases = [p.strip() for p in raw_phrases.split(",") if p.strip()]
         cfg.wake_phrases = phrases or ["ok copilot", "olá copilot"]
         cfg.wake_word_model_path = self.wake_model_row.get_text().strip()
+        # Ajustes finos. `_collect_current_config` parte de um CopilotConfig()
+        # novo, então TODO campo precisa ser reatribuído aqui — do contrário o
+        # valor volta ao default (e zera) sempre que o usuário salvar.
+        cfg.wake_word_sensitivity = float(self.wake_sensitivity_scale.get_value())
+        cfg.wake_word_cooldown_sec = float(self.wake_cooldown_spin.get_value())
+        cfg.wake_word_echo_delay_sec = float(self.wake_echo_spin.get_value())
+        cfg.wake_word_vad_enabled = bool(self.wake_vad_row.get_active())
+        cfg.wake_word_device = self.wake_device_row.get_text().strip()
+        cfg.wake_word_match_partials = bool(
+            getattr(self.config, "wake_word_match_partials", False)
+        )
+        cfg.end_session_enabled = bool(getattr(self.config, "end_session_enabled", True))
+        cfg.end_session_grace_sec = float(
+            getattr(self.config, "end_session_grace_sec", 4.0) or 0.0
+        )
 
         # Atalho Global de Conversa por Voz
         cfg.voice_shortcut_enabled = self.voice_shortcut_switch_row.get_active()

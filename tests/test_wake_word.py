@@ -29,6 +29,9 @@ from zorin_copilot.shell.wake_word import (  # noqa: E402
     default_backend,
     extract_command,
     normalize_text,
+    pcm_rms,
+    sensitivity_to_threshold,
+    unpack_transcript,
 )
 
 
@@ -364,6 +367,417 @@ class ConfigPersistenceTest(unittest.TestCase):
                 loaded = CopilotConfig.load()
                 self.assertFalse(loaded.wake_word_enabled)
                 self.assertEqual(loaded.wake_phrases, ["ok copilot", "olá copilot"])
+
+
+class PcmRmsTest(unittest.TestCase):
+    """O gate de VAD depende deste cálculo; errado, o wake word surta ou surda."""
+
+    def test_buffer_vazio(self):
+        self.assertEqual(pcm_rms(b""), 0.0)
+
+    def test_silencio(self):
+        self.assertEqual(pcm_rms(b"\x00" * 64), 0.0)
+
+    def test_volume_maximo(self):
+        import array
+
+        self.assertAlmostEqual(pcm_rms(array.array("h", [32767] * 100).tobytes()), 1.0, places=2)
+
+    def test_buffer_impar_nao_estoura(self):
+        self.assertGreaterEqual(pcm_rms(b"\x01\x02\x03"), 0.0)
+
+    def test_meio_volume_fica_entre(self):
+        import array
+
+        rms = pcm_rms(array.array("h", [16000] * 100).tobytes())
+        self.assertGreater(rms, 0.4)
+        self.assertLess(rms, 0.6)
+
+
+class SensitivityTest(unittest.TestCase):
+    def test_mais_sensivel_tem_limiar_menor(self):
+        self.assertLess(sensitivity_to_threshold(1.0), sensitivity_to_threshold(0.0))
+
+    def test_clampa_fora_da_faixa(self):
+        self.assertEqual(sensitivity_to_threshold(5.0), sensitivity_to_threshold(1.0))
+        self.assertEqual(sensitivity_to_threshold(-3.0), sensitivity_to_threshold(0.0))
+
+    def test_valor_invalido_usa_meio(self):
+        self.assertEqual(sensitivity_to_threshold("ruim"), sensitivity_to_threshold(0.5))
+
+
+class UnpackTranscriptTest(unittest.TestCase):
+    def test_str_eh_tratada_como_final(self):
+        # É o que mantém os testes legados (e backends fake) funcionando.
+        self.assertEqual(unpack_transcript("ok copilot"), ("ok copilot", True))
+
+    def test_tupla_preserva_flag(self):
+        self.assertEqual(unpack_transcript(("ok copilot", False)), ("ok copilot", False))
+        self.assertEqual(unpack_transcript(("ok copilot", True)), ("ok copilot", True))
+
+    def test_tupla_sem_flag_assume_final(self):
+        self.assertEqual(unpack_transcript(("ok copilot",)), ("ok copilot", True))
+
+    def test_vazio(self):
+        self.assertEqual(unpack_transcript(""), ("", True))
+        self.assertEqual(unpack_transcript(None), ("", True))
+
+
+class MultiFireRegressionTest(unittest.TestCase):
+    """O bug original: o Vosk reemitia o texto a cada parcial e a wake word
+    disparava várias vezes para uma única fala."""
+
+    def _drain(self, engine, items):
+        for item in items:
+            text, is_final = unpack_transcript(item)
+            engine._handle_transcript(text, is_final)
+
+    def test_rajada_de_parciais_dispara_uma_vez(self):
+        hits = []
+        engine = WakeWordEngine(
+            phrases=["ok copilot"],
+            backend=NullWakeWordBackend(),
+            on_wake=lambda p, c="": hits.append(p),
+        )
+        engine._running = True
+        self._drain(
+            engine,
+            [
+                ("ok cop", False),
+                ("ok copilot", False),
+                ("ok copilot", False),
+                ("ok copilot abre o navegador", True),
+            ],
+        )
+        self.assertEqual(hits, ["ok copilot"])
+
+    def test_mesmo_final_repetido_nao_re_dispara(self):
+        hits = []
+        engine = WakeWordEngine(
+            phrases=["ok copilot"],
+            backend=NullWakeWordBackend(),
+            on_wake=lambda p, c="": hits.append(p),
+            dedupe_window_sec=3.0,
+        )
+        engine._running = True
+        self._drain(engine, [("ok copilot", True), ("ok copilot", True), ("ok copilot", True)])
+        self.assertEqual(hits, ["ok copilot"])
+
+    def test_cooldown_global_bloqueia_frases_diferentes(self):
+        hits = []
+        engine = WakeWordEngine(
+            phrases=["ok copilot"],
+            backend=NullWakeWordBackend(),
+            on_wake=lambda p, c="": hits.append(p),
+            cooldown_sec=4.0,
+        )
+        engine._running = True
+        self._drain(engine, [("ok copilot", True), ("ok copilot abre o navegador", True)])
+        # Intencional: dentro do cooldown nada mais passa, mesmo sendo outra fala.
+        self.assertEqual(hits, ["ok copilot"])
+
+    def test_apos_o_cooldown_dispara_de_novo(self):
+        hits = []
+        engine = WakeWordEngine(
+            phrases=["ok copilot"],
+            backend=NullWakeWordBackend(),
+            on_wake=lambda p, c="": hits.append(p),
+            cooldown_sec=4.0,
+        )
+        engine._running = True
+        self._drain(engine, [("ok copilot", True)])
+        engine._last_fire_at -= 5.0  # volta o relógio
+        self._drain(engine, [("ok copilot abre o navegador", True)])
+        self.assertEqual(len(hits), 2)
+
+
+class FinalOnlyTest(unittest.TestCase):
+    def test_parcial_ignorado_por_padrao(self):
+        hits = []
+        engine = WakeWordEngine(
+            phrases=["ok copilot"], backend=NullWakeWordBackend(), on_wake=lambda p, c="": hits.append(p)
+        )
+        engine._running = True
+        self.assertFalse(engine._handle_transcript("ok copilot", is_final=False))
+        self.assertEqual(hits, [])
+        self.assertTrue(engine._handle_transcript("ok copilot", is_final=True))
+        self.assertEqual(hits, ["ok copilot"])
+
+    def test_match_partials_liga_parciais(self):
+        hits = []
+        engine = WakeWordEngine(
+            phrases=["ok copilot"], backend=NullWakeWordBackend(), on_wake=lambda p, c="": hits.append(p)
+        )
+        engine._running = True
+        engine.match_partials = True
+        self.assertTrue(engine._handle_transcript("ok copilot", is_final=False))
+        # O dedup ainda segura a repetição idêntica.
+        self.assertFalse(engine._handle_transcript("ok copilot", is_final=False))
+        self.assertEqual(hits, ["ok copilot"])
+
+
+class SuspendTest(unittest.TestCase):
+    """Anti-eco: sem isso a própria resposta da IA reativava a wake word."""
+
+    def test_suspende_e_rearma_sozinho(self):
+        engine = WakeWordEngine(["ok copilot"], backend=NullWakeWordBackend())
+        engine.suspend(0.1)
+        self.assertTrue(engine.paused)
+        deadline = threading.Event()
+
+        import time
+
+        for _ in range(60):
+            if not engine.paused:
+                deadline.set()
+                break
+            time.sleep(0.01)
+        self.assertTrue(deadline.is_set(), "suspend() não rearmou sozinho")
+        self.assertFalse(engine.paused)
+
+    def test_suspende_zero_reativa_na_hora(self):
+        engine = WakeWordEngine(["ok copilot"], backend=NullWakeWordBackend())
+        engine.suspend(0)
+        self.assertFalse(engine.paused)
+
+    def test_resume_cancela_rearme_pendente(self):
+        engine = WakeWordEngine(["ok copilot"], backend=NullWakeWordBackend())
+        engine.suspend(5.0)
+        self.assertTrue(engine.paused)
+        engine.resume()
+        self.assertFalse(engine.paused)
+        self.assertIsNone(engine._resume_timer)
+
+
+class _ExplodingBackend:
+    """Backend que estoura N vezes e depois entrega uma frase."""
+
+    name = "fake"
+
+    def __init__(self, failures=1, then=()):
+        self._failures = failures
+        self._then = list(then)
+        self.last_stream_error = "mic morreu"
+        self.is_available = lambda: True
+
+    def stream_transcripts(self):
+        if self._failures > 0:
+            self._failures -= 1
+            raise RuntimeError("falha de captura")
+        yield from self._then
+
+
+class RetryAndErrorTest(unittest.TestCase):
+    def test_retenta_apos_falha_e_ainda_detecta(self):
+        errors = []
+        hits = []
+        backend = _ExplodingBackend(failures=1, then=[("ok copilot", True)])
+        engine = WakeWordEngine(
+            phrases=["ok copilot"],
+            backend=backend,
+            on_wake=lambda p, c="": hits.append(p),
+            on_error=errors.append,
+        )
+        engine.MAX_STREAM_FAILURES = 3
+        self.assertTrue(engine.start())
+        engine._thread.join(timeout=5)
+        self.assertEqual(hits, ["ok copilot"])
+        self.assertTrue(errors)
+
+    def test_desiste_apos_limite_de_falhas(self):
+        errors = []
+
+        class _AlwaysBroken:
+            name = "fake"
+            last_stream_error = "mic morreu"
+
+            def is_available(self):
+                return True
+
+            def stream_transcripts(self):
+                raise RuntimeError("sempre quebra")
+
+        engine = WakeWordEngine(
+            phrases=["ok copilot"], backend=_AlwaysBroken(), on_error=errors.append
+        )
+        engine.MAX_STREAM_FAILURES = 2
+        with mock.patch("time.sleep"):  # não esperar o backoff de verdade
+            self.assertTrue(engine.start())
+            engine._thread.join(timeout=5)
+        self.assertFalse(engine.running)
+        self.assertTrue(any("desativada" in e for e in errors))
+
+    def test_gerador_esgotado_nao_retenta(self):
+        """Um backend que só acaba (fim normal) deve encerrar o loop.
+
+        Retentar aqui travaria o join() dos testes em loop infinito.
+        """
+
+        class _QuietBackend:
+            name = "fake"
+
+            def is_available(self):
+                return True
+
+            def stream_transcripts(self):
+                return iter(())
+
+        engine = WakeWordEngine(phrases=["ok copilot"], backend=_QuietBackend())
+        self.assertTrue(engine.start())
+        engine._thread.join(timeout=5)
+        self.assertFalse(engine._thread.is_alive())
+        self.assertFalse(engine.running)
+
+
+class StopStreamTest(unittest.TestCase):
+    def test_stop_mata_o_processo_de_captura(self):
+        backend = VoskWakeWordBackend(model_path="")
+        proc = mock.MagicMock()
+        backend._proc = proc
+        backend.stop_stream()
+        proc.terminate.assert_called_once()
+        self.assertIsNone(backend._proc)
+
+    def test_stop_mata_com_kill_se_wait_falha(self):
+        backend = VoskWakeWordBackend(model_path="")
+        proc = mock.MagicMock()
+        proc.wait.side_effect = Exception("timeout")
+        backend._proc = proc
+        backend.stop_stream()
+        proc.kill.assert_called_once()
+
+    def test_engine_stop_chama_stop_stream(self):
+        backend = VoskWakeWordBackend(model_path="")
+        backend._proc = mock.MagicMock()
+        engine = WakeWordEngine(["ok copilot"], backend=backend)
+        engine._running = True
+        engine.stop()
+        self.assertIsNone(backend._proc)
+        self.assertFalse(engine._running)
+
+
+class ArecordFallbackTest(unittest.TestCase):
+    def test_cai_para_arecord_sem_pipewire(self):
+        backend = VoskWakeWordBackend(model_path="")
+        with mock.patch("shutil.which", side_effect=lambda b: b == "arecord"):
+            self.assertEqual(
+                backend._resolve_record_command(),
+                ["arecord", "-r", "16000", "-f", "S16_LE", "-c", "1", "-"],
+            )
+
+    def test_sem_nenhum_comando_devolve_none(self):
+        backend = VoskWakeWordBackend(model_path="")
+        with mock.patch("shutil.which", return_value=None):
+            self.assertIsNone(backend._resolve_record_command())
+
+    def test_dispositivo_vai_para_o_comando(self):
+        backend = VoskWakeWordBackend(model_path="", device="bluez_input.1")
+        with mock.patch("shutil.which", side_effect=lambda b: b == "arecord"):
+            self.assertIn("-D", backend._resolve_record_command())
+
+    def test_stream_indisponivel_devolve_iterador_vazio(self):
+        # `return` puro aqui fazia o loop estourar TypeError.
+        backend = VoskWakeWordBackend(model_path="")
+        self.assertEqual(list(backend.stream_transcripts()), [])
+
+
+class _FakeProc:
+    def __init__(self, chunks):
+        self._chunks = list(chunks)
+        self.stdout = self
+        self.terminated = False
+
+    def read(self, _n):
+        return self._chunks.pop(0) if self._chunks else b""
+
+    def terminate(self):
+        self.terminated = True
+
+    def wait(self, _t=None):
+        return 0
+
+    def kill(self):
+        pass
+
+
+class _FakeVosk:
+    """Vosk mínimo: conta quantas vezes o áudio chegou ao reconhecedor."""
+
+    def __init__(self):
+        self.accepted = 0
+
+    def Model(self, _path):  # noqa: N802
+        return object()
+
+    def KaldiRecognizer(self, _model, _rate):  # noqa: N802
+        outer = self
+
+        class _Rec:
+            def AcceptWaveform(self, _data):  # noqa: N802
+                outer.accepted += 1
+                return False
+
+            def Result(self):  # noqa: N802
+                return '{"text": "ok copilot"}'
+
+            def PartialResult(self):  # noqa: N802
+                return '{"partial": "ok copilot"}'
+
+            def FinalResult(self):  # noqa: N802
+                return '{"text": "ok copilot"}'
+
+        return _Rec()
+
+
+class VadGatingTest(unittest.TestCase):
+    """Silêncio não pode ser decodificado: é CPU gasta para nada o dia todo."""
+
+    def _run(self, chunks, vad_enabled=True):
+        fake = _FakeVosk()
+        with mock.patch.dict(sys.modules, {"vosk": fake}):
+            backend = VoskWakeWordBackend(
+                model_path="/fake-model",
+                record_command=["fake-record"],
+                vad_enabled=vad_enabled,
+            )
+            with mock.patch("subprocess.Popen", return_value=_FakeProc(chunks)):
+                return list(backend.stream_transcripts()), fake.accepted
+
+    def test_silencio_nao_eh_decodificado(self):
+        silence = [b"\x00" * 4000 for _ in range(20)]
+        out, accepted = self._run(silence)
+        self.assertEqual(out, [])
+        self.assertEqual(accepted, 0, "silêncio chegou ao reconhecedor")
+
+    def test_fala_eh_decodificada(self):
+        import array
+
+        loud = array.array("h", [20000] * 2000).tobytes()
+        out, accepted = self._run([loud])
+        self.assertGreater(accepted, 0)
+        self.assertTrue(out)
+
+    def test_sem_vad_decodifica_tudo(self):
+        silence = [b"\x00" * 4000 for _ in range(5)]
+        _out, accepted = self._run(silence, vad_enabled=False)
+        self.assertGreater(accepted, 0)
+
+
+class SampleLevelTest(unittest.TestCase):
+    def test_devolve_pico_do_pcm(self):
+        import array
+
+        backend = VoskWakeWordBackend(model_path="", record_command=["fake-record"])
+        loud = array.array("h", [20000] * 2000).tobytes()
+        with mock.patch("subprocess.Popen", return_value=_FakeProc([loud])):
+            peak = backend.sample_level(0.2)
+        self.assertGreater(peak, 0.4)
+
+    def test_sem_comando_de_captura_lanca_erro_claro(self):
+        backend = VoskWakeWordBackend(model_path="")
+        with mock.patch.object(backend, "_resolve_record_command", return_value=None):
+            with self.assertRaises(RuntimeError):
+                backend.sample_level(0.1)
 
 
 if __name__ == "__main__":

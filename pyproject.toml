@@ -49,6 +49,11 @@ voice = [
     "piper-tts>=1.2.0",
     "faster-whisper>=1.0.0",
 ]
+# Palavra de ativação offline. Além do pacote, é preciso baixar um modelo
+# (ex.: vosk-model-small-pt-0.3) e apontar o caminho em Preferências.
+wakeword = [
+    "vosk>=0.3.45",
+]
 
 [project.scripts]
 zorin-copilot = "zorin_copilot.ui.app:main"

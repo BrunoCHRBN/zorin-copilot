@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 
 import gi
 
@@ -87,6 +88,16 @@ def _is_dialog_dismissed(error: GLib.Error) -> bool:
         return False
 
 
+def _overlay_is_pill(config: object) -> bool:
+    """A invocação por voz deve abrir a pílula ou a janela completa?
+
+    Só "full" escolhe o HUD: qualquer valor ausente, vazio ou desconhecido
+    cai na pílula, que é o padrão e o caminho menos intrusivo.
+    """
+    mode = str(getattr(config, "voice_overlay_mode", "pill") or "pill").strip().lower()
+    return mode != "full"
+
+
 class CopilotWindow(Adw.ApplicationWindow):
     """Janela principal do Copilot: compõe os widgets e orquestra a conversa."""
 
@@ -123,6 +134,10 @@ class CopilotWindow(Adw.ApplicationWindow):
         # está em uso pelo pw-record do Gemini Live).
         self.wake_word_engine: WakeWordEngine | None = None
 
+        # Encerramento autônomo pedido pelo agente (ferramenta `end_session`).
+        self._end_session_source_id: int = 0
+        self._pending_end_mode: str | None = None
+
         # Cerca de Proteção Espacial (isolamento de monitores no Wayland)
         self.fence = ScreenFenceManager()
 
@@ -156,8 +171,18 @@ class CopilotWindow(Adw.ApplicationWindow):
         model_path = getattr(self.config, "wake_word_model_path", "")
         self.wake_word_engine = WakeWordEngine(
             phrases=phrases,
-            backend=default_backend(model_path),
+            backend=default_backend(
+                model_path,
+                vad_enabled=bool(getattr(self.config, "wake_word_vad_enabled", True)),
+                sensitivity=float(getattr(self.config, "wake_word_sensitivity", 0.5)),
+                device=str(getattr(self.config, "wake_word_device", "") or ""),
+            ),
             on_wake=self._on_wake_word,
+            cooldown_sec=float(getattr(self.config, "wake_word_cooldown_sec", 4.0)),
+            on_error=self._on_wake_word_error,
+        )
+        self.wake_word_engine.match_partials = bool(
+            getattr(self.config, "wake_word_match_partials", False)
         )
         if getattr(self.config, "wake_word_enabled", False):
             started = self.wake_word_engine.start()
@@ -165,6 +190,24 @@ class CopilotWindow(Adw.ApplicationWindow):
                 logger.info(
                     "Wake word habilitado mas indisponível (instale 'vosk' e configure o modelo)."
                 )
+
+    def _on_wake_word_error(self, message: str) -> None:
+        """Chamado pela thread do motor quando o microfone/captura falha."""
+        GLib.idle_add(self._show_wake_word_error, message)
+
+    def _show_wake_word_error(self, message: str) -> bool:
+        """(main thread) Mostra o erro no máximo uma vez por minuto.
+
+        Sem o rate-limit, um microfone indisponível geraria uma enxurrada de
+        toasts conforme o loop retenta com backoff.
+        """
+        now = time.monotonic()
+        last = getattr(self, "_last_wake_error_at", 0.0)
+        if now - last < 60.0:
+            return GLib.SOURCE_REMOVE
+        self._last_wake_error_at = now
+        self.show_toast(f"\U0001f399️ Palavra de ativação: {message}")
+        return GLib.SOURCE_REMOVE
 
     def _reconfigure_wake_word(self) -> None:
         """Reconfigura o motor após salvar as preferências (frases/modelo/habilitação)."""
@@ -181,19 +224,29 @@ class CopilotWindow(Adw.ApplicationWindow):
         GLib.idle_add(self._handle_wake_on_main_thread, phrase, command)
 
     def _handle_wake_on_main_thread(self, phrase: str, command: str = "") -> bool:
+        # Se o usuário voltou a chamar durante o grace period de um
+        # encerramento autônomo, o encerramento é cancelado.
+        self._cancel_pending_end_session()
         # Se a conversa por voz já está ativa, o comando vira um turno de texto
         # na própria sessão (ex.: wake word acidental durante a chamada).
         if self.live_client and self.live_client.is_active():
             if command:
                 self.live_client.send_text_input(command)
             return GLib.SOURCE_REMOVE
-        self.summon_hud()
+
+        # Respeita o modo de overlay escolhido: no modo "pill" a wake word abre
+        # só a pílula flutuante, sem puxar a janela inteira do Copilot.
+        use_pill = _overlay_is_pill(self.config)
         if command:
             self.show_toast(f'🎙️ "{phrase}" — executando: "{command}"')
-            self.start_live_voice(initial_command=command)
         else:
             self.show_toast(f'🎙️ Entendi "{phrase}"! Iniciando conversa...')
-            self.start_live_voice()
+
+        if use_pill:
+            self.start_live_voice(initial_command=command, as_pill=True)
+        else:
+            self.summon_hud()
+            self.start_live_voice(initial_command=command, as_pill=False)
         return GLib.SOURCE_REMOVE
 
     # ------------------------------------------------------------------
@@ -707,6 +760,7 @@ class CopilotWindow(Adw.ApplicationWindow):
         """Em modo HUD, oculta a janela sem matar o processo em segundo plano."""
         if self.live_client and self.live_client.is_active():
             self.stop_live_voice()
+        self._cancel_pending_end_session()
         self.set_visible(False)
         return True
 
@@ -1180,6 +1234,11 @@ class CopilotWindow(Adw.ApplicationWindow):
             GLib.idle_add(lambda: self.show_toast(f"⚠️ Chamada de voz: {err}"))
 
         self.live_client.on_error = _on_live_error
+        # Encerramento autônomo: o agente pode pedir para encerrar a sessão
+        # (standby) ou o aplicativo (quit) quando o usuário se despede.
+        if hasattr(self.live_client, "on_end_session"):
+            self.live_client.on_end_session = self._on_end_session_requested
+        self._cancel_pending_end_session()
 
         if as_pill:
             if not self.voice_pill_window:
@@ -1193,8 +1252,11 @@ class CopilotWindow(Adw.ApplicationWindow):
                 self.voice_pill_window.live_client = self.live_client
                 self.voice_pill_window._connect_client_events()
 
+            # Mostra a pílula imediatamente, antes de o WebSocket conectar:
+            # a espera silenciosa parecia "não me ouviu".
             self.voice_pill_window.present()
             self.voice_pill_window.place_smart()
+            self.voice_pill_window.show_preparing()
             self.live_client.start()
             if self.wake_word_engine is not None:
                 self.wake_word_engine.pause()
@@ -1242,20 +1304,16 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.prompt_bar.bottom_voice_btn.add_css_class("suggested-action")
         self.chat_stream.welcome_box.set_visible(False)
 
-    def stop_live_voice(self) -> None:
-        """Encerra a chamada de voz ao vivo e consolida a interação no chat ativo."""
-        if self.voice_pill_window:
-            self.voice_pill_window.save_geometry()
-            self.voice_pill_window.set_visible(False)
+    def _consolidate_live_session(self) -> None:
+        """Para o cliente e persiste o resumo da chamada no chat ativo.
+
+        Extraído de `stop_live_voice` para que o encerramento autônomo
+        (`end_session`) reaproveite exatamente este caminho. A ordem importa: o
+        resumo TEM de ser lido antes do stop(), senão volta vazio.
+        """
         summary = self.live_client.get_session_summary() if self.live_client else {}
         if self.live_client:
             self.live_client.stop()
-        # Libera o microfone e volta a ouvir a palavra de ativação.
-        if self.wake_word_engine is not None:
-            self.wake_word_engine.resume()
-        self.live_voice_revealer.set_reveal_child(False)
-        self.header.voice_call_btn.remove_css_class("suggested-action")
-        self.prompt_bar.bottom_voice_btn.remove_css_class("suggested-action")
 
         if summary.get("has_activity"):
             duration = summary.get("duration_sec", 0)
@@ -1316,12 +1374,110 @@ class CopilotWindow(Adw.ApplicationWindow):
             if not self.session.turns:
                 self.chat_stream.welcome_box.set_visible(True)
 
+    def _resume_wake_word_after_speech(self) -> None:
+        """Volta a ouvir a palavra de ativação depois do anti-eco.
+
+        Sem essa surdez temporária, a própria despedida falada pela IA era
+        transcrita de volta e reativava a wake word — um loop de auto-chamada.
+        """
+        if self.wake_word_engine is None:
+            return
+        delay = float(getattr(self.config, "wake_word_echo_delay_sec", 1.2) or 0.0)
+        suspend = getattr(self.wake_word_engine, "suspend", None)
+        if callable(suspend):
+            suspend(delay)
+        else:
+            self.wake_word_engine.resume()
+
+    def stop_live_voice(self) -> None:
+        """Encerra a chamada de voz ao vivo e consolida a interação no chat ativo."""
+        if self.voice_pill_window:
+            self.voice_pill_window.save_geometry()
+            self.voice_pill_window.set_visible(False)
+        self._consolidate_live_session()
+        self._resume_wake_word_after_speech()
+        self.live_voice_revealer.set_reveal_child(False)
+        self.header.voice_call_btn.remove_css_class("suggested-action")
+        self.prompt_bar.bottom_voice_btn.remove_css_class("suggested-action")
+
         self.entry.grab_focus()
         self.show_toast("Conversa de voz encerrada.")
         if self.get_visible() and self.is_active():
             self.set_visible(False)
         else:
             self.summon_hud()
+
+    # ------------------------------------------------------------------
+    # Encerramento autônomo solicitado pelo agente (ferramenta `end_session`)
+    # ------------------------------------------------------------------
+    def _on_end_session_requested(self, mode: str, reason: str = "") -> None:
+        """Chamado na THREAD do executor de tools — só faz marshal p/ main thread."""
+        GLib.idle_add(self._schedule_end_session, mode, reason)
+
+    def _schedule_end_session(self, mode: str, reason: str = "") -> bool:
+        """(main thread) Agenda o encerramento depois do tempo da despedida.
+
+        O grace period existe para o modelo conseguir FALAR a despedida: o
+        resultado da ferramenta volta no mesmo WebSocket, o Gemini gera o áudio
+        e ele é reproduzido — encerrar na hora cortaria a fala no meio.
+        """
+        self._cancel_pending_end_session()
+        try:
+            grace = float(getattr(self.config, "end_session_grace_sec", 4.0) or 0.0)
+        except (TypeError, ValueError):
+            grace = 4.0
+        grace = max(0.0, min(15.0, grace))
+        logger.info(
+            "Agente pediu encerramento mode=%s motivo=%r (despedida de %.1fs).", mode, reason, grace
+        )
+        self._pending_end_mode = mode
+        self._end_session_source_id = GLib.timeout_add(
+            int(grace * 1000), self._perform_end_session, mode
+        )
+        return GLib.SOURCE_REMOVE
+
+    def _cancel_pending_end_session(self) -> None:
+        """Cancela um encerramento agendado (ex.: usuário voltou a chamar)."""
+        source = getattr(self, "_end_session_source_id", 0)
+        if source:
+            try:
+                GLib.source_remove(source)
+            except Exception:
+                pass
+        self._end_session_source_id = 0
+        self._pending_end_mode = None
+
+    def _perform_end_session(self, mode: str) -> bool:
+        """(main thread) Executa o encerramento: standby ou saída do aplicativo.
+
+        Não chama `stop_live_voice()` de propósito: ela termina com `summon_hud()`
+        e reabriria a janela do Copilot justamente na hora de encerrar.
+        """
+        self._end_session_source_id = 0
+        self._pending_end_mode = None
+
+        self._consolidate_live_session()
+        if self.voice_pill_window:
+            self.voice_pill_window.save_geometry()
+            self.voice_pill_window.set_visible(False)
+        self.live_voice_revealer.set_reveal_child(False)
+        self.header.voice_call_btn.remove_css_class("suggested-action")
+        self.prompt_bar.bottom_voice_btn.remove_css_class("suggested-action")
+
+        if mode == "quit":
+            if self.wake_word_engine is not None:
+                self.wake_word_engine.stop()
+            # Sem toast aqui: o processo morre antes de renderizar.
+            logger.info("Encerrando o aplicativo a pedido do agente.")
+            self._quit_application()
+            return GLib.SOURCE_REMOVE
+
+        # standby: libera o microfone e fica em espera ouvindo a palavra.
+        self._resume_wake_word_after_speech()
+        self.show_toast("\U0001f44b Até logo! Continuo te ouvindo — é só me chamar.")
+        if self.get_visible() and self.is_active():
+            self.set_visible(False)
+        return GLib.SOURCE_REMOVE
 
     def trigger_direct_crop(self) -> None:
         """Dispara o recorte de área da tela a partir do atalho global (Super+Shift+S)."""
@@ -1429,8 +1585,10 @@ class ZorinCopilotApp(Adw.Application):
         # Encerra a thread de wake word junto com o processo (no close-request
         # ela continua ativa de propósito — o modo HUD depende dela).
         for win in self.get_windows():
-            if isinstance(win, CopilotWindow) and win.wake_word_engine is not None:
-                win.wake_word_engine.stop()
+            if isinstance(win, CopilotWindow):
+                win._cancel_pending_end_session()
+                if win.wake_word_engine is not None:
+                    win.wake_word_engine.stop()
         Adw.Application.do_shutdown(self)
 
     def do_activate(self):
@@ -1461,8 +1619,7 @@ class ZorinCopilotApp(Adw.Application):
             self._setup_background_tray(win)
             return 0
         elif is_voice:
-            mode = getattr(win.config, "voice_overlay_mode", "pill")
-            if mode == "pill" and not win.get_visible():
+            if _overlay_is_pill(win.config) and not win.get_visible():
                 win.toggle_live_voice(as_pill=True)
             else:
                 win.summon_hud()

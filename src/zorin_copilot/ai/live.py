@@ -629,6 +629,45 @@ LIVE_TOOLS_DECLARATION = [
                 },
             },
             {
+                "name": "end_session",
+                "description": (
+                    "Encerra o atendimento quando o usuário se despede ou diz que já terminou. "
+                    "Use SOMENTE para encerrar a CONVERSA/SESSÃO, quando ele disser coisas como: "
+                    "'pode encerrar', 'te chamo depois', 'obrigado, é só isso', 'valeu', 'até mais', "
+                    "'pode ir', 'já era', 'tchau'. "
+                    "NÃO use quando ele pedir para encerrar/fechar/cancelar uma TAREFA, janela, "
+                    "aplicativo, música ou processo ('encerra essa tarefa', 'fecha o navegador', "
+                    "'para aí', 'cancela isso', 'finaliza o relatório') — nesses casos a conversa "
+                    "continua e você usa a ferramenta apropriada. "
+                    "mode='standby' (PADRÃO): encerra a chamada de voz, esconde a pílula e deixa o "
+                    "Copilot em espera ouvindo a palavra de ativação. Não precisa de confirmação. "
+                    "mode='quit': fecha TODO o aplicativo (sai de vez, inclusive da bandeja). Só use "
+                    "se o usuário pedir EXPLICITAMENTE para fechar/sair do aplicativo; exige confirmação verbal."
+                ),
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "mode": {
+                            "type": "STRING",
+                            "enum": ["standby", "quit"],
+                            "description": (
+                                "'standby' (padrão): encerra só a sessão e volta a ouvir a palavra de "
+                                "ativação. 'quit': fecha o aplicativo inteiro (pede confirmação ao usuário)."
+                            ),
+                        },
+                        "reason": {
+                            "type": "STRING",
+                            "description": (
+                                "Fala curta do usuário que motivou o encerramento "
+                                "(ex.: 'obrigado, é só isso'). Obrigatório: obriga você a confirmar "
+                                "que foi mesmo uma despedida, e não o fim de uma tarefa."
+                            ),
+                        },
+                    },
+                    "required": ["reason"],
+                },
+            },
+            {
                 "name": "confirm_action",
                 "description": "Confirma ou cancela uma ação de risco previamente solicitada (ex: enviar e-mail, sobrescrever arquivo, atalho destrutivo, digitar em senha). Chamada apenas após o usuário aprovar verbalmente.",
                 "parameters": {
@@ -698,6 +737,11 @@ class GeminiLiveClient:
         self.on_video_frame_preview: Callable[[bytes], None] | None = None
         self.on_privacy_state_change: Callable[[bool, str], None] | None = None
         self.on_window_focus_change: Callable[[str, str], None] | None = None
+        # Encerramento autônomo (ferramenta `end_session`). A UI registra este
+        # callback; ele é chamado com (mode, reason) a partir da THREAD do
+        # executor de ferramentas — quem registra é responsável por fazer o
+        # marshal para a main thread do GTK (este módulo não importa gi).
+        self.on_end_session: Callable[[str, str], None] | None = None
 
         self._is_running = False
         self._is_muted = False
@@ -1054,6 +1098,22 @@ class GeminiLiveClient:
                     "- Para documentos locais (PDFs, relatórios), use 'search_documents', 'read_document_page' e 'open_document_file'. "
                     "- Ações de risco (enviar e-mail, sobrescrever arquivo, atalho destrutivo como Alt+F4, ou digitar em campo de senha) NÃO são executadas de imediato: você receberá um 'confirmation_id' e deve pedir confirmação verbal ao usuário; se aprovada, chame 'confirm_action(confirmation_id, approve=true)'. Se o usuário recusar, chame com approve=false."
                     f"\n\n{self._input_capabilities_prompt()}\n"
+                    "\n\nENCERRAMENTO DA SESSÃO (autonomia):\n"
+                    "- Quando o usuário claramente se despedir ou disser que terminou ('pode encerrar', "
+                    "'te chamo depois', 'obrigado, é só isso', 'valeu', 'até mais', 'pode ir', 'tchau'), "
+                    "chame 'end_session' com mode='standby' e reason='<a fala dele>'. "
+                    "Diga a despedida em UMA frase curta e natural — você ainda tem alguns segundos de "
+                    "áudio antes de a sessão cair.\n"
+                    "- NUNCA chame end_session para 'encerrar uma tarefa', 'finalizar um processo', "
+                    "'fechar uma janela', 'parar uma música', 'cancelar uma ação' ou 'terminar o "
+                    "relatório': a conversa continua e você usa a ferramenta certa (keyboard_hotkey, "
+                    "media_control, write_document etc.).\n"
+                    "- mode='quit' fecha TODO o aplicativo: somente se ele pedir explicitamente ('fecha o "
+                    "app', 'sai do copilot', 'encerra o programa', 'fecha tudo'). A ferramenta devolve um "
+                    "confirmation_id: pergunte 'Quer mesmo que eu feche o aplicativo?', e só chame "
+                    "confirm_action(approve=true) se ele confirmar com um sim claro.\n"
+                    "- Depois que end_session retornar sucesso, NÃO chame mais nenhuma ferramenta: "
+                    "encerre falando.\n"
                     f"\n\n{context_summary}\n\n"
                     "Trate o usuário com carinho, eficiência e naturalidade. Sempre que ele pedir algo, use imediatamente a ferramenta certa e confirme com um toque leve de voz!"
                 )
@@ -1078,7 +1138,7 @@ class GeminiLiveClient:
                                 }
                             ]
                         },
-                        "tools": LIVE_TOOLS_DECLARATION,
+                        "tools": self._live_tools_payload(),
                     }
                 }
 
@@ -1959,6 +2019,9 @@ class GeminiLiveClient:
                     "message": res.get("summary", "Falha na pesquisa profunda."),
                 }
 
+            if name == "end_session":
+                return self._tool_end_session(args)
+
             return {"success": False, "message": f"Ferramenta desconhecida: {name}"}
 
         except Exception as exc:
@@ -2006,6 +2069,84 @@ class GeminiLiveClient:
             "message": (
                 f"Ação de risco: {desc}. Confirme com o usuário e, se aprovada, "
                 f"chame confirm_action(confirmation_id='{cid}', approve=true)."
+            ),
+        }
+
+    def _live_tools_payload(self) -> list[dict[str, Any]]:
+        """Declaração de ferramentas enviada no setup.
+
+        Omite `end_session` quando o usuário desativou o encerramento autônomo
+        nas preferências — assim o modelo nem chega a cogitar a ferramenta.
+        A constante permanece intacta (testes a inspecionam diretamente).
+        """
+        cfg = getattr(self, "config", None)
+        if cfg is None or bool(getattr(cfg, "end_session_enabled", True)):
+            return LIVE_TOOLS_DECLARATION
+        decls = LIVE_TOOLS_DECLARATION[0]["functionDeclarations"]
+        return [
+            {
+                "functionDeclarations": [
+                    f for f in decls if f.get("name") != "end_session"
+                ]
+            }
+        ]
+
+    def _tool_end_session(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Encerra a sessão (standby) ou o aplicativo (quit) a pedido do agente.
+
+        Roda na thread do executor de ferramentas. Não toca em GTK: apenas
+        sinaliza a UI via `on_end_session` e devolve uma mensagem para o modelo
+        se despedir. O encerramento de fato acontece depois do grace period, na
+        main thread — é o que permite que a despedida seja falada por completo.
+        """
+        mode = str(args.get("mode", "standby") or "standby").strip().lower()
+        if mode not in ("standby", "quit"):
+            mode = "standby"
+        reason = str(args.get("reason", "") or "").strip()
+
+        cfg = getattr(self, "config", None)
+        if cfg is not None and not bool(getattr(cfg, "end_session_enabled", True)):
+            return {
+                "success": False,
+                "message": (
+                    "Encerramento autônomo desativado nas preferências. "
+                    "Diga ao usuário que você não pode encerrar sozinho e que ele pode fechar pela pílula."
+                ),
+            }
+
+        handler = getattr(self, "on_end_session", None)
+        if handler is None:
+            return {
+                "success": False,
+                "message": (
+                    "Nenhuma interface registrou o encerramento agora. "
+                    "Apenas se despeça verbalmente e aguarde o usuário encerrar."
+                ),
+            }
+
+        try:
+            handler(mode, reason)
+        except Exception as exc:
+            logger.error("Falha ao solicitar encerramento (%s): %s", mode, exc)
+            return {"success": False, "message": f"Não consegui encerrar agora: {exc}"}
+
+        if mode == "quit":
+            return {
+                "success": True,
+                "mode": mode,
+                "scheduled": True,
+                "message": (
+                    "Aplicativo será fechado em instantes. Despeça-se do usuário em UMA frase curta "
+                    "e NÃO chame mais nenhuma ferramenta."
+                ),
+            }
+        return {
+            "success": True,
+            "mode": mode,
+            "scheduled": True,
+            "message": (
+                "Sessão encerrada: fico em espera ouvindo a palavra de ativação. "
+                "Diga uma despedida curta agora e NÃO chame mais nenhuma ferramenta."
             ),
         }
 
