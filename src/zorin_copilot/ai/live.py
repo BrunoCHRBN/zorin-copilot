@@ -946,6 +946,65 @@ class GeminiLiveClient:
                     return
                 await asyncio.sleep(0.1)
 
+    def _a11y_unavailable_msg(self) -> str:
+        """Explica por que a árvore AT-SPI voltou vazia, em vez de só 'indisponível'.
+
+        O caso mais comum NÃO é AT-SPI ausente: os daemons estão de pé e há
+        apps registrados, mas nenhum tem foco — porque o foco está numa
+        superfície layer-shell (o próprio popup do copilot) ou numa janela
+        que não se registra como aplicação. Sem essa distinção o usuário
+        reinstala o at-spi à toa.
+        """
+        insp = getattr(self, "inspector", None)
+        apps: list[str] = []
+        if insp is not None:
+            try:
+                apps = list(insp.list_applications() or [])
+            except Exception:
+                apps = []
+        if apps:
+            return (
+                "Árvore AT-SPI indisponível: os daemons estão de pé e há apps "
+                f"registrados ({', '.join(apps[:5])}), mas nenhum tem foco agora. "
+                "Foque a janela de destino e repita — superfícies layer-shell "
+                "(como o próprio popup do copilot) não aparecem como aplicação."
+            )
+        return (
+            "Árvore AT-SPI indisponível: o inspetor não alcançou o bus de "
+            "acessibilidade. Confira se o copilot roda na mesma sessão D-Bus do "
+            "compositor (DBUS_SESSION_BUS_ADDRESS) e se 'at-spi-bus-launcher' está ativo."
+        )
+
+    def _input_capabilities_prompt(self) -> str:
+        """Descreve ao modelo o que esta máquina consegue executar de verdade.
+
+        Sem isso o modelo insiste em `mouse_click` mesmo quando só existe o
+        wtype (que é apenas teclado) — cada tentativa vira uma falha e o
+        plano morre. Declarar a capacidade no system prompt faz o modelo
+        escolher keyboard_type/keyboard_hotkey de saída.
+        """
+        drv = getattr(self, "input_driver", None)
+        if drv is None:
+            return ""
+        keyboard = "disponível" if getattr(drv, "is_available", False) else "INDISPONÍVEL"
+        mouse = "disponível" if getattr(drv, "ydotool_bin", None) else "INDISPONÍVEL"
+        if mouse == "disponível":
+            return (
+                "CAPACIDADES DE INPUT DESTA SESSÃO:\n"
+                f"- Teclado virtual: {keyboard}\n"
+                f"- Mouse/cliques: {mouse}\n"
+            )
+        return (
+            "CAPACIDADES DE INPUT DESTA SESSÃO:\n"
+            f"- Teclado virtual: {keyboard}\n"
+            f"- Mouse/cliques: {mouse} (o wtype não emite eventos de mouse; falta o ydotool)\n"
+            "REGRA OBRIGATÓRIA: NÃO chame mouse_click — ele vai falhar sempre. "
+            "NÃO use locate_element só para clicar depois. Resolva tudo por teclado: "
+            "keyboard_type para digitar, keyboard_hotkey para Tab/Enter/setas/Ctrl+algo, "
+            "e shell/terminal para o resto. Navegue por Tab até o controle desejado e "
+            "confirme com Enter em vez de clicar."
+        )
+
     async def _run_one_session(self) -> None:
         """Uma tentativa completa de conexão WebSocket + streaming + recebimento.
 
@@ -994,6 +1053,7 @@ class GeminiLiveClient:
                     "- Para ler páginas abertas no navegador, use 'read_open_webpage'. "
                     "- Para documentos locais (PDFs, relatórios), use 'search_documents', 'read_document_page' e 'open_document_file'. "
                     "- Ações de risco (enviar e-mail, sobrescrever arquivo, atalho destrutivo como Alt+F4, ou digitar em campo de senha) NÃO são executadas de imediato: você receberá um 'confirmation_id' e deve pedir confirmação verbal ao usuário; se aprovada, chame 'confirm_action(confirmation_id, approve=true)'. Se o usuário recusar, chame com approve=false."
+                    f"\n\n{self._input_capabilities_prompt()}\n"
                     f"\n\n{context_summary}\n\n"
                     "Trate o usuário com carinho, eficiência e naturalidade. Sempre que ele pedir algo, use imediatamente a ferramenta certa e confirme com um toque leve de voz!"
                 )
@@ -1599,7 +1659,7 @@ class GeminiLiveClient:
                 if root is None:
                     return {
                         "success": False,
-                        "message": "Árvore de acessibilidade indisponível (AT-SPI ausente ou nenhum app com foco). Use mouse_click/keyboard_type como fallback.",
+                        "message": self._a11y_unavailable_msg() + " Use keyboard_type/keyboard_hotkey como fallback.",
                     }
                 if is_blocked_app(root.name):
                     return {
@@ -1636,7 +1696,7 @@ class GeminiLiveClient:
                 if root is None:
                     return {
                         "success": False,
-                        "message": "Árvore de acessibilidade indisponível (AT-SPI).",
+                        "message": self._a11y_unavailable_msg(),
                     }
                 el = DesktopInspector.element_at_point(root, int(x), int(y))
                 if el is None:
@@ -1660,7 +1720,7 @@ class GeminiLiveClient:
                 app_name = args.get("app_name")
                 root = self.inspector.get_ui_tree(app_name)
                 if root is None:
-                    return {"success": False, "message": "Árvore de acessibilidade indisponível (AT-SPI)."}
+                    return {"success": False, "message": self._a11y_unavailable_msg()}
                 element = DesktopInspector.find_element_by_uid(root, uid)
                 if element is None:
                     return {
@@ -1687,7 +1747,7 @@ class GeminiLiveClient:
                 app_name = args.get("app_name")
                 root = self.inspector.get_ui_tree(app_name)
                 if root is None:
-                    return {"success": False, "message": "Árvore de acessibilidade indisponível (AT-SPI)."}
+                    return {"success": False, "message": self._a11y_unavailable_msg()}
                 element = DesktopInspector.find_element_by_uid(root, uid)
                 if element is None:
                     return {

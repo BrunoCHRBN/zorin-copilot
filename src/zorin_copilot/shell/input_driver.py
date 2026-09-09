@@ -152,6 +152,31 @@ class VirtualInputDriver:
         if not self.is_available:
             self.refresh_backends()
 
+    def _no_mouse_backend(self, action: str) -> tuple[bool, str]:
+        """Falha quando não há backend capaz de emitir eventos de mouse.
+
+        Não reusa `_unavailable` de propósito: é muito comum o usuário ter o
+        wtype instalado (o teclado funciona) e ainda assim não conseguir
+        clicar — porque o wtype é SOMENTE teclado. Dizer "nenhum backend
+        disponível" nesse cenário é falso e leva o usuário a reinstalar o
+        que já funciona.
+        """
+        if self.simulation:
+            msg = f"[SIMULAÇÃO] {action} NÃO foi executado de fato."
+            logger.warning(msg)
+            return True, msg
+        if self.wtype_bin:
+            msg = (
+                f"{action} não executado: o wtype emite apenas TECLADO, não mouse. "
+                "Para cliques é preciso o ydotool: 'sudo pacman -S ydotool', com o "
+                "daemon ativo ('ydotoold' ou 'systemctl --user enable --now ydotoold'). "
+                "Enquanto isso, resolva por teclado (keyboard_type, Tab/Enter/setas)."
+            )
+        else:
+            msg = f"{action} não executado: nenhum backend de input disponível. {INSTALL_HINT}"
+        logger.error(msg)
+        return False, msg
+
     def _unavailable(self, action: str) -> tuple[bool, str]:
         """Falha padronizada quando não há backend. Respeita o modo simulação."""
         if self.simulation:
@@ -221,8 +246,8 @@ class VirtualInputDriver:
                 logger.info(msg)
                 return True, msg
 
-            # Sem backend: falha honesta (ou simulação explicitamente ligada).
-            return self._unavailable(f"Clique ({button}) em ({x}, {y})")
+            # Sem backend de mouse: falha honesta (ou simulação ligada).
+            return self._no_mouse_backend(f"Clique ({button}) em ({x}, {y})")
 
         except Exception as exc:
             err = f"Falha ao emitir clique em ({x}, {y}): {exc}"

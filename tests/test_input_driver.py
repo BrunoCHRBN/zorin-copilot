@@ -415,6 +415,56 @@ class RedescobertaDeBackendTest(unittest.TestCase):
             self.assertEqual(driver_module._find_binary("wtype"), "/bin/wtype")
 
 
+class WtypeNaoFazMouseTest(unittest.TestCase):
+    """O wtype é SOMENTE teclado. Dizer 'nenhum backend disponível' para
+    clique quando o wtype existe é falso — leva o usuário a reinstalar
+    o que já funciona."""
+
+    def _driver_wtype_only(self):
+        """Driver que acha wtype mas não ydotool (o cenário real do usuário)."""
+        driver = VirtualInputDriver()
+        driver.wtype_bin = "/usr/bin/wtype"
+        driver.ydotool_bin = None
+        driver.refresh_backends = lambda: False
+        driver.fence = mock.Mock()
+        driver.fence.is_coordinate_allowed.return_value = (True, "ok")
+        driver.fence.is_emergency_stopped = False
+        return driver
+
+    def test_click_explica_que_wtype_nao_emite_mouse(self):
+        d = self._driver_wtype_only()
+        ok, msg = d.click(100, 200)
+        self.assertFalse(ok)
+        self.assertIn("wtype", msg)
+        # Não pode afirmar que não há backend nenhum: há, e funciona.
+        self.assertNotIn("nenhum backend de input disponível", msg)
+
+    def test_click_aponta_ydotool(self):
+        d = self._driver_wtype_only()
+        _ok, msg = d.click(100, 200)
+        self.assertIn("ydotool", msg)
+
+    def test_type_text_funciona_com_wtype(self):
+        d = self._driver_wtype_only()
+        proc = mock.Mock(returncode=0, stderr="", stdout="")
+        with mock.patch("subprocess.run", return_value=proc):
+            ok, msg = d.type_text("hello")
+        self.assertTrue(ok, "teclado tem que continuar funcionando")
+        self.assertIn("5 caracteres", msg)
+
+    def test_sem_backend_nenhum_mensagem_generica(self):
+        d = _sem_backend()
+        _ok, msg = d.click(100, 200)
+        self.assertIn("nenhum backend de input disponível", msg)
+
+    def test_simulacao_nao_finge_erro(self):
+        d = self._driver_wtype_only()
+        d.simulation = True
+        ok, msg = d.click(100, 200)
+        self.assertTrue(ok)
+        self.assertIn("SIMULAÇÃO", msg)
+
+
 if __name__ == "__main__":
     unittest.main()
 

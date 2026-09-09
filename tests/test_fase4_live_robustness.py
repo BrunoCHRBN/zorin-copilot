@@ -583,5 +583,78 @@ class LiveSessionReconnectTest(unittest.TestCase):
         self.assertNotEqual(c.state, live_module.LiveVoiceState.ERROR)
 
 
+class InputCapabilitiesPromptTest(unittest.TestCase):
+    """O system prompt precisa declarar o que a máquina consegue executar.
+
+    Sem isso o modelo insiste em mouse_click mesmo com só o wtype presente
+    (que não emite mouse) e o plano morre em falha.
+    """
+
+    def _client_with_driver(self, wtype, ydotool):
+        c = _bare_client()
+        drv = mock.Mock()
+        drv.wtype_bin = wtype
+        drv.ydotool_bin = ydotool
+        drv.is_available = bool(wtype or ydotool)
+        c.input_driver = drv
+        return c
+
+    def test_sem_mouse_probe_mouse_click(self):
+        c = self._client_with_driver("/usr/bin/wtype", None)
+        prompt = c._input_capabilities_prompt()
+        self.assertIn("NÃO chame mouse_click", prompt)
+        self.assertIn("INDISPONÍVEL", prompt)
+
+    def test_sem_mouse_sugere_teclado(self):
+        c = self._client_with_driver("/usr/bin/wtype", None)
+        prompt = c._input_capabilities_prompt()
+        self.assertIn("keyboard_type", prompt)
+        self.assertIn("keyboard_hotkey", prompt)
+
+    def test_com_ydotool_nao_restringe(self):
+        c = self._client_with_driver("/usr/bin/wtype", "/usr/bin/ydotool")
+        prompt = c._input_capabilities_prompt()
+        self.assertNotIn("NÃO chame mouse_click", prompt)
+        self.assertIn("disponível", prompt)
+
+    def test_sem_driver_nenhum_nao_quebra(self):
+        c = _bare_client()
+        c.input_driver = None
+        self.assertEqual(c._input_capabilities_prompt(), "")
+
+
+class A11yUnavailableMessageTest(unittest.TestCase):
+    """A mensagem de AT-SPI indisponível precisa distinguir as causas.
+
+    Os daemons estarem de pé (caso mais comum) não significa que a árvore
+    venha: o foco pode estar numa layer-shell. Dizer só 'AT-SPI ausente'
+    faz o usuário reinstalar o que já funciona.
+    """
+
+    def test_com_apps_registrados_diz_que_e_foco(self):
+        c = _bare_client()
+        c.inspector = mock.Mock()
+        c.inspector.list_applications.return_value = ["kitty", "firefox"]
+        msg = c._a11y_unavailable_msg()
+        self.assertIn("kitty", msg)
+        self.assertIn("foco", msg)
+        self.assertNotIn("não alcançou o bus", msg)
+
+    def test_sem_apps_aponta_sessao_dbus(self):
+        c = _bare_client()
+        c.inspector = mock.Mock()
+        c.inspector.list_applications.return_value = []
+        msg = c._a11y_unavailable_msg()
+        self.assertIn("DBUS_SESSION_BUS_ADDRESS", msg)
+
+    def test_inspector_quebrando_nao_estoura(self):
+        c = _bare_client()
+        c.inspector = mock.Mock()
+        c.inspector.list_applications.side_effect = RuntimeError("boom")
+        msg = c._a11y_unavailable_msg()
+        self.assertIsInstance(msg, str)
+        self.assertTrue(len(msg) > 0)
+
+
 if __name__ == "__main__":
     unittest.main()
