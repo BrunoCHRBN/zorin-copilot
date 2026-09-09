@@ -104,14 +104,19 @@ class HyprlandEffects:
     # API pública
     # ------------------------------------------------------------------
     def ensure_window_blur(self, class_: str = "io.github.bruno.ZorinCopilot") -> None:
-        """Desfoca a janela principal (janela XDG comum) pelo app_id."""
-        self._ensure(f"win-blur:{class_}", "keyword", "windowrule", f"blur,{class_}")
-        self._ensure(f"win-round:{class_}", "keyword", "windowrule", f"rounding,{class_}")
+        """Desfoca a janela principal (janela XDG comum) pelo app_id.
+
+        O Hyprland casa `windowrule` por **título** sem prefixo; como o título é
+        "Zorin Copilot" e não o app_id, é preciso o prefixo `class:` para casar
+        pelo app_id correto. Sem ele a regra não casa e o compositor registra erro.
+        """
+        self._ensure(f"win-blur:{class_}", "keyword", "windowrule", f"blur,class:{class_}")
+        self._ensure(f"win-round:{class_}", "keyword", "windowrule", f"rounding,class:{class_}")
 
     def remove_window_blur(self, class_: str = "io.github.bruno.ZorinCopilot") -> None:
         """Revoga o blur/rounding da janela principal."""
-        self._remove(f"win-blur:{class_}", "keyword", "windowrule", f"noblur,{class_}")
-        self._remove(f"win-round:{class_}", "keyword", "windowrule", f"norounding,{class_}")
+        self._remove(f"win-blur:{class_}", "keyword", "windowrule", f"noblur,class:{class_}")
+        self._remove(f"win-round:{class_}", "keyword", "windowrule", f"norounding,class:{class_}")
 
     def ensure_layer_blur(self, namespace: str) -> None:
         """Desfoca a pílula de voz (superfície layer-shell) pelo namespace."""

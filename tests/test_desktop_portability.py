@@ -325,7 +325,7 @@ class TestDecorRules(unittest.TestCase):
         self.assertTrue(ok)
         snippet = (self.config_home / "hypr" / "zorin-copilot.conf").read_text()
         self.assertIn("zorin-copilot:decor", snippet)  # marcadores
-        self.assertIn("windowrule = blur,io.github.bruno.ZorinCopilot", snippet)
+        self.assertIn("windowrule = blur,class:io.github.bruno.ZorinCopilot", snippet)
         self.assertIn("layerrule = blur,zorin-copilot-pill", snippet)
         main = (self.config_home / "hypr" / "hyprland.conf").read_text()
         self.assertIn("zorin-copilot.conf", main)  # garantido o source
@@ -350,7 +350,7 @@ class TestDecorRules(unittest.TestCase):
             ok, _ = sc.ensure_decor_rules(env)
         self.assertTrue(ok)
         joined = " ".join(" ".join(c.args[0]) for c in mock_run.call_args_list)
-        self.assertIn("hyprctl keyword windowrule blur,io.github.bruno.ZorinCopilot", joined)
+        self.assertIn("hyprctl keyword windowrule blur,class:io.github.bruno.ZorinCopilot", joined)
         self.assertIn("hyprctl keyword layerrule blur,zorin-copilot-pill", joined)
 
 

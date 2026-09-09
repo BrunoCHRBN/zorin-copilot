@@ -91,11 +91,11 @@ class HyprlandEffectsTest(unittest.TestCase):
     def test_ensure_window_blur_emite_windowrule(self):
         self.fx.ensure_window_blur("io.github.bruno.ZorinCopilot")
         self.assertIn(
-            ("hyprctl", "keyword", "windowrule", "blur,io.github.bruno.ZorinCopilot"),
+            ("hyprctl", "keyword", "windowrule", "blur,class:io.github.bruno.ZorinCopilot"),
             self._calls(),
         )
         self.assertIn(
-            ("hyprctl", "keyword", "windowrule", "rounding,io.github.bruno.ZorinCopilot"),
+            ("hyprctl", "keyword", "windowrule", "rounding,class:io.github.bruno.ZorinCopilot"),
             self._calls(),
         )
 
@@ -122,7 +122,7 @@ class HyprlandEffectsTest(unittest.TestCase):
         self.mock_run.reset_mock()
         self.fx.remove_window_blur("io.github.bruno.ZorinCopilot")
         self.assertIn(
-            ("hyprctl", "keyword", "windowrule", "noblur,io.github.bruno.ZorinCopilot"),
+            ("hyprctl", "keyword", "windowrule", "noblur,class:io.github.bruno.ZorinCopilot"),
             self._calls(),
         )
 

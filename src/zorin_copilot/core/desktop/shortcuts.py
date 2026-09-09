@@ -803,8 +803,8 @@ def _decor_directive() -> str:
     """
     ns = current_environment().blur_namespace()
     return (
-        f"windowrule = blur,{_DECOR_APP_ID}\n"
-        f"windowrule = rounding,{_DECOR_APP_ID}\n"
+        f"windowrule = blur,class:{_DECOR_APP_ID}\n"
+        f"windowrule = rounding,class:{_DECOR_APP_ID}\n"
         f"layerrule = blur,{ns}\n"
         f"layerrule = rounding,{ns}\n"
     )
