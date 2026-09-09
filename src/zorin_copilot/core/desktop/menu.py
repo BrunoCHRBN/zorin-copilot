@@ -245,7 +245,7 @@ class DbusMenu:
 
         self._conn = conn
         try:
-            node_info = GLib.DBusNodeInfo.new_for_xml(DBUSMENU_XML)
+            node_info = Gio.DBusNodeInfo.new_for_xml(DBUSMENU_XML)
             iface_info = node_info.lookup_interface(DBUSMENU_IFACE)
             self._registration_id = conn.register_object(
                 self.path,

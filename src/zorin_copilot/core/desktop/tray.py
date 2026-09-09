@@ -160,11 +160,11 @@ class StatusNotifierTray:
     # Ciclo de vida do barramento
     # ------------------------------------------------------------------
     def _on_bus_acquired(self, conn, name, *args) -> None:
-        from gi.repository import GLib
+        from gi.repository import Gio
 
         self._conn = conn
         try:
-            node_info = GLib.DBusNodeInfo.new_for_xml(SNI_XML)
+            node_info = Gio.DBusNodeInfo.new_for_xml(SNI_XML)
             iface_info = node_info.lookup_interface(SNI_ITEM_IFACE)
             self._registration_id = conn.register_object(
                 "/StatusNotifierItem",
