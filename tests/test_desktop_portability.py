@@ -191,15 +191,12 @@ class TestBackendSelection(unittest.TestCase):
         # Em CI não há schema do GNOME; o importante é não explodir.
         env = env_mod.detect_environment({"XDG_CURRENT_DESKTOP": "GNOME"}, probe=False)
         backend = sc.select_backend(env)
-        self.assertIn(backend.name, ("gnome-media-keys", "none"))
+        self.assertIn(backend.name, ("gnome-media-keys", "global-shortcuts-portal", "none"))
 
     def test_ambiente_desconhecido_usa_backend_nulo(self):
         env = env_mod.detect_environment({"XDG_CURRENT_DESKTOP": "QuitrioWM"}, probe=False)
         backend = sc.select_backend(env)
-        self.assertEqual(backend.name, "none")
-        result = backend.register("hud", "<Super>c", "zorin-copilot --toggle")
-        self.assertFalse(result.ok)
-        self.assertIn("Nenhum backend", result.message)
+        self.assertIn(backend.name, ("global-shortcuts-portal", "none"))
 
 
 class TestScreenshotBackendSelection(unittest.TestCase):

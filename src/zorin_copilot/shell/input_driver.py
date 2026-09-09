@@ -1,8 +1,11 @@
 # Decisão de design: driver de entrada virtual para Wayland com suporte a /dev/uinput e ydotool.
 # Todas as ações de clique e movimentação são OBRIGATORIAMENTE validadas pelo ScreenFenceManager
 # antes de qualquer emissão para o kernel, garantindo isolamento de monitor e proteção contra cliques fora do escopo.
+#
+# Regra de honestidade: sem backend, a operação FALHA. O driver nunca retorna
+# sucesso por uma ação que não executou. Veja o comentário em `simulation`.
 
-"""Driver de entrada de hardware virtual para o Zorin OS (Wayland / uinput)."""
+"""Driver de entrada de hardware virtual (Wayland / uinput)."""
 
 from __future__ import annotations
 
@@ -17,26 +20,68 @@ from ..core.fence import ScreenFenceManager
 
 logger = logging.getLogger(__name__)
 
+#: Liga o modo simulação sem tocar em código. Útil para demonstrações e
+#: testes de integração — NUNCA para uso real, porque nada acontece de fato.
+SIMULATION_ENV_VAR = "ZORIN_COPILOT_INPUT_SIMULATION"
+
+_TRUTHY = {"1", "true", "yes", "on", "sim"}
+
+INSTALL_HINT = (
+    "Instale e inicie o daemon: 'sudo pacman -S ydotool' (Arch) ou "
+    "'sudo apt install ydotool' (Debian/Ubuntu); depois 'systemctl --user "
+    "enable --now ydotool' e garanta acesso a /dev/uinput."
+)
+
 
 class VirtualInputDriver:
-    """Emite cliques, digitação e atalhos de hardware virtual respeitando cercas espaciais."""
+    """Emite cliques, digitação e atalhos de hardware virtual respeitando cercas espaciais.
 
-    def __init__(self, fence: ScreenFenceManager | None = None):
+    Sem um backend real, todo método devolve ``(False, motivo)``. Isso é
+    intencional: o resultado vai direto para o modelo (``live.py`` monta
+    ``{"success": ok, "message": msg}``), então um falso positivo faz o agente
+    *acreditar* que clicou ou digitou e continuar o plano a partir de uma
+    premissa falsa. Falhar é melhor que mentir.
+    """
+
+    def __init__(self, fence: ScreenFenceManager | None = None, simulation: bool | None = None):
         self.fence = fence or ScreenFenceManager()
         self.ydotool_bin = shutil.which("ydotool")
+        # Presença de /dev/uinput gravável é só diagnóstico: não existe emissão
+        # direta implementada, então não pode contar como backend disponível.
         self._has_uinput_access = os.access("/dev/uinput", os.W_OK) if os.path.exists("/dev/uinput") else False
+        self.simulation = self._resolve_simulation(simulation)
+
+    @staticmethod
+    def _resolve_simulation(override: bool | None) -> bool:
+        if override is not None:
+            return bool(override)
+        return os.environ.get(SIMULATION_ENV_VAR, "").strip().lower() in _TRUTHY
 
     @property
     def is_available(self) -> bool:
-        """Verifica se há algum backend disponível para envio físico de inputs."""
-        return bool(self.ydotool_bin or self._has_uinput_access)
+        """Há backend capaz de emitir o input de verdade?
+
+        Diferente de "o processo não vai quebrar". Modo simulação continua
+        reportando False aqui — ele não executa nada.
+        """
+        return bool(self.ydotool_bin)
 
     def get_backend_name(self) -> str:
         if self.ydotool_bin:
             return "ydotool (uinput daemon)"
-        if self._has_uinput_access:
-            return "direct /dev/uinput"
-        return "modo simulação segura (sem permissão /dev/uinput)"
+        if self.simulation:
+            return "SIMULAÇÃO (nenhuma ação é executada)"
+        return "indisponível (ydotool não encontrado)"
+
+    def _unavailable(self, action: str) -> tuple[bool, str]:
+        """Falha padronizada quando não há backend. Respeita o modo simulação."""
+        if self.simulation:
+            msg = f"[SIMULAÇÃO] {action} NÃO foi executado de fato."
+            logger.warning(msg)
+            return True, msg
+        msg = f"{action} não executado: nenhum backend de input disponível. {INSTALL_HINT}"
+        logger.error(msg)
+        return False, msg
 
     def click(
         self,
@@ -89,10 +134,8 @@ class VirtualInputDriver:
                 logger.info(msg)
                 return True, msg
 
-            # Modo de simulação/fallback seguro se ydotool não estiver instalado
-            msg = f"Simulação de clique ({button}) em ({x}, {y}) [Permitido pela cerca: {self.fence.get_active_monitor().name if self.fence.get_active_monitor() else 'Monitor'}]."
-            logger.info(msg)
-            return True, msg
+            # Sem backend: falha honesta (ou simulação explicitamente ligada).
+            return self._unavailable(f"Clique ({button}) em ({x}, {y})")
 
         except Exception as exc:
             err = f"Falha ao emitir clique em ({x}, {y}): {exc}"
@@ -132,10 +175,8 @@ class VirtualInputDriver:
                 logger.info(msg)
                 return True, msg
 
-            # Modo de simulação/fallback seguro
-            msg = f"Simulação de digitação: '{text[:40]}...' ({len(text)} caracteres)."
-            logger.info(msg)
-            return True, msg
+            # Sem backend: falha honesta (ou simulação explicitamente ligada).
+            return self._unavailable(f"Digitação de {len(text)} caracteres")
 
         except Exception as exc:
             err = f"Falha ao digitar texto via teclado virtual: {exc}"
@@ -190,7 +231,16 @@ class VirtualInputDriver:
                     subprocess.run(full_args, capture_output=True, timeout=2.0, check=False)
                     return True, f"Atalho '{keys_str}' acionado com sucesso."
 
-            return True, f"Simulação de atalho: '{keys_str}'."
+                # Backend existe, mas nenhuma das teclas pedidas tem keycode
+                # conhecido — isso é falha de mapeamento, não de backend.
+                msg = (
+                    f"Atalho '{keys_str}' não executado: nenhuma das teclas tem "
+                    f"keycode mapeado. Mapeadas: {', '.join(sorted(KEY_MAP))}."
+                )
+                logger.error(msg)
+                return False, msg
+
+            return self._unavailable(f"Atalho '{keys_str}'")
 
         except Exception as exc:
             err = f"Falha ao acionar atalho '{keys_str}': {exc}"

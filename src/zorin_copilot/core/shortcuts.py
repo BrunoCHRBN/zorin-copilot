@@ -20,6 +20,16 @@ from typing import Final
 logger = logging.getLogger(__name__)
 
 
+def is_gnome_desktop() -> bool:
+    """True se o ambiente é GNOME/Zorin."""
+    from .desktop.env import current_environment
+    return current_environment().is_gnome
+
+
+def is_wlroots_compositor() -> bool:
+    """True se o compositor é wlroots-based (Hyprland, Sway, Niri...)."""
+    from .desktop.env import current_environment
+    return current_environment().is_wlroots
 @dataclass(frozen=True)
 class AppShortcut:
     """Atalho interno da janela (escopo de aplicação).
@@ -234,7 +244,18 @@ class AutostartManager:
             ok, message = disable()
             logger.info(f"Autostart removido: {message}")
             return ok
+
         except Exception as exc:
             logger.error(f"Erro ao desabilitar autostart: {exc}")
             return False
+
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _hyprland_conf_path() -> Path:
+        base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+        return Path(base) / "hypr" / "hyprland.conf"
+
+    @staticmethod
+    def _exec_once_line(binary_command: str) -> str:
+        return f"exec-once = {binary_command}"
 
