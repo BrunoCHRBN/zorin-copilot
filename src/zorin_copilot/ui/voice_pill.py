@@ -318,10 +318,14 @@ class VoicePillWindow(Gtk.Window):
             self._ui_on_state_change, state, msg
         )
         self.live_client.on_audio_level = lambda lvl: GLib.idle_add(self._ui_on_audio_level, lvl)
-        self.live_client.on_transcript = lambda role, text: GLib.idle_add(
-            self._ui_on_transcript, role, text
-        )
-        self.live_client.on_error = lambda err: GLib.idle_add(self._ui_on_error, err)
+        existing_error_cb = self.live_client.on_error
+
+        def _forward_error_pill(err: str) -> None:
+            if existing_error_cb:
+                existing_error_cb(err)
+            GLib.idle_add(self._ui_on_error, err)
+
+        self.live_client.on_error = _forward_error_pill
         # Sinais novos (antes descartados):
         if callable(getattr(self.live_client, "on_tool_executed", None)):
             self.live_client.on_tool_executed = (

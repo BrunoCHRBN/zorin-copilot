@@ -323,6 +323,37 @@ class LiveAudioPlayerTest(unittest.TestCase):
         self.assertIn("pw-play", cmd[0])
 
 
+class LiveErrorHandlingTest(unittest.TestCase):
+    """Testes para garantir que erros não sejam mascarados como 'Desconectado'."""
+
+    def test_run_loop_preserves_error_state(self):
+        client = GeminiLiveClient(config=CopilotConfig(gemini_api_key="fake-key"))
+        with patch.object(client, "_live_session", side_effect=RuntimeError("Falha na rede")):
+            client._run_loop()
+        self.assertEqual(client.state, LiveVoiceState.ERROR)
+        self.assertIn("Falha na rede", client._last_error or "")
+
+    def test_execute_tool_call_includes_name_in_response(self):
+        import asyncio
+        import json
+        client = GeminiLiveClient(config=CopilotConfig(gemini_api_key="fake-key"))
+        client._dispatch_tool = MagicMock(return_value={"success": True, "message": "ok"})
+        mock_ws = MagicMock()
+        mock_ws.send = MagicMock(return_value=asyncio.sleep(0))
+
+        tool_data = {
+            "functionCalls": [
+                {"id": "call-123", "name": "launch_app", "args": {"app_name": "terminal"}}
+            ]
+        }
+        asyncio.run(client._execute_tool_call(mock_ws, tool_data))
+        mock_ws.send.assert_called_once()
+        sent_payload = json.loads(mock_ws.send.call_args[0][0])
+        fr = sent_payload["toolResponse"]["functionResponses"][0]
+        self.assertEqual(fr["id"], "call-123")
+        self.assertEqual(fr["name"], "launch_app")
+
+
 if __name__ == "__main__":
     unittest.main()
 

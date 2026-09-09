@@ -373,10 +373,14 @@ class LiveVoiceWidget(Gtk.Box):
         self.live_client.on_tool_executed = lambda name, msg, ok: GLib.idle_add(
             self._ui_on_tool_executed, name, msg, ok
         )
-        self.live_client.on_transcript = lambda role, text: GLib.idle_add(
-            self._ui_on_transcript, role, text
-        )
-        self.live_client.on_error = lambda err: GLib.idle_add(self._ui_on_error, err)
+        existing_error_cb = self.live_client.on_error
+
+        def _forward_error(err: str) -> None:
+            if existing_error_cb:
+                existing_error_cb(err)
+            GLib.idle_add(self._ui_on_error, err)
+
+        self.live_client.on_error = _forward_error
         self.live_client.on_video_state_change = lambda active: GLib.idle_add(
             self._update_video_ui, active
         )

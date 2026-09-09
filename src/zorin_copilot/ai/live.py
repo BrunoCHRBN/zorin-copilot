@@ -663,6 +663,7 @@ class GeminiLiveClient:
         self.rag = LocalDocumentRAG(memory=self.memory)
         self.inspector = getattr(self.executor, "inspector", None) or DesktopInspector()
         self.state: LiveVoiceState = LiveVoiceState.DISCONNECTED
+        self._last_error: str | None = None
 
         # Callbacks para interface gráfica (GTK4)
         self.on_state_change: Callable[[LiveVoiceState, str], None] | None = None
@@ -738,6 +739,7 @@ class GeminiLiveClient:
 
         self._is_running = True
         self._is_muted = False
+        self._last_error = None
         self._video_frames_count = 0
         self._session_start_time = time.time()
         self._executed_actions_log.clear()
@@ -845,11 +847,21 @@ class GeminiLiveClient:
         try:
             self._loop.run_until_complete(self._live_session())
         except Exception as exc:
-            logger.error(f"Exceção no loop live: {exc}")
+            logger.error(f"Exceção no loop live: {exc}", exc_info=True)
+            self._last_error = str(exc)
             self._set_state(LiveVoiceState.ERROR, str(exc))
+            if self.on_error:
+                self.on_error(str(exc))
         finally:
             self._terminate_audio_processes()
-            self._set_state(LiveVoiceState.DISCONNECTED, "Desconectado.")
+            if self.state == LiveVoiceState.ERROR:
+                pass  # Preserva o estado de erro e a mensagem para a UI
+            elif self._last_error and self._is_running:
+                self._set_state(LiveVoiceState.ERROR, self._last_error)
+                if self.on_error:
+                    self.on_error(self._last_error)
+            else:
+                self._set_state(LiveVoiceState.DISCONNECTED, "Desconectado.")
 
     async def _live_session(self) -> None:
         """Gerencia conexão WebSocket, streaming de microfone e recebimento de áudio/tools."""
@@ -861,7 +873,7 @@ class GeminiLiveClient:
         uri = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key={api_key}"
 
         try:
-            async with websockets.connect(uri, max_size=10_000_000, ping_interval=15, ping_timeout=20) as ws:
+            async with websockets.connect(uri, max_size=10_000_000, ping_interval=20, ping_timeout=20) as ws:
                 self._ws = ws
 
                 # 1. Prepara contexto dinâmico de memória e cercas espaciais
@@ -928,7 +940,10 @@ class GeminiLiveClient:
                 if "setupComplete" not in setup_resp:
                     err_msg = f"Falha no setup: {setup_resp}"
                     logger.error(err_msg)
+                    self._last_error = err_msg
                     self._set_state(LiveVoiceState.ERROR, err_msg)
+                    if self.on_error:
+                        self.on_error(err_msg)
                     return
 
                 self._set_state(LiveVoiceState.LISTENING, "Conectado! Pode falar...")
@@ -961,9 +976,19 @@ class GeminiLiveClient:
                 for task in pending:
                     task.cancel()
 
+                # Inspeciona tarefas finalizadas para capturar exceções não tratadas
+                for task in done:
+                    if not task.cancelled():
+                        exc = task.exception()
+                        if exc:
+                            logger.error(f"Tarefa de áudio/servidor finalizou com erro: {exc}", exc_info=exc)
+                            if not self._last_error:
+                                self._last_error = f"Erro na chamada de voz: {exc}"
+
         except Exception as exc:
-            logger.error(f"Erro de conexão com Gemini Live WebSocket: {exc}")
-            self._set_state(LiveVoiceState.ERROR, f"Erro de conexão: {exc}")
+            logger.error(f"Erro de conexão com Gemini Live WebSocket: {exc}", exc_info=True)
+            self._last_error = f"Erro de conexão: {exc}"
+            self._set_state(LiveVoiceState.ERROR, self._last_error)
             if self.on_error:
                 self.on_error(str(exc))
 
@@ -1028,23 +1053,74 @@ class GeminiLiveClient:
                 try:
                     await ws.send(json.dumps(msg))
                 except Exception as exc:
-                    logger.warning(f"Erro ao enviar chunk de áudio: {exc}")
+                    if self._is_running:
+                        logger.warning(f"Erro ao enviar chunk de áudio: {exc}")
                     break
+
+        if self._is_running and self._record_proc and self._record_proc.poll() is not None:
+            code = self._record_proc.poll()
+            if code != 0:
+                logger.error(f"Gravador de áudio encerrou inesperadamente com código {code}")
+                if not self._last_error:
+                    self._last_error = f"Microfone desconectado (código {code})"
 
     async def _server_receiver_loop(self, ws: Any) -> None:
         """Recebe pacotes de áudio, eventos de interrupção e chamadas de ferramentas do Gemini."""
         while self._is_running:
             try:
                 raw_msg = await ws.recv()
-            except Exception:
+            except websockets.exceptions.ConnectionClosed as exc:
+                code = getattr(exc.rcvd, "code", None) or getattr(exc.sent, "code", None) or getattr(exc, "code", None)
+                reason = getattr(exc.rcvd, "reason", "") or getattr(exc.sent, "reason", "") or getattr(exc, "reason", "")
+                if self._is_running and code != 1000:
+                    msg = f"Conexão encerrada pelo servidor (código {code}" + (f": {reason}" if reason else ")")
+                    logger.warning(msg)
+                    self._last_error = msg
+                    self._set_state(LiveVoiceState.ERROR, msg)
+                    if self.on_error:
+                        self.on_error(msg)
+                break
+            except Exception as exc:
+                if self._is_running:
+                    msg = f"Erro no recebimento de áudio/dados: {exc}"
+                    logger.error(msg, exc_info=True)
+                    self._last_error = msg
+                    self._set_state(LiveVoiceState.ERROR, msg)
+                    if self.on_error:
+                        self.on_error(msg)
                 break
 
-            data = json.loads(raw_msg.decode("utf-8") if isinstance(raw_msg, bytes) else raw_msg)
+            try:
+                data = json.loads(raw_msg.decode("utf-8") if isinstance(raw_msg, bytes) else raw_msg)
+            except Exception as exc:
+                logger.error(f"Erro ao decodificar JSON do servidor: {exc}")
+                continue
+
+            # 0. Trata erros explícitos retornados pela API Gemini
+            if "error" in data:
+                err_info = data["error"]
+                err_msg = err_info.get("message", str(err_info)) if isinstance(err_info, dict) else str(err_info)
+                logger.error(f"Erro reportado pela API Gemini Live: {err_msg}")
+                self._last_error = f"Erro Gemini: {err_msg}"
+                self._set_state(LiveVoiceState.ERROR, self._last_error)
+                if self.on_error:
+                    self.on_error(err_msg)
+                break
+
+            if "goaway" in data:
+                logger.warning("Servidor Gemini solicitou encerramento de sessão (goaway).")
 
             # 1. Trata Tool Call (Execução de ações no desktop)
             if "toolCall" in data:
                 self._set_state(LiveVoiceState.EXECUTING, "Executando comando...")
-                await self._execute_tool_call(ws, data["toolCall"])
+                try:
+                    await self._execute_tool_call(ws, data["toolCall"])
+                except Exception as exc:
+                    logger.error(f"Erro ao executar chamada de ferramenta: {exc}", exc_info=True)
+                    self._last_error = f"Erro ao executar ação: {exc}"
+                    self._set_state(LiveVoiceState.ERROR, self._last_error)
+                    if self.on_error:
+                        self.on_error(self._last_error)
                 continue
 
             # 2. Trata Server Content (Áudio do assistente e transcrição)
@@ -1127,6 +1203,7 @@ class GeminiLiveClient:
 
             responses.append({
                 "id": call_id,
+                "name": name,
                 "response": {
                     "output": output,
                 }

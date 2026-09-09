@@ -1176,6 +1176,11 @@ class CopilotWindow(Adw.ApplicationWindow):
         if initial_command and hasattr(self.live_client, "queue_initial_text"):
             self.live_client.queue_initial_text(initial_command)
 
+        def _on_live_error(err: str) -> None:
+            GLib.idle_add(lambda: self.show_toast(f"⚠️ Chamada de voz: {err}"))
+
+        self.live_client.on_error = _on_live_error
+
         if as_pill:
             if not self.voice_pill_window:
                 self.voice_pill_window = VoicePillWindow(
@@ -1473,6 +1478,10 @@ class ZorinCopilotApp(Adw.Application):
 
 def main() -> int:
     import sys
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
     app = ZorinCopilotApp()
     return app.run(sys.argv)
 
