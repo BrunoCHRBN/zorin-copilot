@@ -19,8 +19,7 @@ from ..core.usage import TokenUsage, TokenUsageTracker, usage_from_gemini, usage
 logger = logging.getLogger(__name__)
 
 
-SYSTEM_PROMPT = """Você é o Zorin Copilot, assistente e parceiro de desktop nativo do usuário no Zorin OS 18 Core (Linux / GNOME 46 no Wayland).
-Sua missão é atuar como um colega de bancada inteligente, ágil, empático e resolutivo — ajudando a operar o computador, solucionar problemas técnicos, resumir informações e realizar tarefas no desktop.
+SYSTEM_PROMPT = """Sua missão é atuar como um colega de bancada inteligente, ágil, empático e resolutivo — ajudando a operar o computador, solucionar problemas técnicos, resumir informações e realizar tarefas no desktop.
 
 PERSONALIDADE & TOM DE VOZ (PARCEIRO DE DESKTOP):
 1. Linguagem Natural e Descomplicada: Responda em português brasileiro de forma fluida, acolhedora, competente e direta ao ponto.
@@ -358,7 +357,10 @@ class GeminiProvider(BaseLLMProvider):
                 [],
             )
 
-        sys_instruction = SYSTEM_PROMPT
+        sys_instruction = (
+            "Você é o Zorin Copilot, assistente e parceiro de desktop nativo do usuário no "
+            f"{CopilotConfig.detect_platform()}.\n" + SYSTEM_PROMPT
+        )
         if context_summary:
             sys_instruction += f"\n\n{context_summary}"
         if app_list:
@@ -481,7 +483,10 @@ class OllamaProvider(BaseLLMProvider):
         image_mime: str = "image/jpeg",
     ) -> tuple[str, list[DesktopAction]]:
         url = f"{self.host_url}/api/chat"
-        sys_instruction = SYSTEM_PROMPT
+        sys_instruction = (
+            "Você é o Zorin Copilot, assistente e parceiro de desktop nativo do usuário no "
+            f"{CopilotConfig.detect_platform()}.\n" + SYSTEM_PROMPT
+        )
         if context_summary:
             sys_instruction += f"\n\n{context_summary}"
         if app_list:
@@ -576,7 +581,10 @@ class OpenAICompatProvider(BaseLLMProvider):
 
         url = f"{self.api_url}/chat/completions"
         headers = {"Authorization": f"Bearer {self.api_key}"}
-        sys_instruction = SYSTEM_PROMPT
+        sys_instruction = (
+            "Você é o Zorin Copilot, assistente e parceiro de desktop nativo do usuário no "
+            f"{CopilotConfig.detect_platform()}.\n" + SYSTEM_PROMPT
+        )
         if context_summary:
             sys_instruction += f"\n\n{context_summary}"
         if app_list:
@@ -681,7 +689,10 @@ class WorkBuddyProvider(BaseLLMProvider):
             "Content-Type": "application/json",
         }
 
-        sys_instruction = SYSTEM_PROMPT
+        sys_instruction = (
+            "Você é o Zorin Copilot, assistente e parceiro de desktop nativo do usuário no "
+            f"{CopilotConfig.detect_platform()}.\n" + SYSTEM_PROMPT
+        )
         if context_summary:
             sys_instruction += f"\n\n{context_summary}"
         if app_list:

@@ -78,6 +78,30 @@ class CopilotConfig:
     autostart_enabled: bool = False
 
     # Configurações de Confiança, Privacidade e RAG
+
+    @staticmethod
+    def detect_platform() -> str:
+        """Descreve o sistema real onde o Copilot roda, para o prompt de sistema.
+
+        Lê ``/etc/os-release`` e as variáveis de ambiente do compositor. Evita
+        mentir para o modelo (ex.: dizer "Zorin OS 18" quando o usuário está no
+        EndeavourOS + Hyprland) — a detecção correta dita as sugestões de pacotes
+        e comandos que o agente faz.
+        """
+        pretty = "Linux"
+        try:
+            with open("/etc/os-release", "r", encoding="utf-8") as fh:
+                for line in fh:
+                    if line.startswith("PRETTY_NAME="):
+                        pretty = line.split("=", 1)[1].strip().strip('"')
+                        break
+        except OSError:
+            pass
+        desktop = (os.environ.get("XDG_CURRENT_DESKTOP") or "").strip() or "desconhecido"
+        session = (os.environ.get("XDG_SESSION_TYPE") or "").strip()
+        if session:
+            return f"{pretty} ({desktop} no {session})"
+        return f"{pretty} ({desktop})"
     trusted_directories: list[str] = field(default_factory=lambda: ["~/Documentos"])
     quarantine_directories: list[str] = field(default_factory=lambda: ["~/Downloads"])
     ignored_patterns: list[str] = field(
@@ -95,12 +119,8 @@ class CopilotConfig:
     rag_local_only: bool = False
     mask_pii: bool = True
     max_file_size_mb: int = 40
-    # Prompt de sistema customizável
-    system_prompt: str = (
-        "Você é o Zorin Copilot, assistente inteligente do sistema operacional Zorin OS 18 Core "
-        "(GNOME 46 no Wayland). Você ajuda o usuário a realizar tarefas, responder dúvidas sobre "
-        "o computador e propor ações de sistema de forma clara, prestativa e objetiva em português."
-    )
+    # Prompt de sistema customizável. Valor vazio = "use o dinâmico detectado por detect_platform()".
+    system_prompt: str = ""
 
     @classmethod
     def config_dir(cls) -> Path:
@@ -134,6 +154,16 @@ class CopilotConfig:
             config.openai_api_key = os.environ.get("OPENAI_API_KEY", "")
         if not config.workbuddy_api_key:
             config.workbuddy_api_key = os.environ.get("WORKBUDDY_API_KEY", "")
+
+        # Prompt de sistema: se o usuário não customizou, usa a descrição da
+        # plataforma real (evita dizer "Zorin OS 18" num EndeavourOS/Hyprland).
+        if not config.system_prompt:
+            plat = CopilotConfig.detect_platform()
+            config.system_prompt = (
+                f"Você é o Zorin Copilot, assistente inteligente do sistema operacional {plat}. "
+                "Você ajuda o usuário a realizar tarefas, responder dúvidas sobre o computador e "
+                "propor ações de sistema de forma clara, prestativa e objetiva em português."
+            )
 
         return config
 

@@ -36,6 +36,6 @@ ENV/
 .aider*
 
 # Core dumps (testes GTK sob xvfb podem gerar GBs).
-# Só 'core.*' (ex.: core.526259) — NÃO 'core' sem sufixo, que engolia o
-# diretório src/zorin_copilot/core/ e impedia novos arquivos em core/.
+# Só o padrão 'core.*' (ex.: core.526259) — NÃO 'core' sem sufixo, pois isso
+# engole o diretório src/zorin_copilot/core/ e impede futuros commits do módulo.
 core.*
