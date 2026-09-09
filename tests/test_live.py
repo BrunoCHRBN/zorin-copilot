@@ -301,8 +301,10 @@ class LiveModelLabelTest(unittest.TestCase):
         self.assertEqual(live_model_label(""), "Gemini")
         self.assertEqual(live_model_label(None), "Gemini")
 
-    def test_default_config_produces_2_5(self):
-        self.assertEqual(live_model_label(CopilotConfig().gemini_live_model), "Gemini 2.5")
+    def test_default_config_produces_3_1(self):
+        # O default acompanha o modelo de voz atual do Google (março/2026).
+        # Se o projeto voltar para o 2.5, este teste precisa ser revertido.
+        self.assertEqual(live_model_label(CopilotConfig().gemini_live_model), "Gemini 3.1")
 
 
 

@@ -80,7 +80,10 @@ class SendTextInputTest(unittest.TestCase):
         finally:
             c._loop.close()
 
-    def test_sends_client_content_when_running(self):
+    def test_sends_realtime_input_when_running(self):
+        # Gemini 3.1: texto durante a conversa vai por realtimeInput. O
+        # clientContent do 2.5 passou a valer só para semear histórico inicial,
+        # então o modelo ignoraria o comando se ainda mandássemos clientContent.
         c = _bare_client()
         ws = _FakeWS()
         c._is_running = True
@@ -95,11 +98,9 @@ class SendTextInputTest(unittest.TestCase):
 
         self.assertEqual(len(ws.sent), 1)
         msg = ws.sent[0]
-        self.assertIn("clientContent", msg)
-        self.assertTrue(msg["clientContent"]["turnComplete"])
-        turn = msg["clientContent"]["turns"][0]
-        self.assertEqual(turn["role"], "user")
-        self.assertEqual(turn["parts"][0]["text"], "abre o navegador")
+        self.assertIn("realtimeInput", msg)
+        self.assertNotIn("clientContent", msg)
+        self.assertEqual(msg["realtimeInput"]["text"], "abre o navegador")
 
 
 class PendingTtlTest(unittest.TestCase):

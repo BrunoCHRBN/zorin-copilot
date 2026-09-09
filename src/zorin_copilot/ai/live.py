@@ -67,10 +67,15 @@ class LiveVoiceState(Enum):
 def build_realtime_text_msg(text: str) -> dict[str, Any]:
     """Fase 4C: monta o payload `realtimeInput` de texto (contexto dinâmico).
 
-    Diferente do `clientContent` (turnComplete=true → provoca resposta do
-    modelo), o realtimeInput apenas ACRESCENTA informação ao contexto da
-    sessão sem exigir uma resposta imediata — ideal para deltas de contexto
-    (fato memorizado, monitor ativo alterado, contato salvo).
+    No Gemini 2.5 isso se distinguia do `clientContent` (turnComplete=true →
+    provocava resposta do modelo): o realtimeInput apenas ACRESCENTA informação
+    ao contexto da sessão sem exigir resposta imediata — ideal para deltas de
+    contexto (fato memorizado, monitor ativo alterado, contato salvo).
+
+    No Gemini 3.1 o clientContent deixou de provocar resposta (passou a valer
+    só para semear histórico inicial), então realtimeInput virou o único
+    caminho para texto — e a distinção "comando" vs "contexto" passa a ser
+    semântica, não estrutural.
     """
     return {"realtimeInput": {"text": text}}
 
@@ -868,7 +873,9 @@ class GeminiLiveClient:
         self._set_state(LiveVoiceState.CONNECTING, "Conectando ao Gemini Live...")
 
         api_key = self.config.gemini_api_key.strip()
-        model_name = getattr(self.config, "gemini_live_model", "models/gemini-2.5-flash-native-audio-latest")
+        # Mantido em sincronia com CopilotConfig.gemini_live_model. Nunca voltar
+        # para um alias '-latest': a Live API rejeita e fecha com código 1007.
+        model_name = getattr(self.config, "gemini_live_model", "models/gemini-3.1-flash-live-preview")
         voice_name = getattr(self.config, "gemini_live_voice", "Puck")
         uri = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key={api_key}"
 
@@ -952,17 +959,10 @@ class GeminiLiveClient:
                 # Fase 4A: se a wake word já trouxe o pedido ("ok copilot abre o
                 # navegador"), injeta o comando como primeiro turno de texto.
                 if self._queued_initial_text:
-                    initial_msg = {
-                        "clientContent": {
-                            "turns": [
-                                {
-                                    "role": "user",
-                                    "parts": [{"text": self._queued_initial_text}],
-                                }
-                            ],
-                            "turnComplete": True,
-                        }
-                    }
+                    # Gemini 3.1: texto durante a conversa vai por realtimeInput.
+                    # `clientContent` no 3.1 só semeia histórico inicial e exige
+                    # initial_history_in_client_content na config da sessão.
+                    initial_msg = build_realtime_text_msg(self._queued_initial_text)
                     logger.info("Enviando comando inicial da wake word: %r", self._queued_initial_text)
                     self._queued_initial_text = ""
                     await ws.send(json.dumps(initial_msg))
@@ -1085,8 +1085,8 @@ class GeminiLiveClient:
                             + (f": {reason_clean}" if reason_clean else "")
                             + "). Verifique o valor de `gemini_live_model` em "
                             "~/.config/zorin-copilot/config.json — o esperado é "
-                            "um model code com data (ex: "
-                            "gemini-2.5-flash-native-audio-preview-12-2025), "
+                            "um model code válido (ex: "
+                            "gemini-3.1-flash-live-preview), "
                             "não um alias '-latest'."
                         )
                     else:
@@ -1739,23 +1739,17 @@ class GeminiLiveClient:
     def send_text_input(self, text: str) -> bool:
         """Fase 4A: injeta um turno de texto do usuário numa sessão Live ativa.
 
-        Envia um `clientContent` com turnComplete=true — a API trata como se o
-        usuário tivesse falado. Retorna False se a sessão não estiver ativa.
+        Retorna False se a sessão não estiver ativa.
+
+        Gemini 3.1: usa `realtimeInput.text`, que é o caminho suportado para
+        texto durante a conversa. O `clientContent` do 2.5 (com turnComplete)
+        passou a valer apenas para semear histórico inicial no 3.1 — enviá-lo
+        aqui faria o modelo NÃO responder ao comando.
         """
         text = (text or "").strip()
         if not text or not self._is_running or not self._ws or not self._loop:
             return False
-        msg = {
-            "clientContent": {
-                "turns": [
-                    {
-                        "role": "user",
-                        "parts": [{"text": text}],
-                    }
-                ],
-                "turnComplete": True,
-            }
-        }
+        msg = build_realtime_text_msg(text)
         try:
             asyncio.run_coroutine_threadsafe(self._ws.send(json.dumps(msg)), self._loop)
             logger.info("Comando de texto injetado na sessão Live: %r", text)
@@ -1905,17 +1899,11 @@ class GeminiLiveClient:
                                 except Exception:
                                     pass
 
-                            # Notifica o Gemini de que o usuário entrou em área protegida
-                            shield_ctx = {
-                                "clientContent": {
-                                    "turns": [{
-                                        "role": "user",
-                                        "parts": [{
-                                            "text": "[Sistema: Janela sensível detectada. O Privacy Shield ocultou a visão da tela para proteção do usuário.]"
-                                        }]
-                                    }]
-                                }
-                            }
+                            # Notifica o Gemini de que o usuário entrou em área protegida.
+                            # Gemini 3.1: contexto do sistema vai por realtimeInput.text.
+                            shield_ctx = build_realtime_text_msg(
+                                "[Sistema: Janela sensível detectada. O Privacy Shield ocultou a visão da tela para proteção do usuário.]"
+                            )
                             asyncio.run_coroutine_threadsafe(
                                 self._ws.send(json.dumps(shield_ctx)), self._loop
                             )
@@ -1949,16 +1937,9 @@ class GeminiLiveClient:
                                 self.on_privacy_state_change(False, "")
                             except Exception:
                                 pass
-                        restore_ctx = {
-                            "clientContent": {
-                                "turns": [{
-                                    "role": "user",
-                                    "parts": [{
-                                        "text": "[Sistema: O usuário retornou para uma janela segura. A visão da tela foi restabelecida.]"
-                                    }]
-                                }]
-                            }
-                        }
+                        restore_ctx = build_realtime_text_msg(
+                            "[Sistema: O usuário retornou para uma janela segura. A visão da tela foi restabelecida.]"
+                        )
                         asyncio.run_coroutine_threadsafe(
                             self._ws.send(json.dumps(restore_ctx)), self._loop
                         )
