@@ -584,7 +584,11 @@ class VoicePillWindow(Gtk.Window):
             self.present()
         self.place_smart()
         # Blur real da pílula (Hyprland): aplica uma vez por sessão, se suportado.
-        hyprland_effects.ensure_layer_blur(self._blur_namespace)
+        # Solto originalmente — se o hyprctl falhar, não deve derrubar o handler.
+        try:
+            hyprland_effects.ensure_layer_blur(self._blur_namespace)
+        except Exception as exc:  # never let compositor IPC break the pill
+            logger.debug("blur da pílula não aplicado: %s", exc)
         self.drawing_area.queue_draw()
 
     def _ui_on_state_change(self, state: LiveVoiceState, msg: str) -> bool:
