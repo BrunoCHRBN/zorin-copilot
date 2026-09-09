@@ -1234,6 +1234,42 @@ class GeminiLiveClient:
         }
         await ws.send(json.dumps(tool_response_msg))
 
+    def _wait_for_app_focus(self, app_name: str, timeout: float = 3.0) -> bool:
+        """Espera a janela do app recém-aberto subir e receber foco (AT-SPI2).
+
+        Abrir um aplicativo é assíncrono: o processo é criado antes de a janela
+        existir. Como `wtype` escreve sempre na janela focada, digitar sem antes
+        confirmar o foco faz o texto ir para o lugar errado — ou para nenhum.
+
+        Faz polling da janela ativa até o nome casar com o app (ou estourar o
+        timeout). Sem inspetor disponível, cai num sleep conservador: ainda
+        assim dá tempo de a janela aparecer, só não confirma.
+
+        Retorna True se confirmou o foco, False se só esperou.
+        """
+        target = (app_name or "").strip().lower()
+        if not target:
+            return False
+
+        inspector = getattr(self, "inspector", None)
+        if inspector is None:
+            time.sleep(1.2)
+            return False
+
+        deadline = time.monotonic() + max(0.0, timeout)
+        while time.monotonic() < deadline:
+            try:
+                active_app, _title, _rect = inspector.get_active_window_info()
+                active = (active_app or "").strip().lower()
+                # Casamento frouxo nos dois sentidos: "kitty" vs "Kitty Terminal",
+                # "gnome-terminal" vs "Terminal", etc.
+                if active and (target in active or active in target):
+                    return True
+            except Exception:
+                pass
+            time.sleep(0.15)
+        return False
+
     def _dispatch_tool(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         """Despacha a execução concreta para os subsistemas do Zorin Copilot."""
         # Portão de risco: ações perigosas não executam imediatamente — exigem
@@ -1248,7 +1284,25 @@ class GeminiLiveClient:
                 app, friendly_name = AppManager.find_app(app_name)
                 if app:
                     ok, msg = AppManager.launch(app)
-                    return {"success": ok, "message": f"Aplicativo '{friendly_name}' aberto com sucesso." if ok else msg}
+                    if not ok:
+                        return {"success": False, "message": msg}
+                    # Abrir um app é assíncrono: o Popen retorna antes de a janela
+                    # existir e pegar foco. Sem esperar, um `keyboard_type` na
+                    # sequência digitaria na janela errada (ou em nada), porque
+                    # o wtype sempre escreve no que está focado.
+                    focused = self._wait_for_app_focus(friendly_name or app_name)
+                    if focused:
+                        return {
+                            "success": True,
+                            "message": f"Aplicativo '{friendly_name}' aberto e com foco. Pode digitar.",
+                        }
+                    return {
+                        "success": True,
+                        "message": (
+                            f"Aplicativo '{friendly_name}' iniciado, mas não confirmamos o foco da janela. "
+                            "Aguarde um instante antes de digitar."
+                        ),
+                    }
                 return {"success": False, "message": f"Aplicativo '{app_name}' não encontrado no sistema."}
 
             elif name == "system_control":

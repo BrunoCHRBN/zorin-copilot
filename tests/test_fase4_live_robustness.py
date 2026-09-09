@@ -103,6 +103,51 @@ class SendTextInputTest(unittest.TestCase):
         self.assertEqual(msg["realtimeInput"]["text"], "abre o navegador")
 
 
+class WaitForAppFocusTest(unittest.TestCase):
+    """Abrir app é assíncrono: sem esperar o foco, a digitação vai pra janela errada."""
+
+    def _client_with_inspector(self, active_app: str):
+        """Cliente cujo inspetor sempre reporta `active_app` como janela ativa."""
+
+        class _Inspector:
+            def get_active_window_info(self):
+                return active_app, "janela", (0, 0, 800, 600)
+
+        c = _bare_client()
+        c.inspector = _Inspector()
+        return c
+
+    def test_returns_true_when_window_matches(self):
+        c = self._client_with_inspector("kitty")
+        self.assertTrue(c._wait_for_app_focus("kitty", timeout=1.0))
+
+    def test_matching_is_loose_in_both_directions(self):
+        # "Terminal" (nome amigável) vs "gnome-terminal" (nome AT-SPI).
+        c = self._client_with_inspector("gnome-terminal")
+        self.assertTrue(c._wait_for_app_focus("Terminal", timeout=1.0))
+
+    def test_returns_false_on_timeout_without_match(self):
+        c = self._client_with_inspector("firefox")
+        started = time.monotonic()
+        self.assertFalse(c._wait_for_app_focus("kitty", timeout=0.4))
+        # Tem que ter esperado de fato, não desistido instantaneamente.
+        self.assertGreaterEqual(time.monotonic() - started, 0.4)
+
+    def test_empty_app_name_skips_wait(self):
+        c = self._client_with_inspector("kitty")
+        started = time.monotonic()
+        self.assertFalse(c._wait_for_app_focus("", timeout=1.0))
+        self.assertLess(time.monotonic() - started, 0.4)
+
+    def test_without_inspector_falls_back_to_sleep(self):
+        c = _bare_client()
+        c.inspector = None
+        started = time.monotonic()
+        self.assertFalse(c._wait_for_app_focus("kitty", timeout=0.1))
+        # Fallback conservador: dá tempo da janela aparecer.
+        self.assertGreaterEqual(time.monotonic() - started, 1.0)
+
+
 class PendingTtlTest(unittest.TestCase):
     def test_store_pending_records_created_at(self):
         c = _bare_client()
