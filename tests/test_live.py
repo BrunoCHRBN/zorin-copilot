@@ -181,15 +181,21 @@ class LiveVoiceClientTest(unittest.TestCase):
         self.assertIn("Cerca", res["message"])
 
     def test_dispatch_tool_mouse_click_and_keyboard(self):
-        """Testa clique e digitação via Live API."""
-        res_click = self.client._dispatch_tool("mouse_click", {"x": 0.5, "y": 0.5, "is_relative": True})
-        self.assertTrue(res_click["success"])
+        """Testa clique e digitação via Live API.
 
-        res_type = self.client._dispatch_tool("keyboard_type", {"text": "Teste", "press_enter": False})
-        self.assertTrue(res_type["success"])
+        Precisa de backend de input: sem ydotool o driver falha de propósito
+        (e não finge sucesso), então o backend é mockado aqui.
+        """
+        self.client.input_driver.ydotool_bin = "/usr/bin/ydotool"
+        with patch("subprocess.run"):
+            res_click = self.client._dispatch_tool("mouse_click", {"x": 0.5, "y": 0.5, "is_relative": True})
+            self.assertTrue(res_click["success"])
 
-        res_hotkey = self.client._dispatch_tool("keyboard_hotkey", {"keys": ["ctrl", "c"]})
-        self.assertTrue(res_hotkey["success"])
+            res_type = self.client._dispatch_tool("keyboard_type", {"text": "Teste", "press_enter": False})
+            self.assertTrue(res_type["success"])
+
+            res_hotkey = self.client._dispatch_tool("keyboard_hotkey", {"keys": ["ctrl", "c"]})
+            self.assertTrue(res_hotkey["success"])
 
     def test_dispatch_tool_contacts(self):
         """Testa salvamento e consulta de contato via Live API."""
