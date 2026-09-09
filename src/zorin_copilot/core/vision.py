@@ -9,6 +9,9 @@ from __future__ import annotations
 import io
 import logging
 import os
+import shutil
+import subprocess
+import tempfile
 import time
 from urllib.parse import unquote, urlparse
 from typing import Tuple
@@ -53,6 +56,38 @@ class ScreenCaptureService:
         Returns:
             Tuple[sucesso, bytes_da_imagem, mensagem_ou_modo]
         """
+        # Atalho nativo para compositores Wayland/wlroots (Hyprland, Sway, Niri):
+        # captura não interativa direto do compositor, sem portal e sem prompt de
+        # permissão. Isso contorna o risco de o XDG portal pedir consentimento a
+        # cada frame do live video (que roda a 1 fps) — o que o tornaria inútil.
+        # Mantém o caminho do portal como fallback para interativo/área selecionada.
+        if not interactive:
+            grim = shutil.which("grim")
+            if grim:
+                try:
+                    tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+                    tmp.close()
+                    proc = subprocess.run(
+                        [grim, "-t", "png", tmp.name],
+                        capture_output=True, timeout=10, check=False,
+                    )
+                    if proc.returncode == 0 and os.path.isfile(tmp.name) and os.path.getsize(tmp.name) > 0:
+                        try:
+                            image_bytes = cls._optimize_image(
+                                tmp.name, max_size=max_size, quality=quality, crop_rect=crop_rect
+                            )
+                            mode_desc = "janela_ativa" if crop_rect else "tela_inteira"
+                            logger.debug("Frame capturado via grim (backend nativo wlroots).")
+                            return True, image_bytes, mode_desc
+                        finally:
+                            try:
+                                os.remove(tmp.name)
+                            except OSError:
+                                pass
+                    # grim retornou vazio/erro (compositor sem suporte) -> cai no portal
+                except Exception as exc:
+                    logger.warning(f"grim falhou, caindo no portal de screenshot: {exc}")
+
         try:
             bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
         except Exception as exc:
