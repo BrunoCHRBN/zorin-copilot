@@ -63,11 +63,50 @@ class FileManager:
         directory: str | None = None,
         append: bool = False,
     ) -> tuple[bool, str, str]:
-        """Cria ou atualiza um arquivo de texto ou Markdown no diretório especificado."""
+        """Cria ou atualiza um arquivo no diretório especificado.
+
+        - `.docx` / `.pptx`: gera o binário Office real a partir do `content` (Markdown)
+          via `core.document_generators`. `append` é ignorado nesses formatos.
+        - Demais extensões (`.md`, `.txt`, ...): mantém o comportamento de texto/Markdown.
+        """
         try:
             full_path = cls.resolve_target_path(filename, directory)
             target_dir = os.path.dirname(full_path)
             clean_name = os.path.basename(full_path)
+            ext = os.path.splitext(clean_name)[1].lower()
+
+            # Geração de Office real (desvia do caminho de texto).
+            # Em formatos Office 'append' é ignorado: sempre gera o binário novo.
+            if ext in (".docx", ".pptx"):
+                try:
+                    from .document_generators import (
+                        MissingOfficeDependencyError,
+                        generate_docx,
+                        generate_pptx,
+                    )
+                except Exception as exc:  # pragma: no cover
+                    logger.error(f"Erro ao importar geradores de Office: {exc}")
+                    return (False, f"Erro ao gerar documento: {exc}", "")
+
+                try:
+                    os.makedirs(target_dir, exist_ok=True)
+                    if ext == ".docx":
+                        generate_docx(full_path, content)
+                    else:
+                        generate_pptx(full_path, content)
+                except MissingOfficeDependencyError as exc:
+                    return (False, str(exc), "")
+                except Exception as exc:
+                    logger.error(f"Erro ao gerar '{clean_name}': {exc}")
+                    return (False, f"Erro ao gerar documento: {exc}", "")
+
+                size_bytes = os.path.getsize(full_path)
+                kind = "apresentação PowerPoint" if ext == ".pptx" else "documento Word"
+                msg = (
+                    f"{kind.capitalize()} '{clean_name}' gerado em "
+                    f"'{target_dir}' ({size_bytes} bytes)."
+                )
+                return (True, msg, full_path)
 
             os.makedirs(target_dir, exist_ok=True)
 

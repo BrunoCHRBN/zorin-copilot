@@ -54,6 +54,12 @@ voice = [
 wakeword = [
     "vosk>=0.3.45",
 ]
+# Geração de documentos Office reais (.docx/.pptx) a partir de Markdown. O
+# `write_document` degrada graciosamente para texto se essas libs faltarem.
+office = [
+    "python-docx>=1.1.0",
+    "python-pptx>=0.5.0",
+]
 
 [project.scripts]
 zorin-copilot = "zorin_copilot.ui.app:main"

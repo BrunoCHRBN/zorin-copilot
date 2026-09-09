@@ -1350,7 +1350,15 @@ class CopilotWindow(Adw.ApplicationWindow):
                     elif t_name == "media_control":
                         lines.append(f"- \U0001f3b5 Controle de mídia: **{t_args.get('action', '')}**")
                     elif t_name == "write_document":
-                        lines.append(f"- \U0001f4dd Salvou documento: `{t_args.get('filename', '')}`")
+                        _fn = (t_args.get("filename") or "").lower()
+                        _label = (
+                            "apresentação PowerPoint"
+                            if _fn.endswith(".pptx")
+                            else "documento Word"
+                            if _fn.endswith(".docx")
+                            else "documento"
+                        )
+                        lines.append(f"- \U0001f4dd Salvou {_label}: `{t_args.get('filename', '')}`")
                     elif t_name == "organize_directory":
                         lines.append(f"- \U0001f4c1 Organizou pasta: `{t_args.get('directory', 'Downloads')}`")
                     else:

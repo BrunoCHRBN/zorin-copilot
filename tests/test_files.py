@@ -4,6 +4,7 @@ import os
 import shutil
 import tempfile
 import unittest
+import zipfile
 from unittest.mock import patch
 
 from zorin_copilot.core.files import FileManager
@@ -107,6 +108,89 @@ class FileManagerTest(unittest.TestCase):
         # O arquivo original deve existir e o novo deve ter sido salvo como foto_1.png
         self.assertTrue(os.path.exists(existing))
         self.assertTrue(os.path.exists(os.path.join(img_subfolder, "foto_1.png")))
+
+
+class OfficeDocumentTest(unittest.TestCase):
+    """Geração real de .docx / .pptx via write_document (extensão-driven)."""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp(prefix="copilot_test_office_")
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def test_write_document_docx_real(self):
+        md = (
+            "# Título do Relatório\n\n"
+            "Parágrafo com **negrito** e *itálico* e `codigo`.\n\n"
+            "- item um\n- item dois\n\n"
+            "```\nlinha_de_codigo()\n```\n"
+        )
+        ok, msg, path = FileManager.write_document("relatorio.docx", md, directory=self.test_dir)
+        self.assertTrue(ok, msg)
+        self.assertTrue(path.endswith(".docx"))
+        # .docx é um zip Office Open XML válido
+        self.assertTrue(zipfile.is_zipfile(path))
+
+        from docx import Document
+
+        doc = Document(path)
+        joined = "\n".join(p.text for p in doc.paragraphs)
+        self.assertIn("Título do Relatório", joined)
+        self.assertIn("negrito", joined)
+        self.assertIn("item um", joined)
+        self.assertIn("linha_de_codigo()", joined)
+
+    def test_write_document_pptx_real(self):
+        md = (
+            "# Slide Um\n\n- ponto a\n- ponto b\n\n"
+            "---\n\n"
+            "# Slide Dois\n\nTexto do segundo slide."
+        )
+        ok, msg, path = FileManager.write_document("pitch.pptx", md, directory=self.test_dir)
+        self.assertTrue(ok, msg)
+        self.assertTrue(path.endswith(".pptx"))
+        self.assertTrue(zipfile.is_zipfile(path))
+
+        from pptx import Presentation
+
+        prs = Presentation(path)
+        self.assertEqual(len(prs.slides), 2)
+        titles = [
+            s.shapes.title.text for s in prs.slides if s.shapes.title is not None
+        ]
+        self.assertIn("Slide Um", titles)
+        self.assertIn("Slide Dois", titles)
+
+    def test_write_document_docx_missing_dependency(self):
+        import zorin_copilot.core.document_generators as dg
+        from zorin_copilot.core.document_generators import MissingOfficeDependencyError
+
+        real = dg.generate_docx
+
+        def _boom(*_a, **_k):
+            raise MissingOfficeDependencyError("python-docx faltando")
+
+        dg.generate_docx = _boom
+        try:
+            ok, msg, path = FileManager.write_document(
+                "x.docx", "# oi", directory=self.test_dir
+            )
+        finally:
+            dg.generate_docx = real
+
+        self.assertFalse(ok)
+        self.assertEqual(path, "")
+        self.assertIn("python-docx faltando", msg)
+
+    def test_write_document_office_append_ignored(self):
+        # append com .docx gera arquivo novo (não anexa ao binário)
+        md = "# Apresentação\n\n- bullet"
+        ok, msg, path = FileManager.write_document(
+            "a.pptx", md, directory=self.test_dir, append=True
+        )
+        self.assertTrue(ok, msg)
+        self.assertTrue(zipfile.is_zipfile(path))
 
 
 if __name__ == "__main__":

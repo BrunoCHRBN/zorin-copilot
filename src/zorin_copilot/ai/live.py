@@ -201,13 +201,19 @@ LIVE_TOOLS_DECLARATION = [
             },
             {
                 "name": "write_document",
-                "description": "Cria ou salva um documento, anotação ou relatório em formato Markdown ou texto no computador do usuário.",
+                "description": (
+                    "Cria ou salva um documento no computador do usuário a partir de conteúdo Markdown. "
+                    "Se o 'filename' terminar em '.docx', gera um documento Word real; se terminar em "
+                    "'.pptx', gera uma apresentação PowerPoint real (slides separados por uma linha '---' "
+                    "e o primeiro cabeçalho de cada slide vira o título). Outras extensões (.md, .txt) "
+                    "salvam o texto/Markdown puro."
+                ),
                 "parameters": {
                     "type": "OBJECT",
                     "properties": {
                         "filename": {
                             "type": "STRING",
-                            "description": "Nome do arquivo (ex: 'relatorio_pesquisa.md')",
+                            "description": "Nome do arquivo com extensão (ex: 'relatorio.docx', 'pitch.pptx', 'notas.md')",
                         },
                         "content": {
                             "type": "STRING",
