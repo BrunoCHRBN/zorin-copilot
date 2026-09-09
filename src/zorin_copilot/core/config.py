@@ -20,7 +20,12 @@ class CopilotConfig:
     # Configurações do Google Gemini
     gemini_api_key: str = ""
     gemini_model: str = "gemini-flash-latest"
-    gemini_live_model: str = "models/gemini-2.5-flash-native-audio-latest"
+    # Importante: a BidiGenerateContent (Live API) rejeita aliases como
+    # "-latest" para os modelos de áudio nativo. Tem que ser o model code
+    # exato com a data da preview. Última versão estável documentada:
+    # gemini-2.5-flash-native-audio-preview-12-2025
+    # (https://ai.google.dev/gemini-api/docs/models/gemini-2.5-flash-native-audio-preview-12-2025)
+    gemini_live_model: str = "models/gemini-2.5-flash-native-audio-preview-12-2025"
     gemini_live_voice: str = "Puck"  # "Puck", "Aoede", "Charon", "Fenrir", "Kore"
     
     # Configurações do Ollama (Local)

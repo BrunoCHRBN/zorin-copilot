@@ -1073,7 +1073,24 @@ class GeminiLiveClient:
                 code = getattr(exc.rcvd, "code", None) or getattr(exc.sent, "code", None) or getattr(exc, "code", None)
                 reason = getattr(exc.rcvd, "reason", "") or getattr(exc.sent, "reason", "") or getattr(exc, "reason", "")
                 if self._is_running and code != 1000:
-                    msg = f"Conexão encerrada pelo servidor (código {code}" + (f": {reason}" if reason else ")")
+                    reason_clean = (reason or "").strip()
+                    # Código 1007 + motivo mencionando áudio/modelo = API recusou
+                    # o setup_payload (modelo não suporta CONTENT_TYPE_AUDIO).
+                    # Vale orientar o usuário a checar `gemini_live_model` em vez
+                    # de sugerir problema de rede ou chave.
+                    if code == 1007 and ("audio" in reason_clean.lower() or "model" in reason_clean.lower()):
+                        msg = (
+                            "Modelo Live recusado pela API Gemini "
+                            f"(código {code}"
+                            + (f": {reason_clean}" if reason_clean else "")
+                            + "). Verifique o valor de `gemini_live_model` em "
+                            "~/.config/zorin-copilot/config.json — o esperado é "
+                            "um model code com data (ex: "
+                            "gemini-2.5-flash-native-audio-preview-12-2025), "
+                            "não um alias '-latest'."
+                        )
+                    else:
+                        msg = f"Conexão encerrada pelo servidor (código {code}" + (f": {reason_clean}" if reason_clean else ")")
                     logger.warning(msg)
                     self._last_error = msg
                     self._set_state(LiveVoiceState.ERROR, msg)
