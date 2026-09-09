@@ -186,5 +186,46 @@ class ComBackendTest(unittest.TestCase):
         run.assert_called_once()
 
 
+def _com_wtype(**kw):
+    def fake_which(bin_name):
+        return "/usr/bin/wtype" if bin_name == "wtype" else None
+    with mock.patch("shutil.which", side_effect=fake_which):
+        return VirtualInputDriver(**kw)
+
+
+class WtypeBackendTest(unittest.TestCase):
+    """Com wtype, digitação e atalhos usam o protocolo de teclado virtual do Wayland."""
+
+    def test_is_available_com_wtype(self):
+        driver = _com_wtype()
+        self.assertTrue(driver.is_available)
+        self.assertIn("wtype", driver.get_backend_name())
+
+    def test_type_text_invoca_wtype(self):
+        driver = _com_wtype()
+        with mock.patch("subprocess.run") as run:
+            ok, msg = driver.type_text("ls -la", press_enter=True)
+        self.assertTrue(ok)
+        self.assertIn("wtype", msg)
+        self.assertEqual(run.call_count, 2)
+        cmd_type = run.call_args_list[0][0][0]
+        cmd_enter = run.call_args_list[1][0][0]
+        self.assertEqual(cmd_type, ["/usr/bin/wtype", "--", "ls -la"])
+        self.assertEqual(cmd_enter, ["/usr/bin/wtype", "-k", "Return"])
+
+    def test_hotkey_invoca_wtype(self):
+        driver = _com_wtype()
+        with mock.patch("subprocess.run") as run:
+            ok, msg = driver.hotkey("ctrl", "shift", "v")
+        self.assertTrue(ok)
+        self.assertIn("wtype", msg)
+        cmd = run.call_args[0][0]
+        self.assertIn("-M", cmd)
+        self.assertIn("ctrl", cmd)
+        self.assertIn("shift", cmd)
+        self.assertIn("v", cmd)
+
+
 if __name__ == "__main__":
     unittest.main()
+

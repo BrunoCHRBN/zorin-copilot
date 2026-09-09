@@ -27,9 +27,8 @@ SIMULATION_ENV_VAR = "ZORIN_COPILOT_INPUT_SIMULATION"
 _TRUTHY = {"1", "true", "yes", "on", "sim"}
 
 INSTALL_HINT = (
-    "Instale e inicie o daemon: 'sudo pacman -S ydotool' (Arch) ou "
-    "'sudo apt install ydotool' (Debian/Ubuntu); depois 'systemctl --user "
-    "enable --now ydotool' e garanta acesso a /dev/uinput."
+    "Instale o backend de teclado virtual: 'sudo pacman -S wtype' (Wayland/Hyprland) ou "
+    "'sudo pacman -S ydotool' (Arch) / 'sudo apt install ydotool' (Ubuntu), com o daemon ydotool ativo."
 )
 
 
@@ -45,7 +44,10 @@ class VirtualInputDriver:
 
     def __init__(self, fence: ScreenFenceManager | None = None, simulation: bool | None = None):
         self.fence = fence or ScreenFenceManager()
-        self.ydotool_bin = shutil.which("ydotool")
+        wtype = shutil.which("wtype")
+        self.wtype_bin = wtype if wtype and "wtype" in os.path.basename(wtype) else None
+        ydotool = shutil.which("ydotool")
+        self.ydotool_bin = ydotool if ydotool and "ydotool" in os.path.basename(ydotool) else None
         # Presença de /dev/uinput gravável é só diagnóstico: não existe emissão
         # direta implementada, então não pode contar como backend disponível.
         self._has_uinput_access = os.access("/dev/uinput", os.W_OK) if os.path.exists("/dev/uinput") else False
@@ -64,14 +66,16 @@ class VirtualInputDriver:
         Diferente de "o processo não vai quebrar". Modo simulação continua
         reportando False aqui — ele não executa nada.
         """
-        return bool(self.ydotool_bin)
+        return bool(self.wtype_bin or self.ydotool_bin)
 
     def get_backend_name(self) -> str:
+        if self.wtype_bin:
+            return "wtype (Wayland virtual keyboard)"
         if self.ydotool_bin:
             return "ydotool (uinput daemon)"
         if self.simulation:
             return "SIMULAÇÃO (nenhuma ação é executada)"
-        return "indisponível (ydotool não encontrado)"
+        return "indisponível (wtype ou ydotool não encontrado)"
 
     def _unavailable(self, action: str) -> tuple[bool, str]:
         """Falha padronizada quando não há backend. Respeita o modo simulação."""
@@ -162,6 +166,18 @@ class VirtualInputDriver:
             return False, "Operação cancelada: Parada de emergência (Kill Switch) está ativa."
 
         try:
+            if self.wtype_bin:
+                cmd = [self.wtype_bin, "--", text]
+                subprocess.run(cmd, capture_output=True, timeout=5.0, check=False)
+
+                if press_enter:
+                    time.sleep(0.05)
+                    subprocess.run([self.wtype_bin, "-k", "Return"], capture_output=True, timeout=1.0, check=False)
+
+                msg = f"Texto digitado com sucesso ({len(text)} caracteres) via wtype."
+                logger.info(msg)
+                return True, msg
+
             if self.ydotool_bin:
                 cmd = [self.ydotool_bin, "type", "--", text]
                 subprocess.run(cmd, capture_output=True, timeout=5.0, check=False)
@@ -189,33 +205,58 @@ class VirtualInputDriver:
             return False, "Operação cancelada: Parada de emergência (Kill Switch) está ativa."
 
         keys_str = "+".join(keys)
-        # Mapeamento de códigos evdev comuns para ydotool
-        KEY_MAP = {
-            "ctrl": "29",
-            "control": "29",
-            "lctrl": "29",
-            "rctrl": "97",
-            "shift": "42",
-            "alt": "56",
-            "super": "125",
-            "meta": "125",
-            "enter": "28",
-            "return": "28",
-            "esc": "1",
-            "escape": "1",
-            "tab": "15",
-            "backspace": "14",
-            "space": "57",
-            "c": "46",
-            "v": "47",
-            "t": "20",
-            "w": "17",
-            "n": "49",
-            "a": "30",
-            "z": "44",
-        }
 
         try:
+            if self.wtype_bin:
+                mod_map = {
+                    "ctrl": "ctrl", "control": "ctrl", "lctrl": "ctrl", "rctrl": "ctrl",
+                    "shift": "shift", "alt": "alt", "super": "logo", "meta": "logo", "win": "logo"
+                }
+                key_map_wtype = {
+                    "enter": "Return", "return": "Return", "esc": "Escape", "escape": "Escape",
+                    "tab": "Tab", "backspace": "BackSpace", "space": "space"
+                }
+                mods_down: list[str] = []
+                mods_up: list[str] = []
+                main_keys: list[str] = []
+                for k in keys:
+                    kl = k.lower()
+                    if kl in mod_map:
+                        mods_down.extend(["-M", mod_map[kl]])
+                        mods_up.extend(["-m", mod_map[kl]])
+                    else:
+                        main_keys.extend(["-k", key_map_wtype.get(kl, k)])
+                if mods_down or main_keys:
+                    full_args = [self.wtype_bin] + mods_down + main_keys + mods_up
+                    subprocess.run(full_args, capture_output=True, timeout=2.0, check=False)
+                    return True, f"Atalho '{keys_str}' acionado com sucesso via wtype."
+
+            # Mapeamento de códigos evdev comuns para ydotool
+            KEY_MAP = {
+                "ctrl": "29",
+                "control": "29",
+                "lctrl": "29",
+                "rctrl": "97",
+                "shift": "42",
+                "alt": "56",
+                "super": "125",
+                "meta": "125",
+                "enter": "28",
+                "return": "28",
+                "esc": "1",
+                "escape": "1",
+                "tab": "15",
+                "backspace": "14",
+                "space": "57",
+                "c": "46",
+                "v": "47",
+                "t": "20",
+                "w": "17",
+                "n": "49",
+                "a": "30",
+                "z": "44",
+            }
+
             if self.ydotool_bin:
                 # Monta sequência: aperta todos os modificadores, aperta a tecla final, solta tudo em ordem reversa
                 down_seq: list[str] = []

@@ -298,7 +298,16 @@ class ActionExecutor:
         terminal = bool(action.params.get("terminal", True))
 
         if terminal or requires_sudo:
-            term_bin = shutil.which("gnome-terminal") or shutil.which("ptyxis") or shutil.which("xterm")
+            term_bin = (
+                shutil.which("kitty")
+                or shutil.which("alacritty")
+                or shutil.which("foot")
+                or shutil.which("wezterm")
+                or shutil.which("gnome-terminal")
+                or shutil.which("ptyxis")
+                or shutil.which("konsole")
+                or shutil.which("xterm")
+            )
             if term_bin:
                 try:
                     wrapper = (
@@ -319,8 +328,10 @@ class ActionExecutor:
                         f"fi; "
                         f"read -p 'Pressione [Enter] para fechar esta janela...' -r"
                     )
-                    if "gnome-terminal" in term_bin or "ptyxis" in term_bin:
+                    if any(t in term_bin for t in ("kitty", "alacritty", "foot", "wezterm", "gnome-terminal", "ptyxis")):
                         subprocess.Popen([term_bin, "--", "bash", "-c", wrapper])
+                    elif "konsole" in term_bin:
+                        subprocess.Popen([term_bin, "-e", "bash", "-c", wrapper])
                     else:
                         subprocess.Popen([term_bin, "-e", f"bash -c \"{wrapper}\""])
                     return ExecutionReport(
