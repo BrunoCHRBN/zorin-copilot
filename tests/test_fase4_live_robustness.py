@@ -21,7 +21,7 @@ sys.path.insert(
 )
 
 from zorin_copilot.ai import live as live_module  # noqa: E402
-from zorin_copilot.ai.live import GeminiLiveClient  # noqa: E402
+from zorin_copilot.ai.live import GeminiLiveClient, _SessionDropped  # noqa: E402
 from zorin_copilot.shell.risk import RiskPolicy  # noqa: E402
 
 
@@ -35,6 +35,14 @@ def _bare_client() -> GeminiLiveClient:
     c._is_running = False
     c._ws = None
     c._loop = None
+    c._reconnecting = False
+    c.state = live_module.LiveVoiceState.DISCONNECTED
+    c.state_message = ""
+    c.on_state_change = None
+    c.on_error = None
+    c.on_transcript = None
+    c.on_audio_level = None
+    c._last_error = ""
     return c
 
 
@@ -380,6 +388,199 @@ class PendingSessionCleanupTest(unittest.TestCase):
             _th.Thread = real_thread
 
         self.assertEqual(c._pending_actions, {})
+
+
+class SessionDroppedExceptionTest(unittest.TestCase):
+    """A exceção interna _SessionDropped carrega código e motivo do servidor."""
+
+    def test_carries_code_and_reason(self):
+        exc = _SessionDropped(1011, "The service is currently unavailable.")
+        self.assertEqual(exc.code, 1011)
+        self.assertIn("1011", str(exc))
+        self.assertIn("service", str(exc))
+
+    def test_accepts_none_code(self):
+        exc = _SessionDropped(None, "")
+        self.assertIsNone(exc.code)
+        self.assertEqual(str(exc), "código None")
+
+
+import websockets  # noqa: E402
+
+
+class _ConnClosed(websockets.ConnectionClosed):
+    """Finge ser websockets.ConnectionClosed com code/reason arbitrários."""
+
+    def __init__(self, code=1011, reason="server error"):
+        # websockets.ConnectionClosed exige (rcvd, sent, rcvd_then_sent) com
+        # invariantes. Passamos dummies só para a hierarquia bater e o
+        # isinstance funcionar.
+        rcvd = type("R", (), {"code": code, "reason": reason})()
+        sent = type("S", (), {"code": None, "reason": ""})()
+        super().__init__(rcvd, sent, rcvd_then_sent=True)
+
+
+class ServerReceiverRaisesOnCloseTest(unittest.TestCase):
+    """O loop do servidor traduz ConnectionClosed em _SessionDropped para
+    que o wrapper de reconexão saiba o que fazer."""
+
+    def _client_with_running(self, reconnecting=False):
+        c = _bare_client()
+        c._is_running = True
+        c._reconnecting = reconnecting
+        c._last_error = ""
+        return c
+
+    def _run_recv(self, c, ws):
+        return asyncio.run(c._server_receiver_loop(ws))
+
+    def test_raises_session_dropped_on_1011(self):
+        c = self._client_with_running()
+        ws = mock.Mock()
+        ws.recv = mock.AsyncMock(side_effect=_ConnClosed(1011, "service unavailable"))
+        c._reconnecting = False
+        c._set_state = mock.Mock()
+        c.on_error = mock.Mock()
+        with self.assertRaises(_SessionDropped) as cm:
+            self._run_recv(c, ws)
+        self.assertEqual(cm.exception.code, 1011)
+
+    def test_does_not_set_error_state_during_reconnect(self):
+        c = self._client_with_running(reconnecting=True)
+        ws = mock.Mock()
+        ws.recv = mock.AsyncMock(side_effect=_ConnClosed(1011, "service unavailable"))
+        c._set_state = mock.Mock()
+        c.on_error = mock.Mock()
+        with self.assertRaises(_SessionDropped):
+            self._run_recv(c, ws)
+        # Estado já é CONNECTING com "Reconectando (N/M)..."; trocar para
+        # ERROR aqui provocaria flicker: ERROR → CONNECTING → LISTENING.
+        c._set_state.assert_not_called()
+        c.on_error.assert_not_called()
+
+    def test_returns_silently_on_clean_close_1000(self):
+        c = self._client_with_running()
+        ws = mock.Mock()
+        ws.recv = mock.AsyncMock(side_effect=_ConnClosed(1000, ""))
+        c._set_state = mock.Mock()
+        c.on_error = mock.Mock()
+        # 1000 é fechamento pedido pelo cliente — não levanta, não seta erro.
+        self._run_recv(c, ws)
+        c._set_state.assert_not_called()
+        c.on_error.assert_not_called()
+
+    def test_returns_silently_when_user_already_stopped(self):
+        c = _bare_client()  # _is_running=False
+        ws = mock.Mock()
+        ws.recv = mock.AsyncMock(side_effect=_ConnClosed(1011, "service unavailable"))
+        c._set_state = mock.Mock()
+        c.on_error = mock.Mock()
+        # Usuário já desligou o Live: não há por que transformar isso em erro.
+        self._run_recv(c, ws)
+        c._set_state.assert_not_called()
+        c.on_error.assert_not_called()
+
+    def test_raises_on_server_error_field(self):
+        c = self._client_with_running()
+        ws = mock.Mock()
+        ws.recv = mock.AsyncMock(return_value=json.dumps({"error": {"message": "boom"}}).encode("utf-8"))
+        c._set_state = mock.Mock()
+        c.on_error = mock.Mock()
+        with self.assertRaises(_SessionDropped) as cm:
+            self._run_recv(c, ws)
+        self.assertIn("boom", str(cm.exception))
+
+
+class LiveSessionReconnectTest(unittest.TestCase):
+    """O wrapper _live_session reconecta com backoff após queda inesperada."""
+
+    def _bare_running(self):
+        c = _bare_client()
+        c._is_running = True
+        c._last_error = ""
+        return c
+
+    def test_exits_immediately_when_user_stopped(self):
+        c = _bare_client()
+        c._is_running = False  # usuário desligou antes mesmo de tentar
+        c._run_one_session = mock.AsyncMock(return_value=None)
+        asyncio.run(c._live_session())
+        c._run_one_session.assert_not_called()
+
+    def test_returns_after_run_one_session_clean(self):
+        c = self._bare_running()
+        c._run_one_session = mock.AsyncMock(return_value=None)
+        asyncio.run(c._live_session())
+        c._run_one_session.assert_called_once()
+
+    def test_retries_on_session_dropped_until_max(self):
+        c = self._bare_running()
+        # 5 quedas consecutivas: o wrapper tenta 5 vezes, depois desiste
+        c._run_one_session = mock.AsyncMock(
+            side_effect=[_SessionDropped(1011, "x") for _ in range(5)]
+        )
+
+        async def _fast_sleep(_):
+            return None
+
+        with mock.patch.object(live_module.asyncio, "sleep", new=_fast_sleep):
+            asyncio.run(c._live_session())
+        self.assertEqual(c._run_one_session.call_count, 5)
+        self.assertEqual(c.state, live_module.LiveVoiceState.ERROR)
+
+    def test_succeeds_on_retry_after_transient_drop(self):
+        c = self._bare_running()
+        # Primeira tentativa cai, segunda conecta normalmente
+        c._run_one_session = mock.AsyncMock(
+            side_effect=[_SessionDropped(1011, "x"), None]
+        )
+
+        async def _fast_sleep(_):
+            return None
+
+        with mock.patch.object(live_module.asyncio, "sleep", new=_fast_sleep):
+            asyncio.run(c._live_session())
+        self.assertEqual(c._run_one_session.call_count, 2)
+        # Sucesso → não fica em ERROR
+        self.assertNotEqual(c.state, live_module.LiveVoiceState.ERROR)
+
+    def test_connecting_state_during_backoff_not_error(self):
+        c = self._bare_running()
+        c._run_one_session = mock.AsyncMock(
+            side_effect=[_SessionDropped(1011, "x"), None]
+        )
+        states_seen: list[str] = []
+
+        def _capture(state, msg=""):
+            states_seen.append(f"{state.value}:{msg[:60]}")
+
+        async def _fast_sleep(_):
+            return None
+
+        with mock.patch.object(c, "_set_state", side_effect=_capture), \
+             mock.patch.object(live_module.asyncio, "sleep", new=_fast_sleep):
+            asyncio.run(c._live_session())
+        connecting_msgs = [s for s in states_seen if s.startswith("connecting:")]
+        self.assertTrue(
+            any("Reconectando" in s for s in connecting_msgs),
+            f"Esperava mensagem 'Reconectando...' em CONNECTING, vi: {states_seen}",
+        )
+
+    def test_user_stop_cancels_backoff(self):
+        c = self._bare_running()
+        c._run_one_session = mock.AsyncMock(
+            side_effect=[_SessionDropped(1011, "x")]
+        )
+
+        async def _stop_after_first_sleep(_):
+            c._is_running = False  # usuário clica em "Encerrar" durante o backoff
+            return None
+
+        with mock.patch.object(live_module.asyncio, "sleep", new=_stop_after_first_sleep):
+            asyncio.run(c._live_session())
+        # Uma tentativa + volta para sleep que detectou parada → não reentra no loop
+        self.assertEqual(c._run_one_session.call_count, 1)
+        self.assertNotEqual(c.state, live_module.LiveVoiceState.ERROR)
 
 
 if __name__ == "__main__":

@@ -64,6 +64,21 @@ class LiveVoiceState(Enum):
     ERROR = "error"
 
 
+class _SessionDropped(Exception):
+    """Sinaliza queda da sessão Live por motivo alheio ao usuário.
+
+    Usada internamente para que o wrapper de reconexão em `_live_session`
+    saiba que deve reiniciar o WebSocket com backoff, em vez de mostrar
+    um erro terminal. O código 1011 do Gemini Live ("The service is
+    currently unavailable") cai nesse caminho.
+    """
+
+    def __init__(self, code: int | None, reason: str) -> None:
+        self.code = code
+        self.reason = reason
+        super().__init__(f"código {code}" + (f": {reason}" if reason else ""))
+
+
 def build_realtime_text_msg(text: str) -> dict[str, Any]:
     """Fase 4C: monta o payload `realtimeInput` de texto (contexto dinâmico).
 
@@ -667,6 +682,9 @@ class GeminiLiveClient:
         self.cal_mgr = CalendarManager(memory=self.memory)
         self.rag = LocalDocumentRAG(memory=self.memory)
         self.inspector = getattr(self.executor, "inspector", None) or DesktopInspector()
+        # Wrapper de reconexão lê este flag para suprimir a transição para
+        # ERROR durante uma tentativa de reconexão (estado já é CONNECTING).
+        self._reconnecting: bool = False
         self.state: LiveVoiceState = LiveVoiceState.DISCONNECTED
         self._last_error: str | None = None
 
@@ -869,7 +887,71 @@ class GeminiLiveClient:
                 self._set_state(LiveVoiceState.DISCONNECTED, "Desconectado.")
 
     async def _live_session(self) -> None:
-        """Gerencia conexão WebSocket, streaming de microfone e recebimento de áudio/tools."""
+        """Loop de sessão: conecta, executa, reconecta com backoff após queda.
+
+        Sem este wrapper, uma queda por código 1011 ("The service is currently
+        unavailable", idle timeout do Gemini Live) deixava o usuário preso
+        em estado ERROR — tinha que repetir a wake word. Com backoff
+        exponencial (1.5s, 3s, 6s, 12s, 24s, máx 30s) e até 5 tentativas,
+        a sessão só morre de vez se a API Live ficar realmente fora do ar
+        por mais de ~1 minuto.
+
+        Sai do loop apenas quando:
+        - o usuário chama stop() (_is_running=False); ou
+        - as 5 tentativas esgotam — nesse caso fica em ERROR.
+        """
+        max_attempts = 5
+        base_delay = 1.5
+        max_delay = 30.0
+
+        attempt = 0
+        while self._is_running:
+            attempt += 1
+            # Suprime a transição para ERROR nos handlers internos durante
+            # uma tentativa de reconexão (o estado já é CONNECTING com a
+            # mensagem "Reconectando...").
+            self._reconnecting = attempt > 1
+            try:
+                await self._run_one_session()
+                return  # saída limpa: usuário parou ou servidor fechou com 1000
+            except _SessionDropped as drop:
+                if not self._is_running:
+                    return
+                logger.warning(
+                    "Sessão Live caiu (tentativa %d/%d): %s",
+                    attempt, max_attempts, drop,
+                )
+            finally:
+                self._reconnecting = False
+
+            if attempt >= max_attempts:
+                final_msg = (
+                    self._last_error
+                    or f"Conexão encerrada após {max_attempts} tentativas sem detalhe do servidor."
+                )
+                logger.error("Sessão Live esgotou tentativas: %s", final_msg)
+                self._set_state(LiveVoiceState.ERROR, final_msg)
+                if self.on_error:
+                    self.on_error(final_msg)
+                return
+
+            delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
+            self._set_state(
+                LiveVoiceState.CONNECTING,
+                f"Reconectando ao Gemini Live (tentativa {attempt + 1}/{max_attempts}) em {delay:.1f}s...",
+            )
+            # Permite cancelar a espera de backoff chamando stop()
+            for _ in range(int(delay * 10)):
+                if not self._is_running:
+                    return
+                await asyncio.sleep(0.1)
+
+    async def _run_one_session(self) -> None:
+        """Uma tentativa completa de conexão WebSocket + streaming + recebimento.
+
+        Levanta _SessionDropped quando o servidor fecha de forma inesperada;
+        o wrapper _live_session é quem decide se tenta de novo ou desiste.
+        """
         self._set_state(LiveVoiceState.CONNECTING, "Conectando ao Gemini Live...")
 
         api_key = self.config.gemini_api_key.strip()
@@ -948,10 +1030,11 @@ class GeminiLiveClient:
                     err_msg = f"Falha no setup: {setup_resp}"
                     logger.error(err_msg)
                     self._last_error = err_msg
-                    self._set_state(LiveVoiceState.ERROR, err_msg)
-                    if self.on_error:
-                        self.on_error(err_msg)
-                    return
+                    if not self._reconnecting:
+                        self._set_state(LiveVoiceState.ERROR, err_msg)
+                        if self.on_error:
+                            self.on_error(err_msg)
+                    raise _SessionDropped(0, err_msg)
 
                 self._set_state(LiveVoiceState.LISTENING, "Conectado! Pode falar...")
                 logger.info("Sessão Gemini Live estabelecida com sucesso.")
@@ -982,15 +1065,24 @@ class GeminiLiveClient:
                         exc = task.exception()
                         if exc:
                             logger.error(f"Tarefa de áudio/servidor finalizou com erro: {exc}", exc_info=exc)
+                            # _SessionDropped veio do _server_receiver_loop
+                            # sinalizando queda do servidor; re-propaga para o
+                            # wrapper de reconexão agir.
+                            if isinstance(exc, _SessionDropped):
+                                raise exc
                             if not self._last_error:
                                 self._last_error = f"Erro na chamada de voz: {exc}"
 
+        except _SessionDropped:
+            raise  # o wrapper de reconexão cuida
         except Exception as exc:
             logger.error(f"Erro de conexão com Gemini Live WebSocket: {exc}", exc_info=True)
             self._last_error = f"Erro de conexão: {exc}"
-            self._set_state(LiveVoiceState.ERROR, self._last_error)
-            if self.on_error:
-                self.on_error(str(exc))
+            if not self._reconnecting:
+                self._set_state(LiveVoiceState.ERROR, self._last_error)
+                if self.on_error:
+                    self.on_error(str(exc))
+            raise _SessionDropped(0, str(exc)) from exc
 
     async def _mic_recorder_loop(self, ws: Any) -> None:
         """Lê áudio em tempo real do microfone via pw-record e transmite para o Gemini."""
@@ -1069,7 +1161,7 @@ class GeminiLiveClient:
         while self._is_running:
             try:
                 raw_msg = await ws.recv()
-            except websockets.exceptions.ConnectionClosed as exc:
+            except websockets.ConnectionClosed as exc:
                 code = getattr(exc.rcvd, "code", None) or getattr(exc.sent, "code", None) or getattr(exc, "code", None)
                 reason = getattr(exc.rcvd, "reason", "") or getattr(exc.sent, "reason", "") or getattr(exc, "reason", "")
                 if self._is_running and code != 1000:
@@ -1093,19 +1185,26 @@ class GeminiLiveClient:
                         msg = f"Conexão encerrada pelo servidor (código {code}" + (f": {reason_clean}" if reason_clean else ")")
                     logger.warning(msg)
                     self._last_error = msg
-                    self._set_state(LiveVoiceState.ERROR, msg)
-                    if self.on_error:
-                        self.on_error(msg)
-                break
+                    # Em tentativa de reconexão o estado já é CONNECTING, com
+                    # a mensagem "Reconectando (N/M) em Xs". Setar ERROR aqui
+                    # provocaria flicker: ERROR → CONNECTING → LISTENING.
+                    if not self._reconnecting:
+                        self._set_state(LiveVoiceState.ERROR, msg)
+                        if self.on_error:
+                            self.on_error(msg)
+                    raise _SessionDropped(code, reason_clean)
+                return
             except Exception as exc:
                 if self._is_running:
                     msg = f"Erro no recebimento de áudio/dados: {exc}"
                     logger.error(msg, exc_info=True)
                     self._last_error = msg
-                    self._set_state(LiveVoiceState.ERROR, msg)
-                    if self.on_error:
-                        self.on_error(msg)
-                break
+                    if not self._reconnecting:
+                        self._set_state(LiveVoiceState.ERROR, msg)
+                        if self.on_error:
+                            self.on_error(msg)
+                    raise _SessionDropped(0, str(exc)) from exc
+                return
 
             try:
                 data = json.loads(raw_msg.decode("utf-8") if isinstance(raw_msg, bytes) else raw_msg)
@@ -1119,10 +1218,11 @@ class GeminiLiveClient:
                 err_msg = err_info.get("message", str(err_info)) if isinstance(err_info, dict) else str(err_info)
                 logger.error(f"Erro reportado pela API Gemini Live: {err_msg}")
                 self._last_error = f"Erro Gemini: {err_msg}"
-                self._set_state(LiveVoiceState.ERROR, self._last_error)
-                if self.on_error:
-                    self.on_error(err_msg)
-                break
+                if not self._reconnecting:
+                    self._set_state(LiveVoiceState.ERROR, self._last_error)
+                    if self.on_error:
+                        self.on_error(err_msg)
+                raise _SessionDropped(0, err_msg)
 
             if "goaway" in data:
                 logger.warning("Servidor Gemini solicitou encerramento de sessão (goaway).")
