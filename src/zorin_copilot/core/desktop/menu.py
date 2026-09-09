@@ -238,7 +238,7 @@ class DbusMenu:
             import gi
 
             gi.require_version("Gio", "2.0")
-            from gi.repository import GLib
+            from gi.repository import Gio, GLib
         except (ImportError, ValueError) as exc:
             logger.info(f"dbusmenu indisponível (sem Gio): {exc}")
             return False
