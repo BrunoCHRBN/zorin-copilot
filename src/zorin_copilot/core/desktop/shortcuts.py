@@ -80,6 +80,27 @@ def to_hyprland_binding(accelerator: str) -> str:
     return f"{mods}, {key}" if mods else f", {key}"
 
 
+def to_hyprland_lua_binding(accelerator: str) -> str:
+    """``"<Super><Shift>s"`` -> ``"SUPER+SHIFT+s"`` (formato do ``hl.bind``).
+
+    É o mesmo vocabulário de modificadores do hyprland, com ``+`` no lugar do
+    espaço. Teclas de uma letra vão maiúsculas para casar com os exemplos
+    oficiais (``hl.bind("SUPER+Q", ...)``); nomes longos ("left",
+    "XF86AudioMute") seguem como estão.
+    """
+    modifiers, key = parse_gtk_accelerator(accelerator)
+    if not key:
+        return ""
+    mods = "+".join(m.upper() for m in modifiers)
+    final = key.upper() if len(key) == 1 else key
+    return f"{mods}+{final}" if mods else final
+
+
+def lua_quote(value: str) -> str:
+    """Escapa um valor para caber num literal Lua de aspas duplas."""
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
 def to_sway_binding(accelerator: str) -> str:
     """``"<Super><Shift>s"`` -> ``"Mod4+Shift+s"``."""
     modifiers, key = parse_gtk_accelerator(accelerator)
@@ -278,6 +299,10 @@ class _ConfigFileBackend(ShortcutBackend, ABC):
     #: Nome do snippet gravado no diretório de configuração do compositor.
     snippet_name: str = "zorin-copilot.conf"
 
+    #: Prefixo de comentário do formato. "#" no hyprlang e no Sway; "--" no Lua,
+    #: onde um "#" seria lixo de sintaxe em vez de marcador.
+    comment_token: str = "#"
+
     def config_dir(self) -> Path:
         raise NotImplementedError
 
@@ -287,12 +312,26 @@ class _ConfigFileBackend(ShortcutBackend, ABC):
     def directive(self, slot: str, accelerator: str, command: str) -> str:
         raise NotImplementedError
 
-    def apply_runtime(self, directive: str) -> bool:
-        """Aplica sem reiniciar o compositor. Opcional — nem sempre existe."""
+    def autostart_directive(self, command: str) -> str:
+        """Linha que inicia o Copilot junto com a sessão."""
+        raise NotImplementedError
+
+    def decor_directive(self) -> str:
+        """Regras de vidro/arredondamento da janela e da pílula."""
+        return ""
+
+    def apply_runtime(self, slot: str, accelerator: str, command: str) -> bool:
+        """Aplica sem reiniciar o compositor. Opcional — nem sempre existe.
+
+        Recebe os três argumentos em vez da diretiva pronta porque o formato do
+        arquivo e o formato do IPC nem sempre coincidem: no Hyprland com config
+        Lua o snippet usa ``hl.bind``, mas o ``hyprctl`` continua falando
+        ``bind =``.
+        """
         return False
 
     def header(self) -> str:
-        return "# Gerado pelo Zorin Copilot — edite à vontade, este bloco é seu.\n"
+        return f"{self.comment_token} Gerado pelo Zorin Copilot — edite à vontade.\n"
 
     def snippet_path(self) -> Path:
         return self.config_dir() / self.snippet_name
@@ -310,7 +349,7 @@ class _ConfigFileBackend(ShortcutBackend, ABC):
         except OSError as exc:
             return ShortcutResult(False, f"Não foi possível gravar {path}: {exc}")
 
-        applied = self.apply_runtime(directive)
+        applied = self.apply_runtime(slot, accelerator, command)
         sourced, source_msg = self._ensure_sourced(path)
 
         if not sourced:
@@ -319,15 +358,21 @@ class _ConfigFileBackend(ShortcutBackend, ABC):
         return ShortcutResult(True, f"Atalho registrado em {path}{suffix}", config_path=str(path))
 
     def _begin_marker(self, slot: str) -> str:
-        return f"# >>> zorin-copilot:{slot}"
+        return f"{self.comment_token} >>> zorin-copilot:{slot}"
 
     def _end_marker(self, slot: str) -> str:
-        return f"# <<< zorin-copilot:{slot}"
+        return f"{self.comment_token} <<< zorin-copilot:{slot}"
+
+    def _block_pattern(self, slot: str) -> re.Pattern:
+        """Regex do bloco do slot: do marcador de abertura ao de fechamento."""
+        begin = re.escape(self._begin_marker(slot))
+        end = re.escape(self._end_marker(slot))
+        return re.compile(begin + r".*?" + end + r"\n?", re.DOTALL)
 
     def _rewrite_snippet(self, existing: str, slot: str, directive: str) -> str:
         """Substitui apenas o bloco do slot, preservando o resto do arquivo."""
         begin, end = self._begin_marker(slot), self._end_marker(slot)
-        pattern = re.compile(re.escape(begin) + r".*?" + re.escape(end) + r"\n?", re.DOTALL)
+        pattern = self._block_pattern(slot)
         block = f"{begin}\n{directive}\n{end}\n"
         if re.search(pattern, existing):
             return re.sub(pattern, block, existing)
@@ -335,7 +380,33 @@ class _ConfigFileBackend(ShortcutBackend, ABC):
         prefix = "" if "zorin-copilot" in existing else self.header()
         return f"{existing}{sep}{prefix}{block}"
 
-    def _source_line(self, snippet: Path) -> str:
+    def write_block(self, slot: str, directive: str) -> Path:
+        """Grava (idempotente) o bloco do ``slot`` no snippet e devolve o caminho.
+
+        Autostart e atalhos gravam no mesmo arquivo; concentrar aqui garante que
+        os dois usem o mesmo marcador — inclusive o prefixo de comentário, que
+        difere entre hyprlang e Lua.
+        """
+        path = self.snippet_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        existing = path.read_text(encoding="utf-8") if path.exists() else ""
+        path.write_text(self._rewrite_snippet(existing, slot, directive), encoding="utf-8")
+        return path
+
+    def remove_block(self, slot: str) -> bool:
+        """Remove o bloco do ``slot`` do snippet. ``False`` se não havia o que remover."""
+        path = self.snippet_path()
+        if not path.exists():
+            return False
+        try:
+            content = path.read_text(encoding="utf-8")
+        except OSError:
+            return False
+        pattern = self._block_pattern(slot)
+        path.write_text(re.sub(pattern, "", content), encoding="utf-8")
+        return True
+
+    def source_line(self, snippet: Path) -> str:
         raise NotImplementedError
 
     def _ensure_sourced(self, snippet: Path) -> tuple[bool, str]:
@@ -345,7 +416,7 @@ class _ConfigFileBackend(ShortcutBackend, ABC):
         principal tem de ser garantida pelos dois caminhos, por isso a regra
         vive numa função só em vez de morar dentro desta classe.
         """
-        return ensure_snippet_sourced(self.env.desktop, snippet)
+        return ensure_snippet_sourced(self.env.desktop, snippet, env=self.env)
 
     def unregister(self, slot: str) -> ShortcutResult:
         path = self.snippet_path()
@@ -356,10 +427,7 @@ class _ConfigFileBackend(ShortcutBackend, ABC):
         except OSError as exc:
             return ShortcutResult(False, str(exc))
 
-        pattern = re.compile(
-            re.escape(self._begin_marker(slot)) + r".*?" + re.escape(self._end_marker(slot)) + r"\n?",
-            re.DOTALL,
-        )
+        pattern = self._block_pattern(slot)
         path.write_text(re.sub(pattern, "", content), encoding="utf-8")
         return ShortcutResult(True, f"Bloco '{slot}' removido de {path}. Recarregue o compositor.")
 
@@ -368,8 +436,34 @@ class _ConfigFileBackend(ShortcutBackend, ABC):
         return path.exists() and self._begin_marker(slot) in path.read_text(encoding="utf-8", errors="ignore")
 
 
+def _hyprctl_keyword(*args: str, timeout: float = 5) -> bool:
+    """Roda ``hyprctl keyword <args>`` e diz se o compositor aceitou.
+
+    Ressalva honesta: isto vale **agora**, mas não sobrevive a um reload — o
+    reload reexecuta o config do usuário e descarta o que foi setado em runtime.
+    O snippet em disco continua sendo a fonte da verdade.
+    """
+    try:
+        result = subprocess.run(
+            ["hyprctl", "keyword", *args],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.debug(f"hyprctl keyword falhou: {exc}")
+        return False
+
+
 class HyprlandShortcutBackend(_ConfigFileBackend):
-    """Atalhos via ``bind =`` no Hyprland, aplicados com ``hyprctl keyword``."""
+    """Atalhos via ``bind =`` no Hyprland (hyprlang), aplicados com ``hyprctl``.
+
+    Só entra quando o usuário **não** tem ``hyprland.lua``. A partir da 0.55 os
+    dois formatos são excludentes: com o ``.lua`` presente o ``.conf`` não é
+    lido, e gravar aqui seria escrever num arquivo morto.
+    """
 
     name = "hyprland"
 
@@ -381,35 +475,102 @@ class HyprlandShortcutBackend(_ConfigFileBackend):
         return self.config_dir() / "hyprland.conf"
 
     def is_supported(self) -> bool:
-        return self.env.desktop == "hyprland"
+        return self.env.desktop == "hyprland" and not self.env.hyprland.is_lua
 
     def directive(self, slot: str, accelerator: str, command: str) -> str:
         binding = to_hyprland_binding(accelerator)
         return f"bind = {binding}, exec, {command}" if binding else ""
 
-    def _source_line(self, snippet: Path) -> str:
+    def autostart_directive(self, command: str) -> str:
+        return f"exec-once = {command}"
+
+    def decor_directive(self) -> str:
+        # `blur` não é efeito de window rule (só `no_blur`/`xray`); ele vive na
+        # layer rule da pílula. E `match:class` é REGEX — sem as âncoras a regra
+        # casa qualquer classe que contenha o app_id.
+        return (
+            f"windowrule = rounding {DECOR_ROUNDING}, match:class ^{_DECOR_APP_ID}$\n"
+            f"layerrule = blur on, match:namespace ^{self.env.blur_namespace()}$\n"
+        )
+
+    def source_line(self, snippet: Path) -> str:
         return f"source = {snippet}"
 
-    def apply_runtime(self, directive: str) -> bool:
+    def apply_runtime(self, slot: str, accelerator: str, command: str) -> bool:
         if not self.env.has("hyprctl"):
             return False
-        # `hyprctl keyword bind` recebe exatamente o argumento do `bind =` do arquivo.
-        payload = directive.split("=", 1)[1].strip()
-        try:
-            res = subprocess.run(
-                ["hyprctl", "keyword", "bind", payload],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                check=False,
-            )
-            return res.returncode == 0
-        except (OSError, subprocess.SubprocessError) as exc:
-            logger.debug(f"hyprctl keyword falhou: {exc}")
+        binding = to_hyprland_binding(accelerator)
+        if not binding:
             return False
+        # `hyprctl keyword bind` recebe exatamente o argumento do `bind =` do arquivo.
+        return _hyprctl_keyword("bind", f"{binding}, exec, {command}")
 
     def hint(self) -> str:
         return "Confirme que `hyprctl` está no PATH ou registre o atalho manualmente no hyprland.conf."
+
+
+class HyprlandLuaBackend(_ConfigFileBackend):
+    """Atalhos via ``hl.bind`` no Hyprland 0.55+ (config em Lua).
+
+    Entra em cena quando o usuário tem ``hyprland.lua``: nesse caso o Hyprland
+    **não lê** ``hyprland.conf``, então o snippet precisa ser Lua e a inclusão no
+    config principal é um ``require()`` — não um ``source =``.
+
+    O ``require()`` não é detalhe estético: a wiki recomenda essa forma porque
+    cada chamada vira um escopo Lua separado, então um erro no nosso snippet não
+    derruba o resto do config do usuário.
+    """
+
+    name = "hyprland-lua"
+    snippet_name = "zorin-copilot.lua"
+    comment_token = "--"
+
+    def config_dir(self) -> Path:
+        base = os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")
+        return Path(base) / "hypr"
+
+    def main_config(self) -> Path:
+        return self.env.hyprland.path or (self.config_dir() / "hyprland.lua")
+
+    def is_supported(self) -> bool:
+        return self.env.desktop == "hyprland" and self.env.hyprland.is_lua
+
+    def directive(self, slot: str, accelerator: str, command: str) -> str:
+        binding = to_hyprland_lua_binding(accelerator)
+        if not binding:
+            return ""
+        return f'hl.bind("{binding}", hl.dsp.exec_cmd("{lua_quote(command)}"))'
+
+    def autostart_directive(self, command: str) -> str:
+        # `hl.exec_cmd` executa na hora — no topo do arquivo é o equivalente ao
+        # `exec-once` do hyprlang.
+        return f'hl.exec_cmd("{lua_quote(command)}")'
+
+    def decor_directive(self) -> str:
+        return (
+            'hl.window_rule({ name = "zorin-copilot-rounding", '
+            f'match = {{ class = "^{_DECOR_APP_ID}$" }}, rounding = {DECOR_ROUNDING} }})\n'
+            'hl.layer_rule({ name = "zorin-copilot-pill-blur", '
+            f'match = {{ namespace = "^{self.env.blur_namespace()}$" }}, blur = true }})\n'
+        )
+
+    def source_line(self, snippet: Path) -> str:
+        return f'require("{snippet.stem}")'
+
+    def apply_runtime(self, slot: str, accelerator: str, command: str) -> bool:
+        # O IPC do hyprctl continua no formato hyprlang mesmo com config Lua.
+        if not self.env.has("hyprctl"):
+            return False
+        binding = to_hyprland_binding(accelerator)
+        if not binding:
+            return False
+        return _hyprctl_keyword("bind", f"{binding}, exec, {command}")
+
+    def hint(self) -> str:
+        return (
+            "Seu Hyprland usa `hyprland.lua`. Confirme que o config principal tem "
+            '`require("zorin-copilot")` e recarregue com `hyprctl reload`.'
+        )
 
 
 class SwayShortcutBackend(_ConfigFileBackend):
@@ -431,11 +592,17 @@ class SwayShortcutBackend(_ConfigFileBackend):
         binding = to_sway_binding(accelerator)
         return f"bindsym {binding} exec {command}" if binding else ""
 
-    def _source_line(self, snippet: Path) -> str:
+    def source_line(self, snippet: Path) -> str:
         return f"include {snippet}"
 
-    def apply_runtime(self, directive: str) -> bool:
+    def autostart_directive(self, command: str) -> str:
+        return f"exec {command}"
+
+    def apply_runtime(self, slot: str, accelerator: str, command: str) -> bool:
         if not self.env.has("swaymsg"):
+            return False
+        directive = self.directive(slot, accelerator, command)
+        if not directive:
             return False
         try:
             res = subprocess.run(["swaymsg", directive], capture_output=True, text=True, timeout=5, check=False)
@@ -740,13 +907,23 @@ class NullShortcutBackend(ShortcutBackend):
         return "Registre manualmente no seu compositor um atalho para `zorin-copilot --toggle`."
 
 
-def ensure_snippet_sourced(desktop: str, snippet: Path) -> tuple[bool, str]:
+def ensure_snippet_sourced(
+    desktop: str,
+    snippet: Path,
+    env: Environment | None = None,
+) -> tuple[bool, str]:
     """Garante que o config principal do compositor inclui ``snippet``.
 
     Hyprland e Sway leem apenas o config principal (``hyprland.conf`` /
-    ``config``); um arquivo solto no diretório de configuração é ignorado
-    silenciosamente. Gravar o snippet sem esta linha produz o pior tipo de
-    falha: o ``setup`` responde "ativo" e nada acontece no próximo login.
+    ``hyprland.lua`` / ``config``); um arquivo solto no diretório de
+    configuração é ignorado silenciosamente. Gravar o snippet sem esta linha
+    produz o pior tipo de falha: o ``setup`` responde "ativo" e nada acontece
+    no próximo login.
+
+    Desde o Hyprland 0.55 o alvo depende do sabor do config: com
+    ``hyprland.lua`` presente o compositor **não lê** o ``.conf``, então a linha
+    certa é um ``require()`` no arquivo certo. Por isso o caminho e a diretiva
+    saem do backend em vez de ficarem chumbados aqui.
 
     Atalhos e autostart gravam no mesmo arquivo, então a regra tem de viver
     fora das classes — os dois caminhos chamam esta função.
@@ -754,15 +931,22 @@ def ensure_snippet_sourced(desktop: str, snippet: Path) -> tuple[bool, str]:
     Devolve ``(incluído, mensagem)``. A mensagem diz o que fazer quando não é
     possível tocar no config do usuário.
     """
-    base = Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config"))
-    if desktop == "hyprland":
-        main = base / "hypr" / "hyprland.conf"
-    elif desktop == "sway":
-        main = base / "sway" / "config"
-    else:
+    env = env or current_environment()
+    if env.desktop != desktop:
+        # Chamada legada com desktop avulso: monta um retrato mínimo,
+        # preservando o que já se sabe sobre o Hyprland.
+        env = Environment(
+            desktop=desktop,
+            session_type=env.session_type,
+            hyprland=env.hyprland,
+        )
+
+    backend = select_compositor_backend(env)
+    if backend is None:
         return True, ""
 
-    line = f"source = {snippet}" if desktop == "hyprland" else f"include {snippet}"
+    main = backend.main_config()
+    line = backend.source_line(snippet)
 
     if not main.exists():
         return False, f"{main} não existe; adicione `{line}` manualmente."
@@ -772,8 +956,14 @@ def ensure_snippet_sourced(desktop: str, snippet: Path) -> tuple[bool, str]:
     except OSError:
         return False, f"Não foi possível ler {main}."
 
-    # Já incluído (direto ou por um glob de conf.d): não mexe em nada.
-    if snippet.name in content or "conf.d" in content:
+    # Já incluído (direto, por require ou por um glob de conf.d): não mexe.
+    already = (
+        line in content
+        or snippet.name in content
+        or f'require("{snippet.stem}")' in content
+        or "conf.d" in content
+    )
+    if already:
         return True, ""
 
     try:
@@ -793,33 +983,29 @@ SLOT_DECOR: Final = "decor"
 #: app_id da janela principal (deve casar com `class:` do Hyprland).
 _DECOR_APP_ID: Final = "io.github.bruno.ZorinCopilot"
 
-
-def _decor_directive() -> str:
-    """Bloco idempotente de regras de vidro/arredondamento para o Hyprland.
-
-    Casa a janela principal pelo ``class:`` (app_id) e a pílula pelo ``namespace``
-    da layer-shell. São regras do app próprio — não globais — e podem ser removidas
-    sem afetar o resto do sistema.
-    """
-    ns = current_environment().blur_namespace()
-    return (
-        f"windowrule = blur,class:{_DECOR_APP_ID}\n"
-        f"windowrule = rounding,class:{_DECOR_APP_ID}\n"
-        f"layerrule = blur,{ns}\n"
-        f"layerrule = rounding,{ns}\n"
-    )
+#: Arredondamento aplicado à janela principal (0-20 no Hyprland).
+DECOR_ROUNDING: Final = 10
 
 
 def _apply_decor_live(directive: str) -> bool:
-    """Aplica cada regra na sessão atual via `hyprctl keyword` (sem reload global)."""
+    """Aplica cada regra na sessão atual via `hyprctl keyword` (sem reload global).
+
+    Só vale para regras escritas em hyprlang — é o dialeto que o IPC do
+    ``hyprctl`` entende. Com snippet Lua a regra é gravada e entra no próximo
+    ``hyprctl reload``.
+    """
     ok = True
     for line in directive.strip().splitlines():
         line = line.strip()
-        if not line or line.startswith("#"):
+        if not line or line.startswith("#") or line.startswith("--"):
             continue
         # Formato "key = value" -> `hyprctl keyword key value`
         key, _, value = line.partition("=")
-        args = [key.strip(), *value.strip().split()]
+        if not value.strip():
+            continue
+        # O valor é UM argumento só: "rounding 10, match:class ^x$" não pode ser
+        # fatiado por espaço, senão o hyprctl recebe a regra pela metade.
+        args = (key.strip(), value.strip())
         try:
             res = subprocess.run(
                 ["hyprctl", "keyword", *args],
@@ -836,27 +1022,40 @@ def _apply_decor_live(directive: str) -> bool:
 
 
 def ensure_decor_rules(env: Environment | None = None) -> tuple[bool, str]:
-    """Escreve (idempotente) e aplica as regras de vidro/arredondamento no Hyprland.
+    """Escreve (idempotente) e aplica as regras de vidro/arredondamento.
 
-    Gerado no snippet ``zorin-copilot.conf`` (mesmo dos atalhos) e incluído no
-    ``hyprland.conf`` via :func:`ensure_snippet_sourced`. Aplicado ao vivo com
-    ``hyprctl keyword`` para valer na sessão atual. Sem Hyprland, é no-op seguro.
+    O destino acompanha o sabor do config: ``zorin-copilot.lua`` quando o
+    Hyprland carrega ``hyprland.lua``, ``zorin-copilot.conf`` no hyprlang. A
+    inclusão no config principal sai de :func:`ensure_snippet_sourced`. Fora do
+    Hyprland, é no-op seguro.
     """
     env = env or current_environment()
     if not env.is_hyprland:
         return False, "decoração de compositor só é suportada no Hyprland"
-    backend = HyprlandShortcutBackend(env)
+
+    backend = select_compositor_backend(env)
+    if backend is None:
+        return False, "nenhum backend de compositor disponível para regras de decoração"
+
+    directive = backend.decor_directive()
+    if not directive:
+        return False, "este compositor não expõe regras de decoração"
+
     snippet = backend.snippet_path()
     try:
         snippet.parent.mkdir(parents=True, exist_ok=True)
         existing = snippet.read_text(encoding="utf-8") if snippet.exists() else ""
-        written = backend._rewrite_snippet(existing, SLOT_DECOR, _decor_directive())
+        written = backend._rewrite_snippet(existing, SLOT_DECOR, directive)
         snippet.write_text(written, encoding="utf-8")
     except OSError as exc:
         return False, f"não foi possível gravar {snippet}: {exc}"
 
-    sourced, source_msg = ensure_snippet_sourced(env.desktop, snippet)
-    applied = _apply_decor_live(_decor_directive()) if env.has("hyprctl") else False
+    sourced, source_msg = ensure_snippet_sourced(env.desktop, snippet, env=env)
+    applied = (
+        _apply_decor_live(directive)
+        if env.has("hyprctl") and not env.hyprland_uses_lua
+        else False
+    )
     msg = f"regras de decoração em {snippet}"
     if applied:
         msg += " (aplicadas na sessão)"
@@ -865,11 +1064,36 @@ def ensure_decor_rules(env: Environment | None = None) -> tuple[bool, str]:
     return True, msg
 
 
+def select_compositor_backend(env: Environment | None = None) -> _ConfigFileBackend | None:
+    """Backend de arquivo do compositor atual (Hyprland/Sway), ou ``None``.
+
+    Hyprland e Sway são os únicos que a gente configura escrevendo snippet em
+    disco. Ter uma função só para achá-los evita que atalhos, autostart e
+    decoração cheguem a conclusões diferentes sobre qual arquivo é o certo.
+    """
+    env = env or current_environment()
+    candidates: tuple[_ConfigFileBackend, ...] = (
+        HyprlandLuaBackend(env),
+        HyprlandShortcutBackend(env),
+        SwayShortcutBackend(env),
+    )
+    for backend in candidates:
+        try:
+            if backend.is_supported():
+                return backend
+        except Exception as exc:
+            logger.debug(f"Backend {backend.name} falhou na detecção: {exc}")
+    return None
+
+
 def iter_backends(env: Environment | None = None) -> list[ShortcutBackend]:
     """Backends conhecidos, em ordem de preferência."""
     env = env or current_environment()
     return [
         GnomeShortcutBackend(env),
+        # O sabor do config decide qual dos dois atende: são mutuamente
+        # excludentes (com `hyprland.lua`, o `.conf` não é lido).
+        HyprlandLuaBackend(env),
         HyprlandShortcutBackend(env),
         SwayShortcutBackend(env),
         KdeShortcutBackend(env),

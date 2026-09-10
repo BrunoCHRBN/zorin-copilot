@@ -47,7 +47,7 @@ jobs:
           .venv/bin/pip install -e . --no-deps
           # setuptools entrou na lista de propósito: desde o Python 3.12 o venv
           # não o traz mais, e sem ele um teste de empacotamento é pulado.
-          .venv/bin/pip install pytest Pillow requests beautifulsoup4 websockets setuptools
+          .venv/bin/pip install pytest Pillow requests beautifulsoup4 websockets setuptools python-docx python-pptx
 
       - name: Roda a suíte
         # A interface precisa de um servidor gráfico; xvfb dá um sem hardware.
@@ -94,7 +94,7 @@ jobs:
           .venv/bin/pip install -e . --no-deps
           # setuptools entrou na lista de propósito: desde o Python 3.12 o venv
           # não o traz mais, e sem ele um teste de empacotamento é pulado.
-          .venv/bin/pip install pytest Pillow requests beautifulsoup4 websockets setuptools
+          .venv/bin/pip install pytest Pillow requests beautifulsoup4 websockets setuptools python-docx python-pptx
 
       - name: Mostra o ambiente detectado
         run: |
@@ -185,7 +185,7 @@ jobs:
           .venv/bin/pip install -e . --no-deps
           # setuptools entrou na lista de propósito: desde o Python 3.12 o venv
           # não o traz mais, e sem ele um teste de empacotamento é pulado.
-          .venv/bin/pip install pytest Pillow requests beautifulsoup4 websockets setuptools
+          .venv/bin/pip install pytest Pillow requests beautifulsoup4 websockets setuptools python-docx python-pptx
 
       - name: Sobe o Sway em modo headless
         run: |
