@@ -13,9 +13,12 @@ gráfico) e permite que os adapters decidam o que fazer com as informações.
 from __future__ import annotations
 
 import os
+import re
 import shutil
+import subprocess
 from dataclasses import dataclass, field
 from functools import lru_cache
+from pathlib import Path
 from typing import Final
 
 # Marcadores de compositor que não aparecem (ou aparecem tortos) em XDG_CURRENT_DESKTOP.
@@ -113,6 +116,63 @@ def running_processes() -> frozenset[str]:
     return frozenset(names)
 
 
+#: A partir desta versão o Hyprland aceita ``hyprland.lua`` — e, se ele existir,
+#: o ``hyprland.conf`` **não é lido**. hyprlang segue suportado por ~1-2 releases.
+HYPRLAND_LUA_MIN_VERSION: Final[tuple[int, int]] = (0, 55)
+
+_VERSION_RE: Final = re.compile(r"(\d+)\.(\d+)(?:\.(\d+))?")
+
+
+def parse_version(text: str) -> tuple[int, ...]:
+    """Extrai a primeira versão ``X.Y[.Z]`` do texto. Vazia se não houver."""
+    match = _VERSION_RE.search(text or "")
+    if not match:
+        return ()
+    return tuple(int(part) for part in match.groups() if part is not None)
+
+
+def parse_hyprland_version(text: str) -> str:
+    """Interpreta a saída de ``hyprctl version`` e devolve ``"X.Y.Z"`` (ou ``""``).
+
+    O comando imprime várias linhas e a versão aparece em mais de um formato
+    (``Hyprland 0.55.3 built from...`` e ``Tag: v0.55.3``). Aceita os dois.
+    """
+    for line in (text or "").splitlines():
+        stripped = line.strip().lower()
+        if not (stripped.startswith("hyprland") or stripped.startswith("tag:")):
+            continue
+        parts = list(parse_version(stripped))
+        if len(parts) >= 2:
+            while len(parts) < 3:
+                parts.append(0)
+            return ".".join(str(part) for part in parts)
+    return ""
+
+
+def probe_hyprland_version() -> str:
+    """Versão do Hyprland via ``hyprctl version``; ``""`` se não for possível."""
+    if not shutil.which("hyprctl"):
+        return ""
+    try:
+        result = subprocess.run(
+            ["hyprctl", "version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return parse_hyprland_version(result.stdout)
+
+
+def hypr_config_dir(environ: dict[str, str] | None = None) -> Path:
+    """Diretório de configuração do Hyprland (respeita ``XDG_CONFIG_HOME``)."""
+    environ = dict(os.environ if environ is None else environ)
+    base = environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return Path(base) / "hypr"
+
+
 def describe_for_prompt(env: Environment) -> str:
     """Descreve o ambiente numa frase curta, para o prompt de sistema.
 
@@ -162,6 +222,62 @@ class DistroInfo:
 
 
 @dataclass(frozen=True)
+class HyprlandConfig:
+    """Qual arquivo de configuração o Hyprland **de fato** carrega.
+
+    Desde a 0.55 o Hyprland aceita ``hyprland.lua``. A regra do compositor é
+    excludente e checada uma única vez na inicialização: se o ``.lua`` existe, o
+    ``hyprland.conf`` é ignorado por inteiro — inclusive qualquer ``source =``
+    que a gente tenha escrito nele. É por isso que o sabor precisa ser detectado
+    em vez de assumido: errar aqui produz silêncio, não erro.
+    """
+
+    flavor: str = "hyprlang"  # "hyprlang" | "lua"
+    path: Path | None = None
+    version: str = ""
+
+    @property
+    def is_lua(self) -> bool:
+        return self.flavor == "lua"
+
+    @property
+    def version_tuple(self) -> tuple[int, ...]:
+        return parse_version(self.version)
+
+    @property
+    def supports_lua(self) -> bool:
+        """O Hyprland instalado entende config em Lua?"""
+        return self.version_tuple[:2] >= HYPRLAND_LUA_MIN_VERSION
+
+
+def detect_hyprland_config(
+    config_dir: Path | None = None,
+    version: str = "",
+) -> HyprlandConfig:
+    """Descobre o sabor e o caminho do config do Hyprland.
+
+    Precedência, seguindo o comportamento real do compositor:
+
+    1. ``hyprland.lua`` existe  -> lua (o ``.conf`` é ignorado)
+    2. ``hyprland.conf`` existe -> hyprlang
+    3. nenhum dos dois         -> lua se a versão for >= 0.55 (é o que o
+       Hyprland gera hoje num perfil novo), senão hyprlang
+    """
+    directory = config_dir if config_dir is not None else hypr_config_dir()
+    lua_path = directory / "hyprland.lua"
+    conf_path = directory / "hyprland.conf"
+
+    if lua_path.exists():
+        return HyprlandConfig(flavor="lua", path=lua_path, version=version)
+    if conf_path.exists():
+        return HyprlandConfig(flavor="hyprlang", path=conf_path, version=version)
+
+    if parse_version(version)[:2] >= HYPRLAND_LUA_MIN_VERSION:
+        return HyprlandConfig(flavor="lua", path=lua_path, version=version)
+    return HyprlandConfig(flavor="hyprlang", path=conf_path, version=version)
+
+
+@dataclass(frozen=True)
 class Environment:
     """Retrato do ambiente em que o Copilot está rodando.
 
@@ -178,6 +294,15 @@ class Environment:
     # Binários relevantes descobertos no PATH. Guardar aqui evita repetir
     # shutil.which em cada adapter e torna a detecção testável por injeção.
     binaries: frozenset[str] = frozenset()
+
+    # Config do Hyprland: sabor (hyprlang/lua), caminho e versão. Só preenchido
+    # quando o desktop é Hyprland — nos demais fica no padrão e é ignorado.
+    hyprland: HyprlandConfig = field(default_factory=HyprlandConfig)
+
+    @property
+    def hyprland_uses_lua(self) -> bool:
+        """O Hyprland desta sessão carrega ``hyprland.lua``?"""
+        return self.hyprland.is_lua
 
     @property
     def is_wayland(self) -> bool:
@@ -367,13 +492,22 @@ def detect_environment(
         session = "wayland" if environ.get("WAYLAND_DISPLAY") else ("x11" if environ.get("DISPLAY") else "")
 
     found = frozenset(b for b in _PROBED_BINARIES if shutil.which(b)) if probe else frozenset()
+    desktop = _detect_desktop(environ)
+
+    # Só faz sentido perguntar ao Hyprland quando ele é o compositor — e só com
+    # `probe` ligado, para que os testes continuem determinísticos.
+    hyprland = HyprlandConfig()
+    if desktop == "hyprland" and probe:
+        version = probe_hyprland_version()
+        hyprland = detect_hyprland_config(hypr_config_dir(environ), version)
 
     return Environment(
         distro=distro,
         session_type=session,
-        desktop=_detect_desktop(environ),
+        desktop=desktop,
         package_manager=distro.package_manager,
         binaries=found,
+        hyprland=hyprland,
     )
 
 

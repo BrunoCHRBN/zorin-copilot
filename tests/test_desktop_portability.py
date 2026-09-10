@@ -325,8 +325,11 @@ class TestDecorRules(unittest.TestCase):
         self.assertTrue(ok)
         snippet = (self.config_home / "hypr" / "zorin-copilot.conf").read_text()
         self.assertIn("zorin-copilot:decor", snippet)  # marcadores
-        self.assertIn("windowrule = blur,class:io.github.bruno.ZorinCopilot", snippet)
-        self.assertIn("layerrule = blur,zorin-copilot-pill", snippet)
+        # `blur` não é efeito de window rule (só `no_blur`/`xray`): na janela
+        # fica o arredondamento e o blur vive na layer rule da pílula, casada
+        # por `match:namespace`. As âncoras existem porque o match é REGEX.
+        self.assertIn("windowrule = rounding 10, match:class ^io.github.bruno.ZorinCopilot$", snippet)
+        self.assertIn("layerrule = blur on, match:namespace ^zorin-copilot-pill$", snippet)
         main = (self.config_home / "hypr" / "hyprland.conf").read_text()
         self.assertIn("zorin-copilot.conf", main)  # garantido o source
 
@@ -350,8 +353,19 @@ class TestDecorRules(unittest.TestCase):
             ok, _ = sc.ensure_decor_rules(env)
         self.assertTrue(ok)
         joined = " ".join(" ".join(c.args[0]) for c in mock_run.call_args_list)
-        self.assertIn("hyprctl keyword windowrule blur,class:io.github.bruno.ZorinCopilot", joined)
-        self.assertIn("hyprctl keyword layerrule blur,zorin-copilot-pill", joined)
+        self.assertIn("hyprctl keyword windowrule rounding 10, match:class ^io.github.bruno.ZorinCopilot$", joined)
+        self.assertIn("hyprctl keyword layerrule blur on, match:namespace ^zorin-copilot-pill$", joined)
+
+    def test_valor_da_regra_vai_como_um_unico_argumento(self):
+        """Regressão: fatiar o valor por espaço entregava a regra pela metade."""
+        env = self._hypr_env(with_hyprctl=True)
+        with patch.object(sc.subprocess, "run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stderr="")
+            sc.ensure_decor_rules(env)
+        for call in mock_run.call_args_list:
+            args = call.args[0]
+            # ["hyprctl", "keyword", <chave>, <valor>] — sem split no valor.
+            self.assertEqual(len(args), 4, f"argumentos inesperados: {args}")
 
 
 class TestAutostart(unittest.TestCase):

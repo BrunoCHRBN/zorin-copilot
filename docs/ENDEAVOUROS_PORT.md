@@ -46,7 +46,7 @@ A boa notícia: **nada disso exige reescrever o produto**. O acoplamento está c
 ### B4. Atalho global é structuralmente GNOME-only
 `core/shortcuts.py:66-74` grava em `org.gnome.settings-daemon.plugins.media-keys`. Em Hyprland/Sway o schema não existe; `_media_keys_schema_exists()` devolve `False` e `register()` retorna `False` — mas `app.py:1349-1358` envolve a chamada em `except Exception: pass`, então **o usuário nunca é avisado**. O `Super+C` simplesmente não existe.
 
-**Correção:** backends por compositor (GNOME media-keys, `hyprland.conf`, `sway config`, `kglobalshortcutsrc`).
+**Correção:** backends por compositor (GNOME media-keys, `hyprland.conf` ou `hyprland.lua`, `sway config`, `kglobalshortcutsrc`).
 
 ### B5. Captura de tela depende de um portal que o wlroots não traz por padrão
 `core/vision.py` falava direto com `org.freedesktop.portal.Screenshot`. Em Hyprland isso só responde com `xdg-desktop-portal-hyprland` instalado **e** configurado; sem ele, `bus.call_sync` estoura e o usuário vê "Falha no portal de screenshot" — uma mensagem que não diz o que fazer.
@@ -106,7 +106,7 @@ Vale registrar o que **não** precisa de porte — é a maior parte do sistema:
 | Módulo | Responsabilidade |
 |---|---|
 | `env.py` | Detecção pura (sem `gi`, sem D-Bus, sem disco obrigatório) de distro, gerenciador de pacotes, sessão, compositor e inventário de binários. Testável por injeção de `environ`. |
-| `shortcuts.py` | Backends GNOME / Hyprland / Sway / KDE atrás de um contrato único, com conversão de acelerador (`<Super><Shift>s` → `SUPER SHIFT, s` / `Mod4+Shift+s` / `Meta+Shift+S`). |
+| `shortcuts.py` | Backends GNOME / Hyprland (hyprlang **e** Lua) / Sway / KDE atrás de um contrato único, com conversão de acelerador (`<Super><Shift>s` → `SUPER SHIFT, s` / `SUPER+SHIFT+S` / `Mod4+Shift+s` / `Meta+Shift+S`). |
 | `screenshot.py` | Backends `grimblast`, `grim+slurp`, `spectacle`, portal XDG, ImageMagick — com preferência por wlroots quando detectado. |
 | `tray.py` | StatusNotifierItem puro D-Bus. Sem GTK3, sem XEmbed. |
 | `controls.py` | Tema, bloqueio de tela, volume e notificação por estratégia, com mensagem de pacote faltante. |
@@ -149,7 +149,19 @@ cd zorin-copilot
 ./setup.sh
 ```
 
-O setup grava os atalhos em `~/.config/hypr/zorin-copilot.conf` e acrescenta o `source` ao seu `hyprland.conf` (com backup `.bak-copilot`). Recarregue com `hyprctl reload`.
+O setup grava os atalhos num snippet dentro de `~/.config/hypr/`. **Qual arquivo depende do seu config:**
+
+| Seu config | Snippet gerado | Linha acrescentada |
+|---|---|---|
+| `hyprland.lua` (padrão a partir do 0.55) | `~/.config/hypr/zorin-copilot.lua` | `require("zorin-copilot")` |
+| `hyprland.conf` (hyprlang) | `~/.config/hypr/zorin-copilot.conf` | `source = ~/.config/hypr/zorin-copilot.conf` |
+
+Os dois formatos são **excludentes** e a escolha é feita uma única vez na
+inicialização do compositor: se o `hyprland.lua` existe, o `hyprland.conf` não é
+lido — inclusive qualquer `source =` escrito nele. Por isso o setup detecta o sabor
+em vez de assumir: errar aqui não produz erro, produz silêncio (o relatório diz
+"ativo" e nada sobe no login). Em ambos os casos há backup `.bak-copilot`;
+recarregue com `hyprctl reload`.
 
 Para ícone na bandeja, adicione o módulo `tray` à sua waybar.
 
@@ -169,8 +181,8 @@ recurso exige em Hyprland, verificada contra o código (não contra a memória):
 | App abre | `python-gobject`, `gtk4`, `libadwaita`, `at-spi2-core` | GTK **aborta** sem o barramento AT-SPI (`dbind-ERROR`) |
 | Captura de tela | `grim` + `slurp` | cai no portal XDG; sem `xdg-desktop-portal-hyprland` a chamada D-Bus estoura |
 | Recorte (área) | `slurp` | `grim` é chamado sem geometria, ou erro explícito |
-| Atalho global | backend `hyprland` + `hyprctl` | grava o `bind` mas não aplica na sessão atual |
-| Persistência do atalho | `source` do snippet no `hyprland.conf` | funciona até o reboot e depois desaparece |
+| Atalho global | backend `hyprland`/`hyprland-lua` + `hyprctl` | grava o `bind` mas não aplica na sessão atual |
+| Persistência do atalho | `source`/`require` do snippet no config principal | funciona até o reboot e depois desaparece |
 | Autostart | `exec-once` **e** `source` do snippet | `setup --status` diz "ativo" e nada sobe no login |
 | Ícone na bandeja | watcher SNI (módulo `tray` da waybar) | `--background` fica invisível e inalcançável |
 | Notificações | `libnotify` (`notify-send`) ou mako | ação de notificar falha |
@@ -202,6 +214,41 @@ rodando o caminho Hyprland de verdade, não lendo o código):
    caminho garantir a inclusão e o outro esquecer.
 2. `setup --all` imprimia "Atalhos globais **GNOME** registrados" mesmo quando
    o backend usado era o Hyprland. A saída agora cita o backend real.
+
+### Hyprland 0.55+: hyprlang está deprecado em favor de Lua
+
+Desde a 0.55 o Hyprland aceita config em Lua (`$XDG_CONFIG_HOME/hypr/hyprland.lua`).
+Segundo o [anúncio oficial](https://hypr.land/news/26_lua/):
+
+> "if you don't have a `hyprland.lua` config file, your old `hyprland.conf` will be
+> loaded, business as usual. **However, if you do have one, `hyprland.lua` will be
+> loaded instead**."
+>
+> "The old hyprlang syntax will continue to be supported for 1 - 2 releases starting
+> from 0.55. After that, hyprlang will be dropped. New config features will also not
+> be added to hyprlang anymore."
+
+O que isso muda no Copilot:
+
+| hyprlang (`.conf`) | Lua (`.lua`) |
+|---|---|
+| `bind = SUPER, c, exec, <cmd>` | `hl.bind("SUPER+C", hl.dsp.exec_cmd("<cmd>"))` |
+| `exec-once = <cmd>` | `hl.exec_cmd("<cmd>")` |
+| `windowrule = rounding 10, match:class ^x$` | `hl.window_rule({ match = { class = "^x$" }, rounding = 10 })` |
+| `layerrule = blur on, match:namespace ^ns$` | `hl.layer_rule({ match = { namespace = "^ns$" }, blur = true })` |
+| `source = /caminho/snippet.conf` | `require("snippet")` |
+
+O projeto escreve as duas variantes, eleitas por `detect_hyprland_config()`
+(`core/desktop/env.py`): presença do `hyprland.lua`, depois do `hyprland.conf` e,
+se não houver nenhum, a versão reportada por `hyprctl version`.
+
+**`require()` não é detalhe estético.** A wiki recomenda essa forma porque cada
+chamada vira um escopo Lua separado — um erro no snippet do Copilot não derruba o
+resto do config do usuário.
+
+**`hyprctl keyword` continua no dialeto hyprlang** mesmo com config Lua, e é
+volátil por natureza: um `hyprctl reload` reexecuta o config e descarta o que foi
+aplicado em runtime. O snippet em disco segue sendo a fonte da verdade.
 
 ### Pelo pacote Arch (`makepkg`)
 

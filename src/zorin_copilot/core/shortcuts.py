@@ -15,7 +15,10 @@ import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING, Final
+
+if TYPE_CHECKING:  # pragma: no cover - só para anotações
+    from .desktop.env import Environment
 
 logger = logging.getLogger(__name__)
 
@@ -249,13 +252,14 @@ class AutostartManager:
             logger.error(f"Erro ao desabilitar autostart: {exc}")
             return False
 
-    # ------------------------------------------------------------------ #
-    @staticmethod
-    def _hyprland_conf_path() -> Path:
-        base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
-        return Path(base) / "hypr" / "hyprland.conf"
 
-    @staticmethod
-    def _exec_once_line(binary_command: str) -> str:
-        return f"exec-once = {binary_command}"
+def ensure_decor_rules(env: Environment | None = None) -> tuple[bool, str]:
+    """Regras de vidro/arredondamento no compositor.
 
+    Reexportado aqui porque ``setup.sh`` e a CLI importam deste módulo; a
+    implementação vive em :mod:`core.desktop.shortcuts`, ao lado dos backends
+    que sabem qual arquivo de config está realmente em uso.
+    """
+    from .desktop.shortcuts import ensure_decor_rules as _impl
+
+    return _impl(env)

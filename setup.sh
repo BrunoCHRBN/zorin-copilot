@@ -328,8 +328,21 @@ printf "${BOLD}${GREEN}======================================================${N
 
 case "$DESKTOP_ENV" in
     hyprland)
-        printf "• Hyprland: os atalhos foram gravados em ${BOLD}~/.config/hypr/zorin-copilot.conf${NC}.\n"
-        printf "  Recarregue com ${BOLD}hyprctl reload${NC} se o snippet ainda não estiver incluído.\n"
+        # Não dá para chumbar "zorin-copilot.conf": desde o Hyprland 0.55, se o
+        # usuário tem `hyprland.lua` o `.conf` não é lido e o snippet é `.lua`.
+        # Quem sabe o arquivo certo é o backend, eleito pelo sabor detectado.
+        "$VENV/bin/python3" - <<'PY' || true
+from zorin_copilot.core.desktop.env import current_environment
+from zorin_copilot.core.desktop.shortcuts import select_compositor_backend
+
+env = current_environment()
+backend = select_compositor_backend(env)
+if backend is None:
+    print("• Hyprland: nenhum backend de compositor disponível para gravar os atalhos.")
+else:
+    print(f"• Hyprland: atalhos e autostart gravados em {backend.snippet_path()}.")
+    print(f"  Incluído em {backend.main_config()} — recarregue com `hyprctl reload`.")
+PY
         printf "• Para ícone na bandeja, use um módulo SNI na waybar (tray).\n"
         ;;
     sway)
