@@ -5,12 +5,16 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 
 from pathlib import Path
 
 from . import __version__
 from .ai.actions import ActionPlan, ActionType, DesktopAction
+from .ai.agent import AgentLoop
+from .ai.agent_router import AgentRouter, RouteMode, classify_objective
+from .ai.agent_tools import ToolRegistry
 from .ai.engine import IntentEngine
 from .ai.providers import DEFAULT_GEMINI_MODEL, GEMINI_MODEL_CHOICES
 from .core.a11y import DesktopInspector
@@ -112,6 +116,22 @@ def build_parser() -> argparse.ArgumentParser:
     web_deep = web_sub.add_parser("deep-search", help="executa pesquisa aprofundada analisando múltiplos sites")
     web_deep.add_argument("query", help="tema da pesquisa aprofundada")
     web_deep.add_argument("--sources", type=int, default=3, help="número de fontes a analisar")
+
+    # agent — uso autônomo supervisionado do desktop
+    agent_cmd = sub.add_parser(
+        "agent",
+        help="executa um objetivo no desktop passo a passo (modo agente supervisionado)",
+    )
+    agent_cmd.add_argument("objective", help="objetivo em linguagem natural (ex: 'abrir o Firefox e pesquisar X')")
+    agent_cmd.add_argument("--dry-run", action="store_true", help="mostra o plano sem tocar no desktop")
+    agent_cmd.add_argument("--max-steps", type=int, default=12, help="número máximo de passos (padrão 12)")
+    agent_cmd.add_argument("--max-seconds", type=float, default=180.0, help="tempo máximo em segundos (padrão 180)")
+    agent_cmd.add_argument("--local-only", action="store_true", help="usa apenas o modelo local (Ollama)")
+    agent_cmd.add_argument("--cloud", action="store_true", help="usa apenas o modelo em nuvem")
+    agent_cmd.add_argument("--yes", action="store_true", help="aprova automaticamente ações de risco (use com cuidado)")
+    agent_cmd.add_argument("--no-audit", action="store_true", help="não grava a execução na memória/auditoria")
+    agent_cmd.add_argument("--verbose", action="store_true", help="mostra a observação completa de cada passo")
+    agent_cmd.add_argument("--json", action="store_true", help="saída em JSON (para scriptar)")
 
     return parser
 
@@ -704,6 +724,87 @@ def cmd_web(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_agent(args: argparse.Namespace) -> int:
+    """Modo agente: planeja e executa um objetivo no desktop sob supervisão."""
+    mode = RouteMode.AUTO
+    if args.local_only:
+        mode = RouteMode.LOCAL
+    elif args.cloud:
+        mode = RouteMode.CLOUD
+
+    cfg = CopilotConfig.load()
+    router = AgentRouter(cfg)
+    route = router.route(args.objective, mode)
+    complexity, complexity_reason = classify_objective(args.objective)
+
+    if route.planner is None:
+        print(f"✗ Nenhum modelo disponível para o modo '{mode.value}': {route.reason}")
+        print("  Dica: configure uma chave (--cloud) ou suba o Ollama (ollama serve).")
+        return 1
+
+    registry = ToolRegistry()
+    memory = None if args.no_audit else MemoryManager()
+    loop = AgentLoop(
+        route.planner,
+        registry,
+        max_steps=args.max_steps,
+        max_seconds=args.max_seconds,
+        memory=memory,
+    )
+
+    if not args.json:
+        print(f"🎯 Objetivo: {args.objective}")
+        print(f"🧭 Roteamento: {route.mode} ({route.reason})")
+        if args.dry_run:
+            print("🧪 Modo simulação: nada será executado.\n")
+
+    def on_step(step) -> None:
+        if args.json:
+            return
+        icon = "✓" if step.ok else ("✗" if step.ok is False else "•")
+        flag = " [requer aprovação]" if step.requires_approval else ""
+        print(f"  {icon} {step.index + 1}. {step.tool}{flag}")
+        if args.verbose or not step.ok:
+            print(f"     {step.observation}")
+
+    def on_approval(step) -> bool:
+        if args.yes:
+            return True
+        level_desc = step.risk
+        try:
+            answer = input(
+                f"  ⚠️  '{step.tool}' é uma ação sensível ({level_desc}). Aprovar? [s/N] "
+            )
+        except EOFError:
+            return False  # sem terminal interativo: recusa é o padrão seguro
+        return answer.strip().lower() in ("s", "sim", "y", "yes")
+
+    try:
+        if args.dry_run:
+            result = loop.plan(args.objective, on_step=on_step)
+        else:
+            result = loop.run(args.objective, on_step=on_step, on_approval=on_approval)
+    except KeyboardInterrupt:
+        loop.abort()
+        print("\n⏹ Interrompido — sinal de parada enviado.")
+        return 130
+
+    if args.json:
+        print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+        return 0 if result.success else 1
+
+    print()
+    if result.final_answer:
+        print(f"💬 {result.final_answer}")
+    print(f"🏁 Parada: {result.stop_reason} — {result.stop_message}")
+    print(f"   Passos: {len(result.steps)} | Tempo: {result.elapsed:.1f}s | Modo: {route.mode}")
+    if result.error:
+        print(f"   Detalhe: {result.error}")
+    if memory is not None:
+        print(f"   Auditoria: run_id {result.run_id}")
+    return 0 if result.success else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -718,6 +819,7 @@ def main(argv: list[str] | None = None) -> int:
         "rag": cmd_rag,
         "setup": cmd_setup,
         "web": cmd_web,
+        "agent": cmd_agent,
     }
     return handlers[args.command](args)
 
