@@ -657,6 +657,13 @@ class ToolRegistry:
             if not allowed:
                 return {"ok": False, "error": f"Clique bloqueado pela cerca digital: {reason}", "blocked_by": "fence"}
 
+        if cx is not None and cy is not None:
+            try:
+                from ..ui.ghost_cursor import GhostCursorOverlay
+                GhostCursorOverlay.get_default().click_at(cx, cy, label=f"Clicando em '{element.name}'")
+            except Exception as exc:
+                logger.debug("Ghost cursor indisponível no _tool_click_element: %s", exc)
+
         if inspector is not None:
             try:
                 inspector.focus_element(element)
@@ -681,6 +688,14 @@ class ToolRegistry:
         element = DesktopInspector.find_element_by_uid(tree, uid)
         if element is None:
             return {"ok": False, "error": f"UID '{uid}' não existe mais."}
+
+        cx, cy = _center(element)
+        if cx is not None and cy is not None:
+            try:
+                from ..ui.ghost_cursor import GhostCursorOverlay
+                GhostCursorOverlay.get_default().type_at(cx, cy, text=text, label=f"Digitando em '{element.name}'")
+            except Exception as exc:
+                logger.debug("Ghost cursor indisponível no _tool_type_element: %s", exc)
 
         inspector = self.inspector
         if inspector is not None:

@@ -438,6 +438,17 @@ class ActionExecutor:
                 success=False,
                 message=f"Elemento interativo com rótulo '{target_label}' não localizado na tela.",
             )
+
+        # Visualização no Ghost Cursor
+        if getattr(target_el, "bbox", None) and len(target_el.bbox) == 4 and target_el.bbox[2] > 0:
+            cx = int(target_el.bbox[0] + target_el.bbox[2] / 2)
+            cy = int(target_el.bbox[1] + target_el.bbox[3] / 2)
+            try:
+                from ..ui.ghost_cursor import GhostCursorOverlay
+                GhostCursorOverlay.get_default().click_at(cx, cy, label=f"Clicando em '{target_el.name}'")
+            except Exception as exc:
+                logger.debug("Ghost cursor indisponível no executor: %s", exc)
+
         ok = self.inspector.do_action(target_el, 0)
         if ok:
             return ExecutionReport(
@@ -481,6 +492,16 @@ class ActionExecutor:
                 success=False,
                 message=f"Campo '{action.target}' não localizado na tela.",
             )
+
+        # Visualização no Ghost Cursor
+        if getattr(target_el, "bbox", None) and len(target_el.bbox) == 4 and target_el.bbox[2] > 0:
+            cx = int(target_el.bbox[0] + target_el.bbox[2] / 2)
+            cy = int(target_el.bbox[1] + target_el.bbox[3] / 2)
+            try:
+                from ..ui.ghost_cursor import GhostCursorOverlay
+                GhostCursorOverlay.get_default().type_at(cx, cy, text=text, label=f"Digitando em '{target_el.name}'")
+            except Exception as exc:
+                logger.debug("Ghost cursor indisponível no executor: %s", exc)
 
         # 1) Caminho semântico: insere via interface de texto do AT-SPI (sem uinput). Ideal no Wayland.
         ok, msg = self.inspector.text_insert(

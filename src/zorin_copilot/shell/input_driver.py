@@ -193,6 +193,7 @@ class VirtualInputDriver:
         y: int,
         button: str = "left",
         double: bool = False,
+        label: str = "",
     ) -> tuple[bool, str]:
         """Move o cursor e emite um clique físico em coordenadas absolutas após validar a cerca espacial."""
         # 1. Validação obrigatória da cerca de proteção
@@ -204,9 +205,18 @@ class VirtualInputDriver:
         if self.fence.is_emergency_stopped:
             return False, "Operação cancelada: Parada de emergência (Kill Switch) está ativa."
 
+        # 2. Notificação visual ao Ghost Cursor Overlay (se ativo)
+        try:
+            from ..ui.ghost_cursor import GhostCursorOverlay
+            GhostCursorOverlay.get_default().click_at(
+                x, y, button=button, double=double, label=label, wait_glide=True
+            )
+        except Exception as exc:
+            logger.debug("Ghost cursor não notificado no click: %s", exc)
+
         self._ensure_backend()
 
-        # 2. Execução via backend disponível
+        # 3. Execução via backend disponível
         btn_code = "0xC0" if button.lower() in ("left", "esquerdo") else "0xC1"
         if button.lower() in ("middle", "meio"):
             btn_code = "0xC4"
@@ -260,10 +270,11 @@ class VirtualInputDriver:
         rel_y: float,
         button: str = "left",
         double: bool = False,
+        label: str = "",
     ) -> tuple[bool, str]:
         """Converte coordenadas relativas da IA [0.0, 1.0] para o monitor ativo e clica."""
         abs_x, abs_y = self.fence.convert_relative_point(rel_x, rel_y)
-        return self.click(abs_x, abs_y, button=button, double=double)
+        return self.click(abs_x, abs_y, button=button, double=double, label=label)
 
     def type_text(self, text: str, press_enter: bool = False) -> tuple[bool, str]:
         """Digita texto simulando eventos de teclado de hardware na janela com foco ativo."""
@@ -272,6 +283,12 @@ class VirtualInputDriver:
 
         if self.fence.is_emergency_stopped:
             return False, "Operação cancelada: Parada de emergência (Kill Switch) está ativa."
+
+        try:
+            from ..ui.ghost_cursor import GhostCursorOverlay
+            GhostCursorOverlay.get_default().show_action(f"Digitando: {text[:25]}...")
+        except Exception as exc:
+            logger.debug("Ghost cursor não notificado no type_text: %s", exc)
 
         self._ensure_backend()
 

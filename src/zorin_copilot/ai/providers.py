@@ -342,10 +342,10 @@ class BaseLLMProvider(ABC):
                         if not c or str(c).strip().lower() in ("auto", "use_explanation") or len(str(c)) < 30:
                             params["content"] = explanation
                     elif action_type == ActionType.OPEN_DOCUMENT:
-                        # Se a IA alucinou /home/usuario/ ou /home/<outro>/, normaliza para ~/
+                        # Se a IA alucinou /home/usuario/ ou /home/<outro>/ genérico, normaliza para ~/
                         p_str = target.replace("\\", "/")
                         parts = p_str.split("/", 3)
-                        if len(parts) >= 4 and parts[1] == "home":
+                        if len(parts) >= 4 and parts[1] == "home" and parts[2] in ("usuario", "user", "username", "seu_usuario", "exemplo"):
                             target = f"~/{parts[3]}"
                     actions.append(
                         DesktopAction(

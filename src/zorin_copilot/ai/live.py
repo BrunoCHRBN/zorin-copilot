@@ -1845,6 +1845,17 @@ class GeminiLiveClient:
                         "success": False,
                         "message": f"Elemento com UID '{uid}' não encontrado na árvore atual. Chame get_ui_tree novamente.",
                     }
+
+                # Visualização no Ghost Cursor
+                if getattr(element, "bbox", None) and len(element.bbox) == 4 and element.bbox[2] > 0:
+                    cx = int(element.bbox[0] + element.bbox[2] / 2)
+                    cy = int(element.bbox[1] + element.bbox[3] / 2)
+                    try:
+                        from ..ui.ghost_cursor import GhostCursorOverlay
+                        GhostCursorOverlay.get_default().click_at(cx, cy, label=f"Clicando em '{element.name}'")
+                    except Exception as exc:
+                        logger.debug("Ghost cursor indisponível no live click_element: %s", exc)
+
                 ok = self.inspector.do_action(element, 0)
                 return {
                     "success": ok,
@@ -1858,10 +1869,8 @@ class GeminiLiveClient:
             elif name == "type_element":
                 uid = str(args.get("uid", "")).strip()
                 text = args.get("text", "")
-                if not uid:
-                    return {"success": False, "message": "UID do elemento é obrigatório."}
-                if not text:
-                    return {"success": False, "message": "Texto a digitar é obrigatório."}
+                if not uid or not text:
+                    return {"success": False, "message": "UID e texto são obrigatórios."}
                 app_name = args.get("app_name")
                 root = self.inspector.get_ui_tree(app_name)
                 if root is None:
@@ -1870,8 +1879,18 @@ class GeminiLiveClient:
                 if element is None:
                     return {
                         "success": False,
-                        "message": f"Elemento com UID '{uid}' não encontrado. Chame get_ui_tree novamente.",
+                        "message": f"Elemento com UID '{uid}' não encontrado na árvore atual.",
                     }
+
+                # Visualização no Ghost Cursor
+                if getattr(element, "bbox", None) and len(element.bbox) == 4 and element.bbox[2] > 0:
+                    cx = int(element.bbox[0] + element.bbox[2] / 2)
+                    cy = int(element.bbox[1] + element.bbox[3] / 2)
+                    try:
+                        from ..ui.ghost_cursor import GhostCursorOverlay
+                        GhostCursorOverlay.get_default().type_at(cx, cy, text=text, label=f"Digitando em '{element.name}'")
+                    except Exception as exc:
+                        logger.debug("Ghost cursor indisponível no live type_element: %s", exc)
                 # Campos de senha: nunca digitar sem confirmação explícita.
                 if element.role in ("password_text", "password") and not getattr(
                     self, "_bypass_risk_gate", False

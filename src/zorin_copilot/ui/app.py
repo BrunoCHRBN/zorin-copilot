@@ -142,6 +142,13 @@ class CopilotWindow(Adw.ApplicationWindow):
         # Cerca de Proteção Espacial (isolamento de monitores no Wayland)
         self.fence = ScreenFenceManager()
 
+        # Cursor Fantasma da IA (Overlay do Operador / Computer-Use)
+        try:
+            from .ghost_cursor import GhostCursorOverlay
+            GhostCursorOverlay.get_default().initialize(application)
+        except Exception as exc:
+            logger.debug("Ghost Cursor não inicializado na janela: %s", exc)
+
         # Campos usados por componentes; criados antes da construção dos widgets
         self.entry: Gtk.Entry = Gtk.Entry()
         self.answer_label: Gtk.Label = Gtk.Label()

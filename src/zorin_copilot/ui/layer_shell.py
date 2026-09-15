@@ -230,10 +230,33 @@ def reanchor(window: Any, corner: str, margin: int = 12) -> bool:
     return True
 
 
+def anchor_fullscreen(window: Any, layer: str = "overlay") -> bool:
+    """Ancora a janela nas quatro bordas (fullscreen overlay), sem teclado e sem exclusive zone.
+
+    Retorna False quando o layer-shell não está disponível.
+    """
+    if not is_supported():
+        return False
+    if not init(window):
+        return False
+
+    set_layer(window, layer)
+    set_keyboard_mode(window, "none")
+    set_exclusive_zone(window, 0)
+
+    for edge in _EDGES:
+        set_anchor(window, edge, True)
+        set_margin(window, edge, 0)
+
+    logger.info("Janela ancorada fullscreen via layer-shell (%s).", layer)
+    return True
+
+
 __all__ = [
     "NAMESPACE",
     "VERSION",
     "anchor_corner",
+    "anchor_fullscreen",
     "anchors_for_corner",
     "init",
     "is_supported",

@@ -998,3 +998,13 @@ window.voice-pill-window .voice-pill-avatar.pill-privacy-on {
     background: linear-gradient(135deg,
         alpha(@voice_pill_thinking_color, 0.32), alpha(@voice_pill_thinking_color, 0.22));
 }
+
+/* --- Overlay do Cursor Fantasma da IA (Ghost Cursor) --- */
+window.ghost-cursor-window,
+window.ghost-cursor-window.background,
+window.ghost-cursor-window > contents {
+    background: transparent !important;
+    background-color: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+}

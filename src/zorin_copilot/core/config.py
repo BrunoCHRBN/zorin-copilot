@@ -100,6 +100,11 @@ class CopilotConfig:
     pill_margin: int = 12  # folga das bordas quando ancorada via layer-shell (Wayland)
     pill_idle_timeout_sec: int = 8  # 0 = nunca esmaecer; fade ocioso para 30% de opacidade
 
+    # Cursor Fantasma do Agente (Ghost Cursor Overlay - Computer-Use / Operator)
+    ghost_cursor_enabled: bool = True
+    ghost_cursor_color: str = "#00d2ff"  # cor primária neon do cursor/ripple
+    ghost_cursor_anim_speed_ms: int = 250  # velocidade de deslocamento suave (ms)
+
     # Inicialização automática com o sistema (Autostart no boot/login)
     autostart_enabled: bool = False
 

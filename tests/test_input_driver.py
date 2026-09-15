@@ -44,6 +44,7 @@ def _com_backend(**kw):
         driver = VirtualInputDriver(**kw)
     driver.refresh_backends = lambda: True
     return driver
+    return driver
 
 
 class SemBackendFalhaTest(unittest.TestCase):
@@ -454,7 +455,8 @@ class WtypeNaoFazMouseTest(unittest.TestCase):
 
     def test_sem_backend_nenhum_mensagem_generica(self):
         d = _sem_backend()
-        _ok, msg = d.click(100, 200)
+        x, y = d.fence.convert_relative_point(0.5, 0.5)
+        _ok, msg = d.click(x, y)
         self.assertIn("nenhum backend de input disponível", msg)
 
     def test_simulacao_nao_finge_erro(self):
