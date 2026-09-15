@@ -65,6 +65,12 @@ def test_pedido_de_sintese_e_complexo():
     assert "síntese" in reason
 
 
+def test_nome_de_pasta_com_estudos_nao_escala_para_a_nuvem():
+    """'pasta de estudos' é tarefa local; só 'estudar' (infinitivo) é síntese."""
+    assert classify_objective("abrir a pasta de estudos")[0] == "simple"
+    assert classify_objective("estudar contabilidade gerencial")[0] == "complex"
+
+
 def test_muitos_verbos_tornam_o_objetivo_composto():
     kind, _ = classify_objective("abrir lista clicar digita")
     assert kind == "complex"

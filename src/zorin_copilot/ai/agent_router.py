@@ -83,7 +83,9 @@ SYNTHESIS_MARKERS = (
     "redig",
     "relatório",
     "relatorio",
-    "estud",
+    # "estudar" no infinitivo, e não o radical "estud": "abrir a pasta de
+    # estudos" é tarefa boba e não deve escalar para a nuvem por causa do nome.
+    "estudar",
     "sintetiz",
 )
 
