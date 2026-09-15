@@ -151,9 +151,13 @@ def build_parser() -> argparse.ArgumentParser:
     study_cap.add_argument("--app", help="nome do aplicativo alvo (padrão: app em foco)")
     study_cap.add_argument(
         "--strategy",
-        choices=["auto", "atspi", "clipboard"],
+        choices=["auto", "atspi", "clipboard", "ocr"],
         default="auto",
-        help="auto tenta AT-SPI e cai para a área de transferência (padrão)",
+        help="auto tenta AT-SPI, cai para a área de transferência e por fim para OCR da tela (padrão)",
+    )
+    study_cap.add_argument(
+        "--discipline",
+        help="nome da disciplina (ex: 'Contabilidade Gerencial'); vira a subpasta em ~/Documentos/Estudos",
     )
     study_cap.add_argument("--min-words", type=int, default=120, help="aviso de captura rala (padrão 120)")
     study_cap.add_argument("--out", help="arquivo .md de destino (padrão: ~/Documentos/Estudos/<titulo>.md)")
@@ -163,13 +167,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     study_deck = study_sub.add_parser("deck", help="gera flashcards a partir de um material capturado")
     study_deck.add_argument("--from", dest="source", required=True, help="arquivo .md capturado")
-    study_deck.add_argument("--discipline", default="Gestão Comercial", help="nome da disciplina")
+    study_deck.add_argument(
+        "--discipline",
+        default=None,
+        help="nome da disciplina (padrão: a que veio da captura, senão 'Gestão Comercial')",
+    )
     study_deck.add_argument("--max-cards", type=int, default=10, help="máximo de cards (padrão 10)")
     study_deck.add_argument("--local-only", action="store_true", help="usa apenas o modelo local")
     study_deck.add_argument("--cloud", action="store_true", help="usa apenas o modelo em nuvem")
     study_deck.add_argument("--json", action="store_true", help="saída em JSON")
 
-    study_sub.add_parser("decks", help="lista os baralhos e quantos cards estão vencidos")
+    study_decks = study_sub.add_parser("decks", help="lista os baralhos e quantos cards estão vencidos")
+    study_decks.add_argument("--discipline", help="mostra só os baralhos desta disciplina")
 
     study_rev = study_sub.add_parser("review", help="sessão de revisão espaçada (SM-2) no terminal")
     study_rev.add_argument("--deck", help="id do baralho (padrão: o com mais cards vencidos)")
@@ -889,7 +898,7 @@ def _study_capture(args: argparse.Namespace) -> int:
     from .core.study_capture import LessonCapture
 
     capture = LessonCapture(min_words=args.min_words)
-    result = capture.capture(args.app, strategy=args.strategy)
+    result = capture.capture(args.app, strategy=args.strategy, discipline=getattr(args, "discipline", None))
 
     if args.json:
         if not args.no_save and result.ok:
@@ -903,7 +912,8 @@ def _study_capture(args: argparse.Namespace) -> int:
         print("  Dicas, nesta ordem:")
         print("   1. deixe a aula visível e em foco (a janela não pode estar minimizada);")
         print("   2. selecione o texto com Ctrl+A, Ctrl+C e use --strategy clipboard;")
-        print("   3. rode `zorin-copilot-cli doctor` para ver se o AT-SPI2 está ativo.")
+        print("   3. se o player não expuser a árvore, use --strategy ocr (precisa de tesseract + pacote 'por');")
+        print("   4. rode `zorin-copilot-cli doctor` para ver se o AT-SPI2 está ativo.")
         return 1
 
     path = ""
@@ -931,7 +941,15 @@ def _study_capture(args: argparse.Namespace) -> int:
 
 def _study_deck(args: argparse.Namespace) -> int:
     """Gera flashcards a partir de um material capturado e salva o baralho."""
-    from .core.study_cards import DeckStore, StudyAI, generate_cards, merge_cards, new_deck, read_source
+    from .core.study_cards import (
+        DeckStore,
+        StudyAI,
+        generate_cards,
+        merge_cards,
+        new_deck,
+        read_discipline,
+        read_source,
+    )
 
     source = os.path.expanduser(args.source)
     if not os.path.exists(source):
@@ -939,6 +957,8 @@ def _study_deck(args: argparse.Namespace) -> int:
         print("  Dica: capture antes com `zorin-copilot-cli study capture`.")
         return 1
 
+    # A disciplina foi gravada na captura: o baralho herda dela em vez de chutar.
+    discipline = (args.discipline or "").strip() or read_discipline(source) or "Gestão Comercial"
     title, body = read_source(source)
     mode = "local" if args.local_only else ("cloud" if args.cloud else "auto")
     ai = StudyAI(mode=mode)
@@ -946,7 +966,7 @@ def _study_deck(args: argparse.Namespace) -> int:
         body,
         ai,
         title=title or os.path.basename(source),
-        discipline=args.discipline,
+        discipline=discipline,
         n_cards=args.max_cards,
     )
 
@@ -961,7 +981,7 @@ def _study_deck(args: argparse.Namespace) -> int:
         title or os.path.basename(source),
         cards,
         source=source,
-        discipline=args.discipline,
+        discipline=discipline,
         provider=ai.used,
     )
     existing = store.load(deck.id)
@@ -989,14 +1009,23 @@ def _study_decks(args: argparse.Namespace) -> int:
     from .core.study_cards import DeckStore, deck_stats
 
     decks = DeckStore().list()
+    filtro = (getattr(args, "discipline", "") or "").strip().lower()
+    if filtro:
+        decks = [d for d in decks if (d.discipline or "").strip().lower() == filtro]
     if not decks:
-        print("Nenhum baralho ainda. Gere um com `study deck --from <material.md>`.")
+        if filtro:
+            print(f"Nenhum baralho de '{args.discipline}'.")
+        else:
+            print("Nenhum baralho ainda. Gere um com `study deck --from <material.md>`.")
         return 0
 
-    print(f"{'ID':<12} {'VENCIDOS':>8} {'TOTAL':>6}  TÍTULO")
+    print(f"{'ID':<12} {'VENCIDOS':>8} {'TOTAL':>6}  {'DISCIPLINA':<24} TÍTULO")
     for deck in decks:
         stats = deck_stats(deck)
-        print(f"{deck.id:<12} {stats['due']:>8} {stats['total']:>6}  {deck.title}")
+        print(
+            f"{deck.id:<12} {stats['due']:>8} {stats['total']:>6}  "
+            f"{(deck.discipline or '-')[:24]:<24} {deck.title}"
+        )
     total_due = sum(deck_stats(d)["due"] for d in decks)
     print(f"\nTotal vencido agora: {total_due}")
     return 0

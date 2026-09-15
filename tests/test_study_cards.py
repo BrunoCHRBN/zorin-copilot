@@ -32,6 +32,7 @@ from zorin_copilot.core.study_cards import (
     merge_cards,
     new_deck,
     parse_cards,
+    read_discipline,
     read_source,
 )
 
@@ -516,3 +517,68 @@ def test_parser_de_busca_academica():
     args = cli.build_parser().parse_args(["search", "mercado", "--academic", "--source", "sebrae"])
     assert args.academic is True
     assert args.source == "sebrae"
+
+
+# --------------------------------------------------------------------------- #
+# A2: disciplina herdada da captura
+# --------------------------------------------------------------------------- #
+
+
+def material_com_disciplina(tmp_path, disciplina: str | None):
+    path = tmp_path / "aula7.md"
+    meta = f"- Disciplina: {disciplina}\n" if disciplina else ""
+    path.write_text(
+        f"# Contabilidade Gerencial\n\n- Palavras: 200\n{meta}\n---\n\n" + material_longo(),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_read_discipline_le_o_cabecalho(tmp_path):
+    assert read_discipline(material_com_disciplina(tmp_path, "Marketing")) == "Marketing"
+
+
+def test_read_discipline_sem_metadado_devolve_vazio(tmp_path):
+    assert read_discipline(material_com_disciplina(tmp_path, None)) == ""
+
+
+def test_baralho_herda_a_disciplina_da_captura(monkeypatch, capsys, tmp_path):
+    module = importlib.import_module("zorin_copilot.core.study_cards")
+    monkeypatch.setattr(module, "DeckStore", lambda *a, **k: DeckStore(directory=str(tmp_path)))
+    monkeypatch.setattr(module, "StudyAI", StubAI)
+
+    material = material_com_disciplina(tmp_path, "Contabilidade Gerencial")
+    code = cli.main(["study", "deck", "--from", str(material), "--json"])
+    deck = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert deck["discipline"] == "Contabilidade Gerencial"
+
+
+def test_disciplina_explicita_ganha_da_captura(monkeypatch, capsys, tmp_path):
+    module = importlib.import_module("zorin_copilot.core.study_cards")
+    monkeypatch.setattr(module, "DeckStore", lambda *a, **k: DeckStore(directory=str(tmp_path)))
+    monkeypatch.setattr(module, "StudyAI", StubAI)
+
+    material = material_com_disciplina(tmp_path, "Contabilidade Gerencial")
+    code = cli.main(["study", "deck", "--from", str(material), "--discipline", "Marketing", "--json"])
+    deck = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert deck["discipline"] == "Marketing"
+
+
+def test_decks_filtra_por_disciplina(monkeypatch, capsys, tmp_path):
+    store = DeckStore(directory=str(tmp_path))
+    store.save(new_deck("Aula de Marketing", [make_card("Pergunta?", "Resposta")], discipline="Marketing"))
+    store.save(new_deck("Aula de Custos", [make_card("Pergunta?", "Resposta")], discipline="Contabilidade"))
+
+    module = importlib.import_module("zorin_copilot.core.study_cards")
+    monkeypatch.setattr(module, "DeckStore", lambda *a, **k: store)
+
+    code = cli.main(["study", "decks", "--discipline", "Marketing"])
+    out = capsys.readouterr().out
+
+    assert code == 0
+    assert "Marketing" in out
+    assert "Contabilidade" not in out

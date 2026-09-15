@@ -570,6 +570,36 @@ class ToolRegistry:
             )
         )
 
+        # Mutação, mas de baixo risco: grava um .md NOVO em ~/Documentos/Estudos e
+        # nunca sobrescreve (o arquivo existente vira "-2", "-3"). Por isso não
+        # entra na lista de ferramentas que pedem confirmação — pedir "posso salvar
+        # sua aula?" a cada captura transformaria o estudo numa fila de perguntas.
+        self.mutate(
+            ToolSpec(
+                name="capture_lesson",
+                description=(
+                    "Captura o conteúdo de uma aula ou material VISÍVEL NA TELA (AVA, player SCORM, PDF) "
+                    "lendo a tela, não o HTML. Use em vez de `read_web_page` sempre que a página for uma "
+                    "SPA que devolve só o shell — o AVA devolve 24 palavras por HTTP e o texto inteiro "
+                    "na tela. Salva em Markdown e devolve o caminho."
+                ),
+                parameters=_param(
+                    {
+                        "app": _str("Aplicativo alvo (padrão: o app em foco)."),
+                        "strategy": _str(
+                            "Como ler: 'auto' (AT-SPI, depois área de transferência, depois OCR), "
+                            "'atspi', 'clipboard' ou 'ocr'."
+                        ),
+                        "filename": _str("Nome do arquivo .md (opcional; derivado do título se vazio)."),
+                        "directory": _str("Pasta de destino (padrão: ~/Documentos/Estudos)."),
+                        "min_words": _num("Abaixo disso a captura é considerada rala (padrão 120)."),
+                        "save": _bool("Gravar em arquivo (padrão true)."),
+                    }
+                ),
+                handler=self._tool_capture_lesson,
+            )
+        )
+
         self.mutate(
             ToolSpec(
                 name="undo_last",
@@ -1058,6 +1088,52 @@ class ToolRegistry:
         except OSError as exc:
             return {"ok": False, "error": f"Falha ao salvar o screenshot: {exc}"}
         return {"ok": True, "path": path, "bytes": len(data), "message": message}
+
+    def _tool_capture_lesson(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Lê o material renderizado na tela — o caminho certo para SPA/SCORM."""
+        try:
+            from ..core.study_capture import LessonCapture
+        except Exception as exc:
+            return {"ok": False, "error": f"Captura de aula indisponível: {exc}"}
+
+        raw_min = args.get("min_words")
+        try:
+            min_words = int(raw_min) if raw_min not in (None, "") else 120
+        except (TypeError, ValueError):
+            min_words = 120
+
+        strategy = str(args.get("strategy") or "auto").strip().lower()
+        capture = LessonCapture(min_words=min_words)
+
+        try:
+            result = capture.capture(str(args.get("app") or "").strip() or None, strategy=strategy)
+        except Exception as exc:
+            return {"ok": False, "error": f"Falha ao capturar a tela: {exc}"}
+
+        payload: dict[str, Any] = {
+            "strategy": result.strategy,
+            "title": result.title,
+            "word_count": result.word_count,
+            "app": result.app,
+            "warnings": list(result.warnings),
+            "preview": result.text[:400],
+        }
+        if not result.ok:
+            payload["error"] = result.warnings[0] if result.warnings else "Nada capturado na tela."
+            return payload | {"ok": False}
+
+        if args.get("save") is False:
+            return payload | {"ok": True, "saved": False, "text": result.text}
+
+        try:
+            path = capture.save(
+                result,
+                filename=str(args.get("filename") or "").strip() or None,
+                directory=str(args.get("directory") or "").strip() or None,
+            )
+        except OSError as exc:
+            return payload | {"ok": False, "error": f"Falha ao salvar o material: {exc}"}
+        return payload | {"ok": True, "path": path, "saved": True}
 
     def _tool_academic_search(self, args: dict[str, Any]) -> dict[str, Any]:
         query = str(args.get("query") or "").strip()

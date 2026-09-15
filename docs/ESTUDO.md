@@ -53,10 +53,32 @@ sobrescritos — recebem sufixo `-2`, `-3`.
 |---|---|---|
 | `atspi` (padrão) | Player expõe acessibilidade | Caminha a árvore (18 níveis, 80 filhos/nó), coleta texto de `paragraph`, `heading`, `list_item`, `link`, `table_cell`… e **ignora** menu, barra de ferramentas, botões, campo de endereço e barra de status |
 | `clipboard` | Player não expõe AT-SPI | Lê o que você copiou com Ctrl+A, Ctrl+C |
-| `auto` | padrão | Tenta AT-SPI; se vier ralo (menos de 120 palavras), tenta a área de transferência e fica com o que tiver mais conteúdo |
+| `ocr` | Nem AT-SPI nem clipboard resolvem | Varre a tela por OCR espacial (Tesseract) e reconstrói as linhas em ordem de leitura. Exige `tesseract` com o pacote `por`; sem eles avisa, não quebra |
+| `auto` | padrão | Tenta AT-SPI; se vier ralo (menos de 120 palavras), tenta a área de transferência; se ainda estiver ralo, tenta OCR. Fica com o que tiver mais conteúdo |
+
+O `auto` é intencionalmente preguiçoso com o OCR: ele lê pixels, então é mais lento e
+mais sujo que a árvore de acessibilidade. Só entra quando as duas primeiras falham.
 
 Há também um **modo grosso** automático: se a caminhada granular não achar texto
 (player que só expõe o conteúdo no nó do documento), o extrator volta e coleta dali.
+
+### Organização por disciplina
+
+```bash
+zorin-copilot-cli study capture --discipline "Contabilidade Gerencial"
+```
+
+O material vai para `~/Documentos/Estudos/contabilidade-gerencial/` e o cabeçalho do
+Markdown ganha `- Disciplina: ...`. Na hora de gerar o baralho, a disciplina é herdada
+do arquivo — o prompt já fala da matéria certa sem você redigitar. Dá para trocar com
+`study deck --discipline Marketing` e filtrar com `study decks --discipline Marketing`.
+
+### O agente também sabe capturar
+
+O modo agente tem a ferramenta `capture_lesson`, que faz exatamente isso: lê a tela em
+vez de baixar o HTML. É a resposta para o AVA — `read_web_page` (e o
+`WebPageReader`) baixam a URL de novo e recebem o shell de 24 palavras da SPA, enquanto
+a tela tem o conteúdo renderizado.
 
 ### Fechando o ciclo
 

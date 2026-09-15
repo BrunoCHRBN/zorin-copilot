@@ -15,6 +15,7 @@ import pytest
 from zorin_copilot import cli
 from zorin_copilot.core.a11y import UIElement
 from zorin_copilot.core.study_capture import (
+    ocr_lines,
     CaptureResult,
     LessonCapture,
     clean_lines,
@@ -451,3 +452,158 @@ def test_parser_do_study_capture():
     assert args.app == "Firefox"
     assert args.strategy == "clipboard"
     assert args.min_words == 50
+
+
+# --------------------------------------------------------------------------- #
+# OCR: terceira via, para quando o player não expõe a árvore
+# --------------------------------------------------------------------------- #
+
+
+class FakeVisualElement:
+    """Elemento com a cara do `ui_grounding.VisualElement`."""
+
+    def __init__(self, text: str, x: int, y: int, width: int = 200, height: int = 20, is_phrase: bool = True):
+        self.text = text
+        self.bbox = (x, y, width, height)
+        self.x = x + width // 2
+        self.y = y + height // 2
+        self.confidence = 92.0
+        self.is_phrase = is_phrase
+
+
+class FakeOCR:
+    """Serviço de OCR dublê: devolve o que mandarmos (ou nada)."""
+
+    def __init__(self, elements=None) -> None:
+        self.elements = elements if elements is not None else []
+        self.chamadas = 0
+
+    def scan_screen(self, fence=None):
+        self.chamadas += 1
+        return list(self.elements)
+
+
+def elementos_de_tela() -> list[FakeVisualElement]:
+    """Duas linhas de aula + palavras soltas, fora de ordem de leitura."""
+    return [
+        FakeVisualElement("Custeio variável", 40, 200, 300, 20),  # linha 2 (topo)
+        FakeVisualElement("Contabilidade Gerencial", 40, 100, 400, 24),  # linha 1
+        FakeVisualElement("Contabilidade", 40, 100, 120, 24, is_phrase=False),  # dentro da frase
+        FakeVisualElement("Gerencial", 170, 100, 100, 24, is_phrase=False),  # dentro da frase
+        FakeVisualElement("Margem de contribuição", 40, 300, 320, 20),
+        FakeVisualElement("2024", 600, 300, 60, 20, is_phrase=False),  # sozinha, mas só número
+    ]
+
+
+def test_ocr_lines_descarta_palavra_contida_em_frase():
+    linhas = ocr_lines(elementos_de_tela())
+    # "Contabilidade" e "Gerencial" já estão na frase; não podem reaparecer.
+    assert linhas == ["Contabilidade Gerencial", "Custeio variável", "Margem de contribuição"]
+
+
+def test_ocr_lines_ordena_por_posicao_de_leitura():
+    fora_de_ordem = [
+        FakeVisualElement("terceira", 40, 300),
+        FakeVisualElement("primeira", 40, 100),
+        FakeVisualElement("segunda", 40, 200),
+    ]
+    assert ocr_lines(fora_de_ordem) == ["primeira", "segunda", "terceira"]
+
+
+def test_estrategia_ocr_captura_texto_da_tela():
+    capture = LessonCapture(
+        inspector=None,
+        clipboard=FakeClipboard(""),
+        ocr=FakeOCR(elementos_de_tela()),
+        min_words=3,
+    )
+    result = capture.capture("Firefox", strategy="ocr")
+
+    assert result.ok is True
+    assert result.strategy == "ocr"
+    assert result.word_count == 7
+    assert "Contabilidade Gerencial" in result.text
+
+
+def test_ocr_sem_tesseract_avisa_em_vez_de_quebrar():
+    capture = LessonCapture(inspector=None, clipboard=FakeClipboard(""), ocr=FakeOCR([]))
+    result = capture.capture("Firefox", strategy="ocr")
+
+    assert result.ok is False
+    assert any("tesseract" in aviso for aviso in result.warnings)
+
+
+def test_auto_so_chama_ocr_quando_as_outras_ficam_ralas():
+    arvore = FakeNode("application", children=[FakeNode("paragraph", text="Só chrome da janela.")])
+    ocr = FakeOCR(elementos_de_tela())
+    capture = LessonCapture(
+        inspector=FakeInspector(arvore),
+        clipboard=FakeClipboard(""),
+        ocr=ocr,
+        min_words=120,
+    )
+    result = capture.capture("Firefox")
+
+    assert ocr.chamadas == 1  # AT-SPI devolveu pouco -> OCR entra
+    assert result.strategy == "ocr"  # e é o melhor resultado
+    assert result.word_count == 7
+
+
+def test_auto_nao_gasta_ocr_quando_a_arvore_ja_basta():
+    ocr = FakeOCR(elementos_de_tela())
+    capture = LessonCapture(
+        inspector=FakeInspector(arvore_de_aula()),
+        clipboard=FakeClipboard(""),
+        ocr=ocr,
+        min_words=5,
+    )
+    result = capture.capture("Firefox")
+
+    assert ocr.chamadas == 0  # árvore resolveu: nada de OCR
+    assert result.strategy == "atspi"
+
+
+def test_cli_aceita_strategy_ocr():
+    args = cli.build_parser().parse_args(["study", "capture", "--strategy", "ocr"])
+    assert args.strategy == "ocr"
+
+
+# --------------------------------------------------------------------------- #
+# A2: organização por disciplina
+# --------------------------------------------------------------------------- #
+
+
+def test_captura_com_disciplina_vai_para_subpasta(tmp_path):
+    capture = LessonCapture(
+        inspector=FakeInspector(arvore_de_aula()),
+        clipboard=FakeClipboard(""),
+        ocr=FakeOCR([]),
+        min_words=5,
+        documents_dir=str(tmp_path),
+    )
+    result = capture.capture("Firefox", discipline="Contabilidade Gerencial")
+    path = capture.save(result)
+
+    assert result.discipline == "Contabilidade Gerencial"
+    assert os.path.basename(os.path.dirname(path)) == "contabilidade-gerencial"
+    assert os.path.exists(path)
+
+
+def test_sem_disciplina_fica_na_raiz(tmp_path):
+    capture = LessonCapture(
+        inspector=FakeInspector(arvore_de_aula()),
+        clipboard=FakeClipboard(""),
+        documents_dir=str(tmp_path),
+    )
+    result = capture.capture("Firefox")
+    path = capture.save(result)
+
+    assert result.discipline == ""
+    assert os.path.dirname(path) == str(tmp_path)
+
+
+def test_metadados_registram_a_disciplina():
+    result = CaptureResult(ok=True, title="Aula 3", text="corpo", word_count=1, discipline="Marketing")
+    markdown = render_markdown(result)
+
+    assert "- Disciplina: Marketing" in markdown

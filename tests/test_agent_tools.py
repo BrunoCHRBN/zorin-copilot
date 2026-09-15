@@ -449,3 +449,103 @@ def test_open_document_executa(monkeypatch):
     res = registry.call("open_document", {"path": "/tmp/tcc.docx"})
     assert res["ok"] is True
     assert "aberto com sucesso" in res["message"]
+
+
+# --------------------------------------------------------------------------- #
+# capture_lesson: ler a tela em vez de baixar o shell da SPA
+# --------------------------------------------------------------------------- #
+
+
+class FakeLessonCapture:
+    """Captura dublê: devolve um resultado pronto e anota o que foi pedido."""
+
+    criados: list["FakeLessonCapture"] = []
+
+    def __init__(self, min_words: int = 120, documents_dir: str | None = None, **kwargs) -> None:
+        self.min_words = min_words
+        self.chamadas: list[tuple[str | None, str]] = []
+        self.saves: list[dict] = []
+        self.grupo = kwargs.pop("grupo", None)
+        FakeLessonCapture.criados.append(self)
+
+    def capture(self, app_name=None, strategy="auto"):
+        self.chamadas.append((app_name, strategy))
+        texto = self.texto()
+        return capture_result(
+            ok=bool(texto),
+            strategy="atspi",
+            text=texto,
+            app=app_name or "Firefox",
+            word_count=len(texto.split()),
+        )
+
+    def texto(self) -> str:
+        return getattr(self, "_texto", "A contabilidade gerencial apoia decisões de preço. " * 6)
+
+    def save(self, result, filename=None, directory=None):
+        self.saves.append({"filename": filename, "directory": directory})
+        return f"{directory or '/tmp/estudos'}/{filename or 'aula.md'}"
+
+
+def capture_result(**kwargs) -> object:
+    from zorin_copilot.core.study_capture import CaptureResult
+
+    return CaptureResult(**kwargs)
+
+
+@pytest.fixture
+def captura_duble(monkeypatch):
+    FakeLessonCapture.criados.clear()
+    monkeypatch.setattr(
+        "zorin_copilot.core.study_capture.LessonCapture", FakeLessonCapture
+    )
+    return FakeLessonCapture
+
+
+def test_capture_lesson_esta_no_registro():
+    registry = ToolRegistry()
+    assert "capture_lesson" in registry.names()
+    spec = registry.spec("capture_lesson")
+    assert "read_web_page" in spec.description  # a dica que evita o shell da SPA
+
+
+def test_capture_lesson_salva_e_devolve_caminho(captura_duble):
+    registry = ToolRegistry()
+    result = registry.call("capture_lesson", {"app": "Firefox", "directory": "/tmp/estudos"})
+
+    assert result["ok"] is True
+    assert result["path"].endswith("aula.md")
+    assert result["word_count"] > 0
+    assert captura_duble.criados[0].chamadas == [("Firefox", "auto")]
+
+
+def test_capture_lesson_dry_run_nao_toca_na_tela(captura_duble):
+    registry = ToolRegistry().for_dry_run()
+    result = registry.call("capture_lesson", {"app": "Firefox"})
+
+    assert result["dry_run"] is True
+    assert captura_duble.criados == []  # nem instanciou: é mutação
+
+
+def test_capture_lesson_sem_conteudo_devolve_erro(captura_duble, monkeypatch):
+    monkeypatch.setattr(FakeLessonCapture, "texto", lambda self: "")
+    result = ToolRegistry().call("capture_lesson", {})
+
+    assert result["ok"] is False
+    assert "error" in result
+
+
+def test_capture_lesson_pode_nao_salvar(captura_duble):
+    result = ToolRegistry().call("capture_lesson", {"save": False})
+
+    assert result["ok"] is True
+    assert result["saved"] is False
+    assert "text" in result
+    assert captura_duble.criados[0].saves == []
+
+
+def test_capture_lesson_nao_pede_confirmacao():
+    registry = ToolRegistry()
+    level, _motivo = registry.classify("capture_lesson", {})
+    assert level == RiskLevel.SAFE
+    assert registry.requires_approval("capture_lesson", {}) is False

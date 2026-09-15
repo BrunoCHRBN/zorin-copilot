@@ -117,6 +117,9 @@ COARSE_COLLECT = {"document_web", "document_frame", "embedded", "internal_frame"
 #: Texto de um nó com mais de ~20 kB é sinal de que pegamos a página inteira de uma vez.
 MAX_NODE_CHARS = 20_000
 
+#: Estratégias aceitas por `LessonCapture.capture`.
+STRATEGIES = ("auto", "atspi", "clipboard", "ocr")
+
 
 @dataclass
 class CaptureResult:
@@ -130,6 +133,7 @@ class CaptureResult:
     url: str = ""
     word_count: int = 0
     path: str = ""
+    discipline: str = ""
     warnings: list[str] = field(default_factory=list)
     captured_at: str = ""
 
@@ -142,6 +146,7 @@ class CaptureResult:
             "app": self.app,
             "url": self.url,
             "path": self.path,
+            "discipline": self.discipline,
             "warnings": list(self.warnings),
             "captured_at": self.captured_at,
             "preview": self.text[:400],
@@ -155,12 +160,14 @@ class LessonCapture:
         self,
         inspector: Any | None = None,
         clipboard: Any | None = None,
+        ocr: Any | None = None,
         *,
         min_words: int = DEFAULT_MIN_WORDS,
         documents_dir: str | None = None,
     ) -> None:
         self._inspector = inspector
         self._clipboard = clipboard
+        self._ocr = ocr
         self.min_words = max(0, int(min_words))
         self.documents_dir = documents_dir or os.path.expanduser("~/Documentos/Estudos")
 
@@ -190,17 +197,44 @@ class LessonCapture:
                 return None
         return self._clipboard
 
+    @property
+    def ocr(self) -> Any | None:
+        """Serviço de OCR espacial (grounding visual) — terceira via quando a árvore é cega."""
+        if self._ocr is None:
+            try:
+                from .ui_grounding import UIGroundingService
+
+                self._ocr = UIGroundingService
+            except Exception as exc:
+                logger.debug("OCR indisponível: %s", exc)
+                return None
+        return self._ocr
+
     # -- captura ------------------------------------------------------------ #
 
-    def capture(self, app_name: str | None = None, strategy: str = "auto") -> CaptureResult:
-        """Captura o conteúdo visível. `strategy`: auto | atspi | clipboard."""
+    def capture(
+        self,
+        app_name: str | None = None,
+        strategy: str = "auto",
+        discipline: str | None = None,
+    ) -> CaptureResult:
+        """Captura o conteúdo visível. `strategy`: auto | atspi | clipboard | ocr.
+
+        A ordem do `auto` é por custo e qualidade: a árvore de acessibilidade é
+        instantânea e limpa; a área de transferência depende de o aluno selecionar;
+        o OCR lê pixels, então é mais lento e sujo — entra só quando os dois
+        primeiros ficam ralos.
+        """
         strategy = (strategy or "auto").strip().lower()
+        if strategy not in STRATEGIES:
+            strategy = "auto"
         warnings: list[str] = []
         app = app_name or (self.inspector.get_focused_app() if self.inspector else "") or ""
         url = self._active_url()
 
         atspi_result: CaptureResult | None = None
         clipboard_result: CaptureResult | None = None
+        ocr_result: CaptureResult | None = None
 
         if strategy in ("auto", "atspi"):
             atspi_result = self._capture_atspi(app, url)
@@ -215,23 +249,43 @@ class LessonCapture:
                 if not clipboard_result.ok and (atspi_result is None or not atspi_result.ok):
                     warnings.append("Área de transferência vazia ou sem texto.")
 
+        if strategy in ("auto", "ocr"):
+            so_far = self._best(atspi_result, clipboard_result)
+            if strategy == "ocr" or so_far is None or so_far.word_count < self.min_words:
+                ocr_result = self._capture_ocr(app, url)
+                if not ocr_result.ok and (so_far is None or not so_far.ok):
+                    warnings.append(ocr_result.warnings[0] if ocr_result.warnings else "OCR sem texto.")
+
         if strategy == "atspi":
-            return atspi_result or self._empty(app, url, "AT-SPI não disponível.")
+            return self._with_discipline(
+                atspi_result or self._empty(app, url, "AT-SPI não disponível."), discipline
+            )
         if strategy == "clipboard":
-            return clipboard_result or self._empty(app, url, "Área de transferência não disponível.")
+            return self._with_discipline(
+                clipboard_result or self._empty(app, url, "Área de transferência não disponível."), discipline
+            )
+        if strategy == "ocr":
+            return self._with_discipline(ocr_result or self._empty(app, url, "OCR não disponível."), discipline)
 
         # auto: fica com o que tiver mais conteúdo — e avisa quando estiver ralo.
-        best = self._best(atspi_result, clipboard_result)
+        best = self._best(atspi_result, clipboard_result, ocr_result)
         if best is None:
             return self._empty(app, url, "Nenhuma estratégia de captura disponível.")
+        best.discipline = (discipline or "").strip()
         best.warnings.extend(warnings)
         if best.word_count < self.min_words:
             best.warnings.append(
                 f"Captura rala ({best.word_count} palavras, mínimo {self.min_words}): "
                 "provavelmente pegamos só o chrome da janela. "
-                "Tente selecionar o texto da aula com Ctrl+A, Ctrl+C e repetir com --strategy clipboard."
+                "Tente selecionar o texto da aula com Ctrl+A, Ctrl+C e repetir com --strategy clipboard; "
+                "se o player não expuser a árvore de acessibilidade, --strategy ocr lê a tela por pixels."
             )
         return best
+
+    @staticmethod
+    def _with_discipline(result: CaptureResult, discipline: str | None) -> CaptureResult:
+        result.discipline = (discipline or "").strip()
+        return result
 
     def _best(self, *results: CaptureResult | None) -> CaptureResult | None:
         candidates = [r for r in results if r is not None and r.ok]
@@ -295,6 +349,39 @@ class LessonCapture:
             captured_at=datetime.now().strftime("%Y-%m-%d %H:%M"),
         )
 
+    def _capture_ocr(self, app: str, url: str) -> CaptureResult:
+        """Lê a tela por pixels — a saída para players que não expõem a árvore.
+
+        Exige `tesseract` (com o pacote de português) instalado; sem ele o
+        serviço devolve lista vazia e a captura apenas avisa, não quebra.
+        """
+        service = self.ocr
+        if service is None:
+            return self._empty(app, url, "OCR indisponível (módulo de grounding visual não carregou).")
+        try:
+            elements = service.scan_screen(fence=None)
+        except Exception as exc:
+            return self._empty(app, url, f"Falha ao varrer a tela: {exc}")
+        if not elements:
+            return self._empty(
+                app,
+                url,
+                "OCR não encontrou texto na tela (verifique se o tesseract e o pacote 'por' estão instalados).",
+            )
+
+        lines = clean_lines(ocr_lines(elements))
+        text = "\n\n".join(lines)
+        return CaptureResult(
+            ok=bool(lines),
+            strategy="ocr",
+            title=self._title_for(app, lines, url),
+            text=text,
+            app=app,
+            url=url,
+            word_count=count_words(text),
+            captured_at=datetime.now().strftime("%Y-%m-%d %H:%M"),
+        )
+
     def _title_for(self, app: str, lines: Sequence[str], url: str) -> str:
         for line in lines[:5]:
             if 0 < len(line) <= 120 and count_words(line) <= 14:
@@ -329,8 +416,15 @@ class LessonCapture:
     # -- persistência -------------------------------------------------------- #
 
     def save(self, result: CaptureResult, filename: str | None = None, directory: str | None = None) -> str:
-        """Grava a captura em Markdown e devolve o caminho (sem sobrescrever)."""
-        target_dir = os.path.expanduser(directory or self.documents_dir)
+        """Grava a captura em Markdown e devolve o caminho (sem sobrescrever).
+
+        Com disciplina, o material vai para `<documentos>/<disciplina>/` — é o que
+        mantém Contabilidade separada de Marketing sem o aluno pensar em pastas.
+        """
+        base = os.path.expanduser(directory) if directory else self.documents_dir
+        if not directory and (result.discipline or "").strip():
+            base = os.path.join(base, slugify(result.discipline) or "")
+        target_dir = os.path.expanduser(base)
         os.makedirs(target_dir, exist_ok=True)
 
         name = (filename or "").strip() or f"{slugify(result.title) or 'material'}.md"
@@ -430,6 +524,55 @@ def _children_of(node: Any, max_children: int) -> list[Any]:
     return list(getattr(node, "children", []) or [])[:max_children]
 
 
+def ocr_lines(elements: Sequence[Any]) -> list[str]:
+    """Converte elementos de OCR em linhas de leitura.
+
+    O `parse_tesseract_tsv` devolve palavras *e* frases (agrupamento da linha
+    inteira). Usar os dois duplicaria tudo, então ficamos com as frases e só
+    aproveitamos as palavras que sobraram sozinhas na linha — é o que preserva
+    títulos curtos e listas de um item.
+    """
+    phrases: list[Any] = []
+    words: list[Any] = []
+    for element in elements or []:
+        (phrases if getattr(element, "is_phrase", False) else words).append(element)
+
+    kept: list[Any] = list(phrases)
+    for word in words:
+        if not _inside_any(word, phrases):
+            kept.append(word)
+
+    # Mesma limpeza de `extract_lines`: ruído de interface (só números, CSS
+    # vazado) e repetições consecutivas saem aqui, não no chamador.
+    return clean_lines(element.text for element in _read_order(kept))
+
+
+def _inside_any(word: Any, phrases: Sequence[Any]) -> bool:
+    """Uma palavra já pertence a uma frase se o centro dela cai dentro do retângulo."""
+    wx = getattr(word, "x", 0) or 0
+    wy = getattr(word, "y", 0) or 0
+    for phrase in phrases:
+        box = getattr(phrase, "bbox", None) or ()
+        if len(box) != 4:
+            continue
+        px, py, width, height = box
+        if px <= wx <= px + width and py <= wy <= py + height:
+            return True
+    return False
+
+
+def _read_order(elements: Sequence[Any]) -> list[Any]:
+    """Ordem de leitura: agrupa por linha (com tolerância da altura) e, dentro dela, da esquerda para a direita."""
+    heights = sorted(
+        (getattr(e, "bbox", None) or (0, 0, 0, 0))[3]
+        for e in elements
+        if (getattr(e, "bbox", None) or (0, 0, 0, 0))[3] > 0
+    )
+    tolerance = heights[len(heights) // 2] if heights else 12
+    tolerance = max(6, int(tolerance))
+    return sorted(elements, key=lambda e: (round((getattr(e, "y", 0) or 0) / tolerance), getattr(e, "x", 0) or 0))
+
+
 def _text_of(node: Any) -> str:
     """Texto de um nó: primeiro a interface Text, depois o nome acessível."""
     text_iface = None
@@ -514,6 +657,8 @@ def render_markdown(result: CaptureResult) -> str:
         f"- Origem: {result.app or 'desconhecida'} ({result.strategy or 'n/d'})",
         f"- Palavras: {result.word_count}",
     ]
+    if result.discipline:
+        header.append(f"- Disciplina: {result.discipline}")
     if result.url:
         header.append(f"- URL: {result.url}")
     for warning in result.warnings:

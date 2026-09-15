@@ -558,6 +558,25 @@ class StudyAI:
         )
 
 
+def read_discipline(path: str) -> str:
+    """Disciplina gravada pela captura (linha `- Disciplina: X` do cabeçalho).
+
+    Serve para o baralho herdar a disciplina do material sem o aluno redigitar —
+    e para o prompt de geração já falar da matéria certa.
+    """
+    try:
+        with open(os.path.expanduser(path), encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                stripped = line.strip()
+                if stripped.lower().startswith("- disciplina:"):
+                    return stripped.split(":", 1)[1].strip()
+                if stripped and not stripped.startswith(("#", "-")):
+                    break  # acabou o bloco de metadados
+    except OSError:
+        return ""
+    return ""
+
+
 def read_source(path: str) -> tuple[str, str]:
     """Lê um .md/.txt capturado. Devolve (titulo, texto sem o cabeçalho de metadados)."""
     with open(os.path.expanduser(path), encoding="utf-8", errors="replace") as handle:
