@@ -54,6 +54,79 @@ class ActionGuaranteeTest(unittest.TestCase):
         write_act = next((a for a in plan.actions if a.action_type == ActionType.WRITE_FILE), None)
         self.assertIsNotNone(write_act)
 
+    def test_ajuda_inicio_introducao_projeto_integrador_gera_acoes_completas(self):
+        """Solicitação exata do usuário 'me ajude com o inicio de uma introducao de um projeto integrador' gera Introducao_Projeto_Integrador.docx."""
+        mock_reply = "Aqui está a proposta completa para o seu Projeto Integrador no Senac."
+        self.engine.llm_provider.chat = MagicMock(return_value=(mock_reply, []))
+
+        plan = self.engine.parse("me ajude com o inicio de uma introducao de um projeto integrador")
+
+        # Verifica ação WRITE_FILE para Projeto Integrador
+        write_act = next((a for a in plan.actions if a.action_type == ActionType.WRITE_FILE), None)
+        self.assertIsNotNone(write_act, "Deveria ter gerado WRITE_FILE")
+        self.assertEqual(write_act.target, "Introducao_Projeto_Integrador.docx")
+        self.assertIn("Gestao_Comercial/TCC_Artigos", write_act.params.get("directory", ""))
+
+        # Verifica ação OPEN_DOCUMENT
+        open_act = next((a for a in plan.actions if a.action_type == ActionType.OPEN_DOCUMENT), None)
+        self.assertIsNotNone(open_act, "Deveria ter gerado OPEN_DOCUMENT")
+        self.assertIn("Introducao_Projeto_Integrador.docx", open_act.target)
+
+    def test_truncated_json_repair_and_anti_leak(self):
+        """Valida que JSON truncado por limite de tokens é reparado e nunca vaza sintaxe JSON crua."""
+        from zorin_copilot.ai.providers import BaseLLMProvider
+
+        truncated_sample = (
+            '{\n'
+            '  "explanation": "Com certeza! Para o Projeto Integrador em Gestão Comercial do Senac...\\n\\n### 1. INTRODUÇÃO",\n'
+            '  "actions": [\n'
+            '    {\n'
+            '      "type": "write_file",\n'
+            '      "target": "Introducao_Projeto_Integrador.docx",\n'
+            '      "description": "Salvar proposta em Word",\n'
+            '      "params": {\n'
+            '        "filename": "Introducao_Projeto_Integrador.docx",\n'
+            '        "directory": "~/Documentos/Gestao_Comercial/TCC_Artigos",\n'
+            '        "content": "# PROJETO INTEGRADOR\\n### 1. INTRODUÇÃO... ###'
+        )
+
+        explanation, actions = BaseLLMProvider.parse_response_payload(truncated_sample)
+
+        # Não deve vazar chave ou sintaxe JSON no texto
+        self.assertFalse(explanation.strip().startswith("{"))
+        self.assertNotIn('"explanation":', explanation)
+        self.assertIn("Com certeza! Para o Projeto Integrador", explanation)
+
+        # Deve extrair a ação de escrita de arquivo com o conteúdo preservado
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0].action_type, ActionType.WRITE_FILE)
+        self.assertEqual(actions[0].target, "Introducao_Projeto_Integrador.docx")
+        self.assertTrue(len(actions[0].params.get("content", "")) > 10)
+
+    def test_auto_content_write_file_resolves_to_explanation(self):
+        """Valida que quando o modelo emite content='auto', o provider injeta a explanation integral."""
+        from zorin_copilot.ai.providers import BaseLLMProvider
+
+        payload = (
+            '{\n'
+            '  "explanation": "Texto integral elaborado com contextualização, problema de pesquisa e objetivos.",\n'
+            '  "actions": [\n'
+            '    {\n'
+            '      "type": "write_file",\n'
+            '      "target": "Artigo.docx",\n'
+            '      "params": {\n'
+            '        "filename": "Artigo.docx",\n'
+            '        "content": "auto"\n'
+            '      }\n'
+            '    }\n'
+            '  ]\n'
+            '}'
+        )
+
+        explanation, actions = BaseLLMProvider.parse_response_payload(payload)
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0].params.get("content"), explanation)
+
 
 if __name__ == "__main__":
     unittest.main()

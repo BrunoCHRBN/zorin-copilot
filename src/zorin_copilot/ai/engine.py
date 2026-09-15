@@ -1379,7 +1379,11 @@ class IntentEngine:
                     "elabore o tcc", "escreva o tcc", "crie o tcc", "desenvolva o tcc",
                     "desenvolva o projeto", "inicie o projeto", "redija a introducao", "redija a introdução",
                     "elabore o documento", "gere o documento", "crie o documento", "escreva o documento"
-                ]) or (is_academic_intent and any(v in low for v in ["inicie", "comece", "desenvolva", "elabore", "escreva", "crie", "faça", "gerar", "gere"]))
+                ]) or (is_academic_intent and any(v in low for v in [
+                    "inicie", "comece", "desenvolva", "elabore", "escreva", "crie", "faça", "gerar", "gere",
+                    "inicio", "início", "iniciar", "começo", "começar", "ajude", "auxilie", "proponha", "proposta",
+                    "estruturar", "estrutura", "monte", "montar", "redigir", "redação"
+                ]))
 
                 if is_doc_craft_intent:
                     # Resgate de anti-truncamento: se a IA parou com dois-pontos ou gerou apenas promessa
@@ -1416,7 +1420,10 @@ class IntentEngine:
                     import os
                     from pathlib import Path
                     gestao_dir = os.path.expanduser("~/Documentos/Gestao_Comercial/TCC_Artigos")
-                    if is_academic_intent or os.path.exists(gestao_dir):
+                    if "projeto integrador" in low:
+                        target_dir = "~/Documentos/Gestao_Comercial/TCC_Artigos"
+                        fname = "Introducao_Projeto_Integrador.docx"
+                    elif is_academic_intent or os.path.exists(gestao_dir):
                         target_dir = "~/Documentos/Gestao_Comercial/TCC_Artigos"
                         fname = "Introducao_TCC.docx"
                     else:
@@ -1425,7 +1432,8 @@ class IntentEngine:
                         fname = f"{slug}.docx"
 
                     # Se a IA não gerou a ação WRITE_FILE, gera automaticamente
-                    if not any(a.action_type == ActionType.WRITE_FILE for a in actions):
+                    write_act = next((a for a in actions if a.action_type == ActionType.WRITE_FILE), None)
+                    if not write_act:
                         actions.append(
                             DesktopAction(
                                 ActionType.WRITE_FILE,
@@ -1438,9 +1446,17 @@ class IntentEngine:
                                 description=f"Salvar documento ABNT em '{target_dir}/{fname}'",
                             )
                         )
+                        doc_path = f"{target_dir.rstrip('/')}/{fname}"
+                    else:
+                        # Se já gerou WRITE_FILE, garante que o content não esteja vazio/auto e recupera caminho
+                        c = write_act.params.get("content", "")
+                        if not c or str(c).strip().lower() in ("auto", "use_explanation") or len(str(c)) < 30:
+                            write_act.params["content"] = explanation
+                        fname = write_act.params.get("filename") or write_act.target or fname
+                        target_dir = write_act.params.get("directory") or target_dir
+                        doc_path = f"{target_dir.rstrip('/')}/{fname}"
 
                     # Se a IA não gerou a ação de abrir o documento, gera automaticamente
-                    doc_path = f"{target_dir}/{fname}"
                     if not any(a.action_type == ActionType.OPEN_DOCUMENT for a in actions):
                         actions.append(
                             DesktopAction(
@@ -1450,6 +1466,15 @@ class IntentEngine:
                                 description=f"Abrir '{fname}' no LibreOffice Writer",
                             )
                         )
+
+                # Sanitização contra vazamento acidental de sintaxe JSON no campo de pensamento/explicação
+                if explanation.strip().startswith("{") and '"explanation"' in explanation:
+                    try:
+                        sanitized_exp, _ = BaseLLMProvider.parse_response_payload(explanation)
+                        if sanitized_exp and sanitized_exp != explanation:
+                            explanation = sanitized_exp
+                    except Exception:
+                        pass
 
                 if not actions:
                     actions = [

@@ -96,7 +96,7 @@ AÇÕES DISPONÍVEIS NO ARRAY "actions":
 - "system_control": ajustes do sistema (volume, tema). target: "ação", params: {"action": "...", "value": "..."}.
 - "media_control": controle de música e Spotify. target: "play"|"pause"|"next"|"previous"|"search", params: {"action": "play"|"pause"|"search", "query": "nome da música ou artista", "player": "spotify"}.
 - "type_text": digitar texto na aplicação ativa. target: "descrição do campo", params: {"text": "conteúdo a digitar"}.
-- "write_file": gerar arquivo, documento ABNT (.docx) ou relatório em disco. target: "nome.docx" ou "nome.md", params: {"filename": "...", "content": "...", "directory": "~/Documentos/Gestao_Comercial/TCC_Artigos"}.
+- "write_file": gerar arquivo, documento ABNT (.docx) ou relatório em disco. target: "nome.docx" ou "nome.md", params: {"filename": "...", "content": "auto", "directory": "~/Documentos/Gestao_Comercial/TCC_Artigos"}. DICA DE TOKEN: Se o arquivo a ser salvo for conter o mesmo texto redigido no campo "explanation", defina "content": "auto" ou omita "content". O Zorin Copilot usará automaticamente a redação integral de "explanation".
 - "organize_files": organizar pastas em categorias. target: "caminho", params: {"directory": "...", "dry_run": false}.
 - "notify": emitir notificação no sistema.
 
@@ -151,17 +151,111 @@ class BaseLLMProvider(ABC):
         pass
 
     @staticmethod
+    def _repair_truncated_json(raw: str) -> dict | None:
+        """Tenta recuperar estruturas JSON truncadas por limite de tokens ou delimitadores soltos."""
+        s = raw.strip()
+        if s.startswith("```"):
+            s = re.sub(r"^```(?:json)?\s*", "", s)
+            s = re.sub(r"\s*```$", "", s).strip()
+
+        # 1. Tentativa direta com strict=False (permite newlines literais dentro de strings)
+        try:
+            res = json.loads(s, strict=False)
+            if isinstance(res, dict):
+                return res
+        except Exception:
+            pass
+
+        # 2. Remoção de barras invertidas soltas no final
+        trimmed = s
+        while trimmed.endswith("\\"):
+            trimmed = trimmed[:-1]
+
+        # 3. Fecha aspas e estruturas abertas ({, [)
+        in_string = False
+        escape = False
+        stack: list[str] = []
+        for char in trimmed:
+            if escape:
+                escape = False
+                continue
+            if char == "\\":
+                escape = True
+                continue
+            if char == '"':
+                in_string = not in_string
+                continue
+            if not in_string:
+                if char in "{[":
+                    stack.append(char)
+                elif char == "}":
+                    if stack and stack[-1] == "{":
+                        stack.pop()
+                elif char == "]":
+                    if stack and stack[-1] == "[":
+                        stack.pop()
+
+        closer = ('"' if in_string else "") + "".join("}" if o == "{" else "]" for o in reversed(stack))
+        try:
+            res = json.loads(trimmed + closer, strict=False)
+            if isinstance(res, dict):
+                return res
+        except Exception:
+            pass
+
+        # 4. Truncamento no meio de vírgula ou chave incompleta: retrocede até a última fronteira
+        for i in range(len(trimmed) - 1, 0, -1):
+            if trimmed[i] in (",", "{", "[", ":"):
+                candidate = trimmed[:i].rstrip()
+                if candidate.endswith(":"):
+                    candidate = candidate[:-1].rstrip()
+                if candidate.endswith(","):
+                    candidate = candidate[:-1].rstrip()
+
+                in_s = False
+                esc = False
+                stk: list[str] = []
+                for ch in candidate:
+                    if esc:
+                        esc = False
+                        continue
+                    if ch == "\\":
+                        esc = True
+                        continue
+                    if ch == '"':
+                        in_s = not in_s
+                        continue
+                    if not in_s:
+                        if ch in "{[":
+                            stk.append(ch)
+                        elif ch == "}":
+                            if stk and stk[-1] == "{":
+                                stk.pop()
+                        elif ch == "]":
+                            if stk and stk[-1] == "[":
+                                stk.pop()
+                cand_closer = ('"' if in_s else "") + "".join("}" if o == "{" else "]" for o in reversed(stk))
+                try:
+                    res = json.loads(candidate + cand_closer, strict=False)
+                    if isinstance(res, dict) and ("explanation" in res or "actions" in res):
+                        return res
+                except Exception:
+                    continue
+
+        return None
+
+    @staticmethod
     def parse_response_payload(raw_text: str) -> tuple[str, list[DesktopAction]]:
-        """Interpreta resposta do modelo, suportando JSON estrito ou blocos markdown de JSON."""
+        """Interpreta resposta do modelo, suportando JSON estrito, truncado ou blocos markdown de JSON."""
         cleaned = raw_text.strip()
         # Remove blocos de código ```json ... ``` se o modelo tiver envelopado
         if cleaned.startswith("```"):
             cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
-            cleaned = re.sub(r"\s*```$", "", cleaned)
-            cleaned = cleaned.strip()
+            cleaned = re.sub(r"\s*```$", "", cleaned).strip()
 
-        try:
-            data = json.loads(cleaned)
+        data = BaseLLMProvider._repair_truncated_json(cleaned)
+
+        if data is not None:
             explanation = data.get("explanation", raw_text)
             extracted_text = data.get("extracted_text")
             extracted_kind = data.get("extracted_kind", "text")
@@ -196,10 +290,14 @@ class BaseLLMProvider(ABC):
 
             # 3. Processa lista de ações
             for act in raw_actions:
+                if not isinstance(act, dict):
+                    continue
                 act_type_str = str(act.get("type", "")).lower()
                 target = str(act.get("target", "")).strip()
                 desc = str(act.get("description", ""))
                 params = act.get("params", {})
+                if not isinstance(params, dict):
+                    params = {}
 
                 if act_type_str in ("fix_command", "fix", "repair", "terminal_command"):
                     cmd = params.get("command") or target
@@ -238,6 +336,11 @@ class BaseLLMProvider(ABC):
                 }
                 action_type = type_map.get(act_type_str)
                 if action_type:
+                    # Se for escrita de arquivo e o conteúdo estiver marcado como 'auto', vazio ou truncado
+                    if action_type == ActionType.WRITE_FILE:
+                        c = params.get("content", "")
+                        if not c or str(c).strip().lower() in ("auto", "use_explanation") or len(str(c)) < 30:
+                            params["content"] = explanation
                     actions.append(
                         DesktopAction(
                             action_type=action_type,
@@ -248,38 +351,67 @@ class BaseLLMProvider(ABC):
                     )
 
             return explanation, actions
-        except Exception:
-            # Fallback inteligente se a IA respondeu em texto livre/Markdown
-            fallback_actions: list[DesktopAction] = []
-            
-            # Smart OCR: extrai bloco de código mais relevante para cópia rápida
-            code_blocks = re.findall(r"```(?:\w+)?\n([\s\S]+?)\n```", raw_text)
-            if code_blocks:
-                longest_code = max(code_blocks, key=len).strip()
-                if len(longest_code) > 10:
-                    fallback_actions.append(
-                        DesktopAction(
-                            action_type=ActionType.SMART_OCR,
-                            target=longest_code,
-                            params={"kind": "código"},
-                            description="Copiar código transcrito da imagem",
-                        )
-                    )
 
-            bash_matches = re.findall(r"```(?:bash|sh)?\n(sudo\s+[^\n]+|[a-zA-Z0-9_\-\./]+\s+[^\n]+)\n```", raw_text)
-            for m in bash_matches:
-                cmd = m.strip()
-                if any(cmd.startswith(pfx) for pfx in ("sudo apt", "sudo dpkg", "pip install", "npm install", "systemctl", "kill")):
-                    fallback_actions.append(
-                        DesktopAction(
-                            action_type=ActionType.FIX_COMMAND,
-                            target=cmd,
-                            params={"command": cmd, "requires_sudo": "sudo " in cmd, "terminal": True},
-                            description=f"Executar correção: {cmd[:40]}",
-                            requires_confirmation=True,
-                        )
+        # Fallback de emergência caso nem o reparador de JSON consiga validar:
+        # Extrai a explicação por regex para NUNCA vazar a sintaxe JSON {"explanation": ...} no chat
+        explanation = raw_text
+        if '"explanation"' in raw_text or raw_text.lstrip().startswith("{"):
+            exp_match = re.search(r'"explanation"\s*:\s*"((?:[^"\\]|\\.)*)', raw_text)
+            if exp_match:
+                try:
+                    explanation = bytes(exp_match.group(1), "utf-8").decode("unicode_escape", errors="replace")
+                except Exception:
+                    explanation = exp_match.group(1)
+            else:
+                exp_match_loose = re.search(r'"explanation"\s*:\s*"(.*?)",?\s*"(?:actions|extracted_text|fix_command)"', raw_text, re.DOTALL)
+                if exp_match_loose:
+                    explanation = exp_match_loose.group(1)
+                else:
+                    # Limpeza superficial se for casca crua
+                    clean_raw = re.sub(r'^\s*\{\s*"explanation"\s*:\s*"', '', raw_text)
+                    clean_raw = re.sub(r'",\s*"actions"\s*:\s*\[.*$', '', clean_raw, flags=re.DOTALL)
+                    clean_raw = re.sub(r'"\s*\}\s*$', '', clean_raw)
+                    explanation = clean_raw
+
+        fallback_actions: list[DesktopAction] = []
+
+        # Tenta recuperar blocos de ação expressos no texto cru
+        action_blocks = re.findall(r'\{\s*"type"\s*:\s*"([^"]+)"[^}]*\}', raw_text)
+        for act_json in action_blocks:
+            try:
+                raw_act_obj = json.loads(f'{{"type": "{act_json}"}}', strict=False)
+            except Exception:
+                pass
+
+        # Smart OCR: extrai bloco de código mais relevante para cópia rápida
+        code_blocks = re.findall(r"```(?:\w+)?\n([\s\S]+?)\n```", raw_text)
+        if code_blocks:
+            longest_code = max(code_blocks, key=len).strip()
+            if len(longest_code) > 10:
+                fallback_actions.append(
+                    DesktopAction(
+                        action_type=ActionType.SMART_OCR,
+                        target=longest_code,
+                        params={"kind": "código"},
+                        description="Copiar código transcrito da imagem",
                     )
-            return raw_text, fallback_actions
+                )
+
+        bash_matches = re.findall(r"```(?:bash|sh)?\n(sudo\s+[^\n]+|[a-zA-Z0-9_\-\./]+\s+[^\n]+)\n```", raw_text)
+        for m in bash_matches:
+            cmd = m.strip()
+            if any(cmd.startswith(pfx) for pfx in ("sudo apt", "sudo dpkg", "pip install", "npm install", "systemctl", "kill")):
+                fallback_actions.append(
+                    DesktopAction(
+                        action_type=ActionType.FIX_COMMAND,
+                        target=cmd,
+                        params={"command": cmd, "requires_sudo": "sudo " in cmd, "terminal": True},
+                        description=f"Executar correção: {cmd[:40]}",
+                        requires_confirmation=True,
+                    )
+                )
+
+        return explanation, fallback_actions
 
 
 #: Aliases "flutuantes" mantidos pelo Google: apontam sempre para a versão
@@ -301,7 +433,7 @@ GEMINI_PINNED_MODELS: Final[tuple[str, ...]] = (
 )
 
 #: Fonte única de verdade dos modelos oferecidos na interface.
-GEMINI_MODEL_CHOICES: Final[list[str]] = [*GEMINI_PINNED_MODELS, *GEMINI_ALIASES]
+GEMINI_MODEL_CHOICES: Final[list[str]] = [*GEMINI_ALIASES, *GEMINI_PINNED_MODELS]
 
 #: Ordem de fallback: modelo estável e rápido primeiro, seguido por versões leves e de alta capacidade.
 GEMINI_FALLBACK_MODELS: Final[tuple[str, ...]] = (
@@ -309,7 +441,7 @@ GEMINI_FALLBACK_MODELS: Final[tuple[str, ...]] = (
     "gemini-3.5-flash",
     "gemini-3.5-flash-lite",
     "gemini-3.8-flash",
-    "gemini-flash-latest",
+    "gemini-3.7-flash",
 )
 
 #: Modelo padrão estável, com excelente velocidade de resposta e sem picos de recusa 503.
@@ -410,7 +542,7 @@ class GeminiProvider(BaseLLMProvider):
             "contents": contents,
             "generationConfig": {
                 "temperature": 0.2,
-                "maxOutputTokens": 2048,
+                "maxOutputTokens": 8192,
                 "responseMimeType": "application/json",
             },
         }

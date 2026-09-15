@@ -13,7 +13,13 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
 from zorin_copilot.ai.actions import ActionPlan, ActionType, DesktopAction
-from zorin_copilot.ai.providers import BaseLLMProvider, GeminiProvider, OllamaProvider, get_llm_provider
+from zorin_copilot.ai.providers import (
+    DEFAULT_GEMINI_MODEL,
+    BaseLLMProvider,
+    GeminiProvider,
+    OllamaProvider,
+    get_llm_provider,
+)
 from zorin_copilot.core.a11y import UIElement
 from zorin_copilot.core.config import CopilotConfig
 from zorin_copilot.shell.executor import ActionExecutor
@@ -97,7 +103,7 @@ class ConfigTest(unittest.TestCase):
     def test_defaults(self):
         cfg = CopilotConfig()
         self.assertEqual(cfg.provider, "gemini")
-        self.assertEqual(cfg.gemini_model, "gemini-flash-latest")
+        self.assertEqual(cfg.gemini_model, DEFAULT_GEMINI_MODEL)
         self.assertFalse(cfg.is_configured())
 
     def test_is_configured(self):
