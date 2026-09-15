@@ -610,6 +610,18 @@ class PreferencesDialog(Adw.PreferencesDialog):
 
         page.add(privacy_group)
 
+        # 3. Automação e Execução
+        exec_group = Adw.PreferencesGroup(
+            title="Automação e Execução de Tarefas",
+            description="Controla a proatividade na execução de ações seguras propostas pelo assistente.",
+        )
+        self.auto_execute_switch_row = Adw.SwitchRow(
+            title="Executar Ações Seguras Automaticamente",
+            subtitle="Cria documentos e abre arquivos/links de imediato no desktop sem exigir clique manual no botão",
+        )
+        exec_group.add(self.auto_execute_switch_row)
+        page.add(exec_group)
+
     def _build_memory_page(self) -> None:
         page = Adw.PreferencesPage(title="Base de Conhecimento", icon_name="document-properties-symbolic")
         self.add(page)
@@ -816,6 +828,7 @@ class PreferencesDialog(Adw.PreferencesDialog):
         self.rag_local_only_switch_row.set_active(getattr(self.config, "rag_local_only", False))
         pats = getattr(self.config, "ignored_patterns", [])
         self.ignored_patterns_entry_row.set_text(", ".join(pats))
+        self.auto_execute_switch_row.set_active(getattr(self.config, "auto_execute_safe_actions", False))
 
         self._update_visibility()
 
@@ -936,6 +949,7 @@ class PreferencesDialog(Adw.PreferencesDialog):
         cfg.trusted_directories = list(self.config.trusted_directories)
         cfg.quarantine_directories = list(self.config.quarantine_directories)
         cfg.max_file_size_mb = self.config.max_file_size_mb
+        cfg.auto_execute_safe_actions = self.auto_execute_switch_row.get_active()
 
         return cfg
 

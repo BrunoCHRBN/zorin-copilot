@@ -67,12 +67,18 @@ DIRETRIZES TÉCNICAS E DE RESPOSTA:
    - Utilize as informações de [Contexto Situacional do Desktop] (janela em foco, horário, mídia ativa) para compreender referências imediatas do usuário.
 4. Fidelidade Temporal e de Calendário:
    - Use SEMPRE a "Data e Horário" fornecida no [Contexto Situacional do Desktop] como verdade factual absoluta. O ano corrente é o indicado nesse contexto. O Natal ocorre invariavelmente em 25 de Dezembro de cada ano, e o Ano Novo em 1º de Janeiro. NUNCA invente datas ou anos distantes (como 2029) para datas comemorativas anuais. Para contagem de dias ou feriados, apoie-se nas informações temporais e feriados de referência do contexto situacional.
-5. Concisão Executiva em Ações e Busca Web:
-   - Ao executar ações que abrem conteúdo no desktop (como "open_url" para páginas web, "launch_app" para programas ou "open_document"):
+5. Concisão Executiva vs. Profundidade de Conteúdo:
+   - Ao executar ações que abrem conteúdo existente no desktop (como "open_url" para páginas web ou "launch_app" para programas):
      * O campo "explanation" DEVE ser uma confirmação executiva e acolhedora de apenas 1 a 2 frases curtas (ex: "Abri a pesquisa no Mercado Livre no seu navegador para você.", "Abri a Calculadora para você.").
      * NUNCA copie ou despeje trechos brutos de busca web, rodapés promocionais, menus de navegação institucionais ("Lojas oficiais. Categorias. Ofertas do dia..."), termos de serviço ou números de citação como "[1]" em "explanation" quando estiver abrindo a página correspondente. A página já estará aberta e visível na tela para o usuário!
-   - Em perguntas puramente informativas baseadas na busca web (sem abrir URLs):
-     * Resuma os fatos apurados em 2 a 3 frases objetivas em linguagem própria, sem copiar textos de menus, rodapés ou citações como "[1]".
+   - Para pedidos de criação, redação, elaboração de documentos, introduções, capítulos, projetos, estudos, códigos ou análises:
+     * O campo "explanation" DEVE conter o desenvolvimento COMPLETO, profundo, estruturado e rico do conteúdo solicitado (NUNCA pare em introduções vazias ou promessas).
+6. Ação Resolutiva e Entrega Direta (FAÇA, NUNCA APENAS PROMETA):
+   - NUNCA prometa uma ação futura ou encerre a resposta com frases suspensas como "Vou sugerir um esboço...", "Aqui está um exemplo básico que você pode usar como base:" sem entregar o conteúdo integral em "explanation" e a ação física no array "actions".
+   - Ao receber pedidos como "inicie o desenvolvimento de...", "desenvolva a introdução", "elabore o TCC/artigo", "escreva o projeto", "crie o documento":
+     a) Entregue a redação integral, aprofundada e formatada no campo "explanation".
+     b) Emita OBRIGATORIAMENTE a ação "write_file" para salvar o documento em disco (ex: "Introducao_TCC.docx" ou "Artigo_TCC.docx" no diretório correspondente como "~/Documentos/Gestao_Comercial/TCC_Artigos" ou "~/Documentos/Relatorios").
+     c) Emita a ação "open_document" para abrir o documento gerado diretamente no LibreOffice Writer para visualização do usuário.
 
 AÇÕES DISPONÍVEIS NO ARRAY "actions":
 - "fix_command": comando bash para correção no terminal. target: "descrição curta", params: {"command": "...", "requires_sudo": bool, "terminal": true}.
@@ -86,17 +92,17 @@ AÇÕES DISPONÍVEIS NO ARRAY "actions":
   * YouTube busca: "https://www.youtube.com/results?search_query=<query>"
   * Google Maps busca: "https://www.google.com/maps/search/<query>"
 - "launch_app": abrir aplicativo do desktop. target: "nome_app".
-- "open_document": abrir arquivo de documento localizado no visualizador. target: "/caminho/arquivo", params: {"page_number": 1}.
+- "open_document": abrir arquivo de documento localizado no visualizador ou LibreOffice. target: "/caminho/arquivo", params: {"page_number": 1}.
 - "system_control": ajustes do sistema (volume, tema). target: "ação", params: {"action": "...", "value": "..."}.
 - "media_control": controle de música e Spotify. target: "play"|"pause"|"next"|"previous"|"search", params: {"action": "play"|"pause"|"search", "query": "nome da música ou artista", "player": "spotify"}.
 - "type_text": digitar texto na aplicação ativa. target: "descrição do campo", params: {"text": "conteúdo a digitar"}.
-- "write_file": gerar arquivo ou relatório em disco. target: "nome.md", params: {"filename": "...", "content": "...", "directory": "~/Documentos"}.
+- "write_file": gerar arquivo, documento ABNT (.docx) ou relatório em disco. target: "nome.docx" ou "nome.md", params: {"filename": "...", "content": "...", "directory": "~/Documentos/Gestao_Comercial/TCC_Artigos"}.
 - "organize_files": organizar pastas em categorias. target: "caminho", params: {"directory": "...", "dry_run": false}.
 - "notify": emitir notificação no sistema.
 
 Você DEVE responder EXCLUSIVAMENTE em formato JSON com o seguinte esquema:
 {
-  "explanation": "Texto conversacional, acolhedor e direto ao ponto para o usuário.",
+  "explanation": "Texto conversacional, acolhedor e direto ao ponto para o usuário. Em pedidos de redação/desenvolvimento de documentos, inclua aqui o texto completo estruturado.",
   "extracted_text": "Texto ou código puro extraído da tela/imagem (ou null se não aplicável)",
   "extracted_kind": "code" | "text",
   "actions": [
@@ -285,37 +291,29 @@ GEMINI_ALIASES: Final[tuple[str, ...]] = (
     "gemini-flash-lite-latest",
 )
 
-#: Versões fixas (pinned), para quem precisa de comportamento reprodutível.
-#: Listadas da mais nova para a mais antiga; nenhuma delas está descontinuada.
+#: Versões fixas (pinned) da família Gemini 3, listadas pela maior estabilidade e disponibilidade.
 GEMINI_PINNED_MODELS: Final[tuple[str, ...]] = (
-    "gemini-3.8-flash",
-    "gemini-3.7-flash",
     "gemini-3.6-flash",
     "gemini-3.5-flash",
     "gemini-3.5-flash-lite",
-    "gemini-2.5-flash",
-    "gemini-2.5-pro",
-)
-
-#: Fonte única de verdade dos modelos oferecidos na interface. Antes esta lista
-#: era replicada em `preferences.py` (com o default apontando para outro modelo
-#: que não o anunciado como recomendado) e as cadeias de fallback do provedor
-#: citavam uma terceira combinação. Agora tudo deriva daqui.
-GEMINI_MODEL_CHOICES: Final[list[str]] = [*GEMINI_ALIASES, *GEMINI_PINNED_MODELS]
-
-#: Ordem de fallback: alias mais estável primeiro, depois versões fixas.
-GEMINI_FALLBACK_MODELS: Final[tuple[str, ...]] = (
-    "gemini-flash-latest",
-    "gemini-flash-lite-latest",
     "gemini-3.8-flash",
-    "gemini-2.5-flash",
-    "gemini-2.5-pro",
+    "gemini-3.7-flash",
 )
 
-#: Alias em vez de versão fixa: o app roda instalado no desktop do usuário e não
-#: recebe atualizações com frequência, então um modelo fixo viraria erro 404
-#: silencioso daqui a alguns meses. O alias acompanha a versão estável atual.
-DEFAULT_GEMINI_MODEL: Final[str] = "gemini-flash-latest"
+#: Fonte única de verdade dos modelos oferecidos na interface.
+GEMINI_MODEL_CHOICES: Final[list[str]] = [*GEMINI_PINNED_MODELS, *GEMINI_ALIASES]
+
+#: Ordem de fallback: modelo estável e rápido primeiro, seguido por versões leves e de alta capacidade.
+GEMINI_FALLBACK_MODELS: Final[tuple[str, ...]] = (
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.8-flash",
+    "gemini-flash-latest",
+)
+
+#: Modelo padrão estável, com excelente velocidade de resposta e sem picos de recusa 503.
+DEFAULT_GEMINI_MODEL: Final[str] = "gemini-3.6-flash"
 
 
 def _with_fallbacks(model: str) -> list[str]:
@@ -420,11 +418,12 @@ class GeminiProvider(BaseLLMProvider):
         # Modelos com fallback em caso de alta demanda temporária (503 / 429 / 404)
         models_to_try = _with_fallbacks(self.model)
 
+        timeout_sec = 60 if image_bytes else 40
         last_error = ""
         for current_model in models_to_try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{current_model}:generateContent?key={self.api_key}"
             try:
-                resp = requests.post(url, json=payload, timeout=12)
+                resp = requests.post(url, json=payload, timeout=timeout_sec)
                 if resp.status_code == 200:
                     data = resp.json()
                     candidates = data.get("candidates", [])
@@ -439,16 +438,17 @@ class GeminiProvider(BaseLLMProvider):
 
                 last_error = f"Erro no modelo {current_model} ({resp.status_code}): {resp.text[:180]}"
                 if resp.status_code == 429:
-                    logger.warning(f"Cota da chave do Gemini atingida (429). Encerrando tentativas para comutação imediata ao Ollama.")
-                    break
+                    logger.warning(f"Cota momentânea no modelo {current_model} (429). Tentando próximo modelo...")
+                    continue
                 logger.warning(f"{last_error}. Tentando fallback se disponível...")
             except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
-                last_error = f"Erro de comunicação/timeout com Gemini: {exc}"
-                logger.warning(f"{last_error}. Encerrando tentativas para comutação imediata ao Ollama.")
-                break
+                last_error = f"Timeout ({timeout_sec}s) ou erro de conexão no modelo {current_model}: {exc}"
+                logger.warning(f"{last_error}. Tentando próximo modelo da cadeia de fallback...")
+                continue
             except Exception as exc:
                 last_error = f"Erro de comunicação com {current_model}: {exc}"
                 logger.warning(last_error)
+                continue
 
         return f"Não foi possível obter resposta do Gemini: {last_error}", []
 
@@ -526,7 +526,7 @@ class OllamaProvider(BaseLLMProvider):
             "stream": False,
             "options": {
                 "temperature": 0.2 if image_bytes else 0.3,
-                "num_predict": 2048,
+                "num_predict": 4096,
             },
             "keep_alive": "15m",
         }

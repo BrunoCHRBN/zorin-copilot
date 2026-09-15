@@ -19,7 +19,7 @@ class CopilotConfig:
     
     # Configurações do Google Gemini
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-flash-latest"
+    gemini_model: str = "gemini-3.6-flash"
     # Importante: a BidiGenerateContent (Live API) rejeita aliases como
     # "-latest" para modelos de áudio — precisa ser um model code válido.
     # Modelo de voz atual do Google (lançado em 26/03/2026, última
@@ -102,6 +102,9 @@ class CopilotConfig:
 
     # Inicialização automática com o sistema (Autostart no boot/login)
     autostart_enabled: bool = False
+
+    # Execução proativa de ações seguras (criar/abrir documentos em pastas autorizadas)
+    auto_execute_safe_actions: bool = False
 
     # Red zones (faixas bloqueadas para automação) em pixels.
     # -1 = automático: pergunta ao ambiente (GNOME/KDE têm painel; wlroots só

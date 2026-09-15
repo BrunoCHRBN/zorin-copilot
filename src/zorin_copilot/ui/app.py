@@ -872,6 +872,25 @@ class CopilotWindow(Adw.ApplicationWindow):
         # Consumo de tokens acumulado nesta resposta (item #2 e #9).
         self.header.refresh_token_usage()
         self.status_bar.refresh_tokens()
+
+        # Execução automática proativa se habilitada nas preferências e ações forem seguras
+        executable = [a for a in plan.actions if a.action_type != ActionType.ANSWER]
+        if getattr(self.config, "auto_execute_safe_actions", False) and executable:
+            safe_types = {ActionType.WRITE_FILE, ActionType.OPEN_DOCUMENT, ActionType.LAUNCH_APP, ActionType.OPEN_URL, ActionType.NOTIFY}
+            if all(not a.requires_confirmation and a.action_type in safe_types for a in executable):
+                GLib.timeout_add(400, lambda: self._auto_execute_safe_plan(plan))
+
+        return GLib.SOURCE_REMOVE
+
+    def _auto_execute_safe_plan(self, plan: ActionPlan) -> bool:
+        """Executa automaticamente ações seguras propostas pela IA (ex: salvar/abrir documentos)."""
+        try:
+            reports = self.execute_plan_with_undo(plan)
+            ok_count = sum(1 for r in reports if r.success)
+            if ok_count:
+                self.show_toast(f"✓ {ok_count} ação(ões) executada(s) automaticamente no desktop!")
+        except Exception as exc:
+            logger.debug(f"Falha na auto-execução de ações seguras: {exc}")
         return GLib.SOURCE_REMOVE
 
     def _on_copy_answer(self, _btn: Gtk.Button) -> None:
