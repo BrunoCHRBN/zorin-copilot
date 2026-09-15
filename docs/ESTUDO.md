@@ -65,21 +65,74 @@ zorin-copilot-cli rag index                       # indexa os .md capturados
 zorin-copilot-cli rag ask "o que é custeio variável?"
 ```
 
-## 3. Estado do plano
+## 3. Estudo ativo: flashcards e revisão espaçada
+
+`core/study_cards.py` fecha o ciclo material → pergunta → revisão.
+
+```bash
+# Gerar o baralho a partir do material capturado
+zorin-copilot-cli study deck --from ~/Documentos/Estudos/aula03.md --max-cards 10
+
+# Ver os baralhos e o que está vencido
+zorin-copilot-cli study decks
+
+# Revisar (sessão interativa no terminal, escala 0–5)
+zorin-copilot-cli study review --deck c99fe2c7e7
+```
+
+### Por que o prompt é o que é
+
+O gerador usa o **prompt v2**, endurecido a partir de uso real (no study-hub ele gerou
+o card "qual é o código do curso de Ambientação EAD?"). Regras que importam:
+
+- proíbe card de dado burocrático/navegação (código do curso, carga horária, nome de
+  professor, prazos, menus, sumário);
+- exige que o card **valha o tempo de revisão** — resposta que é só número, código ou
+  nome próprio isolado é descartada;
+- autoriza `{"cards": []}` quando o material não tem conteúdo de estudo: devolver vazio
+  é melhor que inventar card trivial;
+- gate de entrada: material com menos de 80 palavras não gera nada (avisa em vez de alucinar).
+
+O prompt pede; o código garante: `BUREAUCRATIC_PATTERNS` + filtro de utilidade
+descartam o que o modelo local insistir em produzir.
+
+### SM-2 (agendamento)
+
+| Regra | Comportamento |
+|---|---|
+| Nota ≥ 3 | 1º acerto → +1 dia; 2º → +6 dias; depois `intervalo × facilidade` |
+| Nota < 3 | zera repetições e reagenda para amanhã |
+| Facilidade | começa em 2.5, piso 1.3 |
+
+Determinístico: **a data da próxima revisão nunca passa pelo modelo** — é a regra que
+impede o LLM de "achar" que você já sabe. O **id do card deriva da frente**, então
+regenerar o deck com o mesmo material preserva o histórico de revisão. O progresso é
+salvo a cada card (Ctrl+C não perde a sessão).
+
+### Entrega em ABNT e busca acadêmica
+
+Os dois já existiam no repo, mas só eram alcançáveis por voz. Agora:
+
+```bash
+zorin-copilot-cli study abnt --from trabalho.md --out trabalho.docx   # ABNT NBR 14724/10520/6023
+zorin-copilot-cli search "mercado varejo" --academic --source sebrae  # SciELO/IBGE/Sebrae/IPEA/Scholar
+```
+
+## 4. Estado do plano
 
 | Fase | Item | Estado |
 |---|---|---|
-| **A** | **A1 — Captura de material (AT-SPI + clipboard + gate de qualidade)** | ✅ Fase 1 entregue |
-| A | A2 — Organização automática por disciplina/aula | ⏳ próximo |
-| **B** | B1 — Geração de flashcards (portando o prompt v2 do study-hub) | ⏳ |
-| B | B2 — Revisão espaçada SM-2 (portando `sm2.py` do study-hub) | ⏳ |
+| **A** | A1 — Captura de material (AT-SPI + clipboard + gate de qualidade) | ✅ |
+| A | A2 — Organização automática por disciplina/aula | ⏳ |
+| **B** | B1 — Geração de flashcards (prompt v2 + filtro antiburocrático) | ✅ |
+| B | B2 — Revisão espaçada SM-2 no terminal | ✅ |
 | B | B3 — Simulados a partir do material capturado | ⏳ |
 | B | B4 — Resumo + glossário por aula | ⏳ |
-| **C** | C1 — Entrega do PI em .docx/.pptx (`document_generators`) | ⏳ |
+| **C** | C1 — Entrega do PI em .docx ABNT | ✅ (gerador existia; agora na CLI) |
 | C | C2 — Revisão por voz (Whisper + Piper, já no repo) | ⏳ |
 | C | C3 — Rotina semanal automatizada | ⏳ |
 
-## 4. O que foi validado — e o que não foi
+## 5. O que foi validado — e o que não foi
 
 **Validado (26 testes em `tests/test_study_capture.py`, headless):**
 

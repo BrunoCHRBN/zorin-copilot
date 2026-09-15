@@ -84,6 +84,13 @@ def build_parser() -> argparse.ArgumentParser:
     search_cmd = sub.add_parser("search", help="realiza pesquisa na web em tempo real")
     search_cmd.add_argument("query", help="termo a pesquisar na internet")
     search_cmd.add_argument("--limit", type=int, default=4, help="número máximo de resultados")
+    search_cmd.add_argument("--academic", action="store_true", help="busca em fontes acadêmicas e órgãos oficiais")
+    search_cmd.add_argument(
+        "--source",
+        default="all",
+        choices=["all", "scielo", "ibge", "sebrae", "ipea", "scholar", "internacional"],
+        help="fonte da busca acadêmica (padrão: all)",
+    )
 
     # rag
     rag_cmd = sub.add_parser("rag", help="indexação local e busca em documentos pessoais (PDFs, contratos, planilhas)")
@@ -153,6 +160,25 @@ def build_parser() -> argparse.ArgumentParser:
     study_cap.add_argument("--no-save", action="store_true", help="não grava arquivo, só mostra")
     study_cap.add_argument("--print", dest="show", action="store_true", help="imprime o texto capturado")
     study_cap.add_argument("--json", action="store_true", help="saída em JSON (para scriptar)")
+
+    study_deck = study_sub.add_parser("deck", help="gera flashcards a partir de um material capturado")
+    study_deck.add_argument("--from", dest="source", required=True, help="arquivo .md capturado")
+    study_deck.add_argument("--discipline", default="Gestão Comercial", help="nome da disciplina")
+    study_deck.add_argument("--max-cards", type=int, default=10, help="máximo de cards (padrão 10)")
+    study_deck.add_argument("--local-only", action="store_true", help="usa apenas o modelo local")
+    study_deck.add_argument("--cloud", action="store_true", help="usa apenas o modelo em nuvem")
+    study_deck.add_argument("--json", action="store_true", help="saída em JSON")
+
+    study_sub.add_parser("decks", help="lista os baralhos e quantos cards estão vencidos")
+
+    study_rev = study_sub.add_parser("review", help="sessão de revisão espaçada (SM-2) no terminal")
+    study_rev.add_argument("--deck", help="id do baralho (padrão: o com mais cards vencidos)")
+    study_rev.add_argument("--limit", type=int, default=20, help="máximo de cards na sessão")
+    study_rev.add_argument("--all", action="store_true", help="inclui cards ainda não vencidos")
+
+    study_abnt = study_sub.add_parser("abnt", help="gera .docx no padrão ABNT a partir de um .md")
+    study_abnt.add_argument("--from", dest="source", required=True, help="arquivo .md de origem")
+    study_abnt.add_argument("--out", help="arquivo .docx de destino (padrão: mesmo nome)")
 
     return parser
 
@@ -480,6 +506,23 @@ def cmd_memory(args: argparse.Namespace) -> int:
 
 def cmd_search(args: argparse.Namespace) -> int:
     client = WebSearchClient()
+
+    # Busca acadêmica era exclusiva do cliente de voz; aqui fica scriptável.
+    if getattr(args, "academic", False):
+        print(f"Pesquisando em fontes acadêmicas: '{args.query}'...\n")
+        results = client.academic_search(args.query, source=args.source, max_results=args.limit)
+        if not results:
+            print("Nenhum resultado acadêmico.")
+            return 1
+        print(f"Resultados acadêmicos ({len(results)}):\n")
+        for idx, res in enumerate(results, 1):
+            print(f"{idx}. {res.title}")
+            print(f"   URL: {res.url}")
+            if res.snippet:
+                print(f"   {res.snippet}")
+            print()
+        return 0
+
     print(f"Pesquisando na web: '{args.query}'...\n")
     results = client.search(args.query, max_results=args.limit)
     if not results:
@@ -827,11 +870,23 @@ def cmd_agent(args: argparse.Namespace) -> int:
 
 
 def cmd_study(args: argparse.Namespace) -> int:
+    """Comandos de estudo: captura, flashcards, revisão e entrega ABNT."""
+    if args.study_action == "capture":
+        return _study_capture(args)
+    if args.study_action == "deck":
+        return _study_deck(args)
+    if args.study_action == "decks":
+        return _study_decks(args)
+    if args.study_action == "review":
+        return _study_review(args)
+    if args.study_action == "abnt":
+        return _study_abnt(args)
+    return 0
+
+
+def _study_capture(args: argparse.Namespace) -> int:
     """Captura material de estudo da tela (ou da área de transferência)."""
     from .core.study_capture import LessonCapture
-
-    if args.study_action != "capture":
-        return 0
 
     capture = LessonCapture(min_words=args.min_words)
     result = capture.capture(args.app, strategy=args.strategy)
@@ -871,6 +926,174 @@ def cmd_study(args: argparse.Namespace) -> int:
         print(result.text[:5000])
         if len(result.text) > 5000:
             print("\n[... use --out para salvar o conteúdo completo ...]")
+    return 0
+
+
+def _study_deck(args: argparse.Namespace) -> int:
+    """Gera flashcards a partir de um material capturado e salva o baralho."""
+    from .core.study_cards import DeckStore, StudyAI, generate_cards, merge_cards, new_deck, read_source
+
+    source = os.path.expanduser(args.source)
+    if not os.path.exists(source):
+        print(f"✗ Arquivo não encontrado: {source}")
+        print("  Dica: capture antes com `zorin-copilot-cli study capture`.")
+        return 1
+
+    title, body = read_source(source)
+    mode = "local" if args.local_only else ("cloud" if args.cloud else "auto")
+    ai = StudyAI(mode=mode)
+    cards, warnings = generate_cards(
+        body,
+        ai,
+        title=title or os.path.basename(source),
+        discipline=args.discipline,
+        n_cards=args.max_cards,
+    )
+
+    if not cards:
+        print("✗ Nenhum card gerado.")
+        for warning in warnings:
+            print(f"  ⚠️  {warning}")
+        return 1
+
+    store = DeckStore()
+    deck = new_deck(
+        title or os.path.basename(source),
+        cards,
+        source=source,
+        discipline=args.discipline,
+        provider=ai.used,
+    )
+    existing = store.load(deck.id)
+    if existing is not None and existing.cards:
+        deck.cards = merge_cards(existing.cards, cards)  # preserva histórico de revisão
+        deck.created_at = existing.created_at
+    path = store.save(deck)
+
+    if args.json:
+        print(json.dumps(deck.to_dict(), ensure_ascii=False, indent=2))
+        return 0
+
+    print(f"✓ Baralho '{deck.title}' — {len(deck.cards)} cards (modelo: {ai.used})")
+    if existing is not None and existing.cards:
+        print(f"  Histórico de revisão preservado: {len(existing.cards)} cards já existiam.")
+    print(f"  Salvo em: {path}")
+    print(f"  Próximo: zorin-copilot-cli study review --deck {deck.id}")
+    for warning in warnings:
+        print(f"  ⚠️  {warning}")
+    return 0
+
+
+def _study_decks(args: argparse.Namespace) -> int:
+    """Lista baralhos com o resumo de revisão."""
+    from .core.study_cards import DeckStore, deck_stats
+
+    decks = DeckStore().list()
+    if not decks:
+        print("Nenhum baralho ainda. Gere um com `study deck --from <material.md>`.")
+        return 0
+
+    print(f"{'ID':<12} {'VENCIDOS':>8} {'TOTAL':>6}  TÍTULO")
+    for deck in decks:
+        stats = deck_stats(deck)
+        print(f"{deck.id:<12} {stats['due']:>8} {stats['total']:>6}  {deck.title}")
+    total_due = sum(deck_stats(d)["due"] for d in decks)
+    print(f"\nTotal vencido agora: {total_due}")
+    return 0
+
+
+def _study_review(args: argparse.Namespace) -> int:
+    """Sessão interativa de revisão espaçada (SM-2)."""
+    from .core.study_cards import GRADE_SCALE, DeckStore, deck_stats, due_cards
+
+    store = DeckStore()
+    deck = store.load(args.deck) if args.deck else None
+    if deck is None:
+        decks = store.list()
+        if not decks:
+            print("Nenhum baralho. Gere um com `study deck --from <material.md>`.")
+            return 1
+        deck = max(decks, key=lambda d: deck_stats(d)["due"])
+
+    queue = list(deck.cards) if args.all else due_cards(deck, limit=args.limit)
+    queue = queue[: args.limit] if not args.all else queue
+    if not queue:
+        print("Nada vencido agora. Use --all para revisar mesmo assim.")
+        return 0
+
+    print(f"Revisando '{deck.title}' — {len(queue)} card(s). Ctrl+C encerra e salva.\n")
+    reviewed = 0
+    try:
+        for index, card in enumerate(queue, 1):
+            print(f"[{index}/{len(queue)}] {card.front}")
+            try:
+                input("   ⏎ para ver a resposta")
+            except EOFError:
+                print()
+                break
+            print(f"   → {card.back}")
+            grade = _ask_grade()
+            if grade is None:
+                break
+            card.apply_grade(grade)
+            store.save(deck)  # progresso salvo a cada card
+            reviewed += 1
+            print(f"   Próxima revisão em {card.interval_days} dia(s).\n")
+    except KeyboardInterrupt:
+        print("\n⏹ Encerrado.")
+
+    store.save(deck)
+    stats = deck_stats(deck)
+    print(f"Revisados: {reviewed} | Vencidos restantes: {stats['due']} | Total: {stats['total']}")
+    return 0
+
+
+def _ask_grade() -> int | None:
+    """Pede a nota SM-2 (0–5). Enter vazio encerra a sessão."""
+    from .core.study_cards import GRADE_SCALE
+
+    scale = " | ".join(f"{n}={desc}" for n, desc in GRADE_SCALE)
+    try:
+        answer = input(f"   Nota [{scale}]: ").strip()
+    except EOFError:
+        return None
+    if not answer:
+        return None
+    try:
+        grade = int(answer)
+    except ValueError:
+        print("   Nota inválida, use 0 a 5. Encerrando.")
+        return None
+    if not 0 <= grade <= 5:
+        print("   Fora da escala (0–5). Encerrando.")
+        return None
+    return grade
+
+
+def _study_abnt(args: argparse.Namespace) -> int:
+    """Gera o .docx ABNT a partir de um material em Markdown."""
+    from .core.document_generators import MissingOfficeDependencyError, generate_abnt_docx
+
+    source = os.path.expanduser(args.source)
+    if not os.path.exists(source):
+        print(f"✗ Arquivo não encontrado: {source}")
+        return 1
+
+    with open(source, encoding="utf-8", errors="replace") as handle:
+        markdown = handle.read()
+
+    out = os.path.expanduser(args.out) if args.out else os.path.splitext(source)[0] + ".docx"
+    try:
+        generate_abnt_docx(out, markdown)
+    except MissingOfficeDependencyError as exc:
+        print(f"✗ Falta dependência para gerar .docx: {exc}")
+        print("  Instale com: pip install python-docx")
+        return 1
+    except Exception as exc:
+        print(f"✗ Falha ao gerar o documento: {exc}")
+        return 1
+
+    print(f"✓ Documento ABNT gerado: {out}")
     return 0
 
 
