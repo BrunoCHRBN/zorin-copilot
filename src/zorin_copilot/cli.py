@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 from pathlib import Path
@@ -132,6 +133,26 @@ def build_parser() -> argparse.ArgumentParser:
     agent_cmd.add_argument("--no-audit", action="store_true", help="não grava a execução na memória/auditoria")
     agent_cmd.add_argument("--verbose", action="store_true", help="mostra a observação completa de cada passo")
     agent_cmd.add_argument("--json", action="store_true", help="saída em JSON (para scriptar)")
+
+    # study — captura e organização de material de estudo
+    study_cmd = sub.add_parser("study", help="captura e organiza material de estudo a partir da tela")
+    study_sub = study_cmd.add_subparsers(dest="study_action", required=True)
+    study_cap = study_sub.add_parser(
+        "capture",
+        help="lê o conteúdo da aula renderizada (AT-SPI) em vez de baixar o HTML",
+    )
+    study_cap.add_argument("--app", help="nome do aplicativo alvo (padrão: app em foco)")
+    study_cap.add_argument(
+        "--strategy",
+        choices=["auto", "atspi", "clipboard"],
+        default="auto",
+        help="auto tenta AT-SPI e cai para a área de transferência (padrão)",
+    )
+    study_cap.add_argument("--min-words", type=int, default=120, help="aviso de captura rala (padrão 120)")
+    study_cap.add_argument("--out", help="arquivo .md de destino (padrão: ~/Documentos/Estudos/<titulo>.md)")
+    study_cap.add_argument("--no-save", action="store_true", help="não grava arquivo, só mostra")
+    study_cap.add_argument("--print", dest="show", action="store_true", help="imprime o texto capturado")
+    study_cap.add_argument("--json", action="store_true", help="saída em JSON (para scriptar)")
 
     return parser
 
@@ -805,6 +826,54 @@ def cmd_agent(args: argparse.Namespace) -> int:
     return 0 if result.success else 1
 
 
+def cmd_study(args: argparse.Namespace) -> int:
+    """Captura material de estudo da tela (ou da área de transferência)."""
+    from .core.study_capture import LessonCapture
+
+    if args.study_action != "capture":
+        return 0
+
+    capture = LessonCapture(min_words=args.min_words)
+    result = capture.capture(args.app, strategy=args.strategy)
+
+    if args.json:
+        if not args.no_save and result.ok:
+            capture.save(result, filename=os.path.basename(args.out) if args.out else None,
+                         directory=os.path.dirname(args.out) or None if args.out else None)
+        print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+        return 0 if result.ok else 1
+
+    if not result.ok:
+        print(f"✗ {result.warnings[0] if result.warnings else 'Nada capturado.'}")
+        print("  Dicas, nesta ordem:")
+        print("   1. deixe a aula visível e em foco (a janela não pode estar minimizada);")
+        print("   2. selecione o texto com Ctrl+A, Ctrl+C e use --strategy clipboard;")
+        print("   3. rode `zorin-copilot-cli doctor` para ver se o AT-SPI2 está ativo.")
+        return 1
+
+    path = ""
+    if not args.no_save:
+        target_name = os.path.basename(args.out) if args.out else None
+        target_dir = os.path.dirname(args.out) if args.out else None
+        path = capture.save(result, filename=target_name, directory=target_dir)
+
+    print(f"✓ Material capturado — {result.word_count} palavras via {result.strategy}")
+    print(f"  Título: {result.title}")
+    if result.url:
+        print(f"  URL: {result.url}")
+    if path:
+        print(f"  Salvo em: {path}")
+        print("  Próximo: zorin-copilot-cli rag index   (para poder perguntar sobre o material)")
+    for warning in result.warnings:
+        print(f"  ⚠️  {warning}")
+    if args.show:
+        print("\n--- Conteúdo ---\n")
+        print(result.text[:5000])
+        if len(result.text) > 5000:
+            print("\n[... use --out para salvar o conteúdo completo ...]")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -820,6 +889,7 @@ def main(argv: list[str] | None = None) -> int:
         "setup": cmd_setup,
         "web": cmd_web,
         "agent": cmd_agent,
+        "study": cmd_study,
     }
     return handlers[args.command](args)
 
