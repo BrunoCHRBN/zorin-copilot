@@ -436,6 +436,52 @@ class ToolRegistry:
             )
         )
 
+        self.register(
+            ToolSpec(
+                name="find_on_screen",
+                description=(
+                    "Localiza visualmente textos, botões ou controles na tela via OCR e visão computacional. "
+                    "Devolve coordenadas absolutas (x, y), caixa delimitadora (bbox) e o texto encontrado."
+                ),
+                parameters=_param(
+                    {"query": _str("Texto, rótulo ou botão procurado na tela.")},
+                    required=["query"],
+                ),
+                handler=self._tool_find_on_screen,
+            )
+        )
+
+        self.mutate(
+            ToolSpec(
+                name="click_on_screen",
+                description=(
+                    "Localiza visualmente um texto ou botão na tela e clica nele diretamente, "
+                    "animando o Cursor Fantasma até o elemento. Use isto quando o elemento não tiver UID "
+                    "ou quando o AT-SPI falhar."
+                ),
+                parameters=_param(
+                    {
+                        "query": _str("Texto ou rótulo do botão a clicar."),
+                        "button": _str("Botão do mouse: left (padrão), right ou middle."),
+                        "double": _bool("Clique duplo (padrão false)."),
+                    },
+                    required=["query"],
+                ),
+                handler=self._tool_click_on_screen,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="read_screen_text",
+                description=(
+                    "Extrai todo o texto visível na tela em formato estruturado com suas posições espaciais (mapa visual de controles)."
+                ),
+                parameters=_param({}),
+                handler=self._tool_read_screen_text,
+            )
+        )
+
         self.mutate(
             ToolSpec(
                 name="launch_app",
@@ -772,6 +818,60 @@ class ToolRegistry:
             double=bool(args.get("double")),
         )
         return {"ok": bool(ok), "message": message, "x": abs_x, "y": abs_y}
+
+    def _tool_find_on_screen(self, args: dict[str, Any]) -> dict[str, Any]:
+        query = str(args.get("query") or "").strip()
+        if not query:
+            return {"ok": False, "error": "`query` é obrigatório."}
+        try:
+            from ..core.ui_grounding import UIGroundingService
+            candidates = UIGroundingService.find_elements(query, fence=self._fence)
+            if not candidates:
+                return {"ok": False, "error": f"Nenhum elemento correspondente a '{query}' na tela."}
+            return {
+                "ok": True,
+                "count": len(candidates),
+                "best_match": candidates[0][0].to_dict(),
+                "score": round(candidates[0][1], 2),
+                "all_matches": [c[0].to_dict() for c in candidates[:5]],
+            }
+        except Exception as exc:
+            return {"ok": False, "error": f"Falha na localização visual: {exc}"}
+
+    def _tool_click_on_screen(self, args: dict[str, Any]) -> dict[str, Any]:
+        query = str(args.get("query") or "").strip()
+        if not query:
+            return {"ok": False, "error": "`query` é obrigatório."}
+        button = str(args.get("button") or "left")
+        double = bool(args.get("double", False))
+        driver = self.input_driver
+        if driver is None:
+            return {"ok": False, "error": "Driver de entrada indisponível."}
+        try:
+            from ..core.ui_grounding import UIGroundingService
+            ok, msg, coords = UIGroundingService.click_visual_element(
+                query, button=button, double=double, driver=driver, fence=self._fence
+            )
+            return {
+                "ok": ok,
+                "message": msg,
+                "coords": coords,
+                "query": query,
+            }
+        except Exception as exc:
+            return {"ok": False, "error": f"Falha ao clicar visualmente: {exc}"}
+
+    def _tool_read_screen_text(self, args: dict[str, Any]) -> dict[str, Any]:
+        try:
+            from ..core.ui_grounding import UIGroundingService
+            elements = UIGroundingService.scan_screen(fence=self._fence)
+            return {
+                "ok": True,
+                "count": len(elements),
+                "elements": [el.to_dict() for el in elements[:40]],
+            }
+        except Exception as exc:
+            return {"ok": False, "error": f"Falha ao ler texto da tela: {exc}"}
 
     def _tool_launch_app(self, args: dict[str, Any]) -> dict[str, Any]:
         query = str(args.get("query") or "").strip()

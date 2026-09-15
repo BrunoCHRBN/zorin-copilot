@@ -337,6 +337,51 @@ LIVE_TOOLS_DECLARATION = [
                 },
             },
             {
+                "name": "find_on_screen",
+                "description": "Localiza visualmente botões, textos ou controles na tela usando OCR de baixa latência e visão computacional. Retorna coordenadas (x, y) e bounding box.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "query": {
+                            "type": "STRING",
+                            "description": "Texto, rótulo ou descrição do botão procurado na tela",
+                        }
+                    },
+                    "required": ["query"],
+                },
+            },
+            {
+                "name": "click_on_screen",
+                "description": "Localiza visualmente um texto, botão ou ícone na tela e clica nele diretamente, animando o Cursor Fantasma até o elemento. Use quando o elemento não responder ao AT-SPI.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "query": {
+                            "type": "STRING",
+                            "description": "Texto ou rótulo do botão a ser clicado",
+                        },
+                        "button": {
+                            "type": "STRING",
+                            "enum": ["left", "right", "middle"],
+                            "description": "Botão do mouse a ser clicado (padrão 'left')",
+                        },
+                        "double": {
+                            "type": "BOOLEAN",
+                            "description": "Se true, realiza clique duplo",
+                        },
+                    },
+                    "required": ["query"],
+                },
+            },
+            {
+                "name": "read_screen_text",
+                "description": "Lê e extrai todo o texto visível na tela em formato estruturado com posições espaciais (mapa visual de controles).",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {},
+                },
+            },
+            {
                 "name": "keyboard_type",
                 "description": "Digita texto diretamente no aplicativo ou campo ativo na tela através do teclado virtual de hardware do Zorin OS.",
                 "parameters": {
@@ -1759,6 +1804,51 @@ class GeminiLiveClient:
                 else:
                     ok, msg = self.input_driver.click(int(x), int(y), button=btn, double=double)
                 return {"success": ok, "message": msg}
+
+            elif name == "find_on_screen":
+                q = args.get("query", "").strip()
+                if not q:
+                    return {"success": False, "message": "Parâmetro 'query' é obrigatório."}
+                from ..core.ui_grounding import UIGroundingService
+                candidates = UIGroundingService.find_elements(q, fence=self.fence)
+                if not candidates:
+                    return {"success": False, "message": f"Elemento '{q}' não encontrado visualmente na tela."}
+                best, score = candidates[0]
+                return {
+                    "success": True,
+                    "best_match": best.to_dict(),
+                    "score": round(score, 2),
+                    "x": best.x,
+                    "y": best.y,
+                    "message": f"Elemento '{best.text}' localizado em ({best.x}, {best.y}) com score {score:.2f}.",
+                }
+
+            elif name == "click_on_screen":
+                q = args.get("query", "").strip()
+                btn = args.get("button", "left")
+                double = bool(args.get("double", False))
+                if not q:
+                    return {"success": False, "message": "Parâmetro 'query' é obrigatório."}
+                from ..core.ui_grounding import UIGroundingService
+                ok, msg, coords = UIGroundingService.click_visual_element(
+                    q, button=btn, double=double, driver=self.input_driver, fence=self.fence
+                )
+                return {
+                    "success": ok,
+                    "message": msg,
+                    "coords": coords,
+                }
+
+            elif name == "read_screen_text":
+                from ..core.ui_grounding import UIGroundingService
+                elements = UIGroundingService.scan_screen(fence=self.fence)
+                summary_texts = [f"'{el.text}' em ({el.x},{el.y})" for el in elements[:15]]
+                return {
+                    "success": True,
+                    "count": len(elements),
+                    "elements": [el.to_dict() for el in elements[:30]],
+                    "message": f"{len(elements)} textos encontrados na tela: " + ", ".join(summary_texts[:8]),
+                }
 
             elif name == "keyboard_type":
                 text = args.get("text", "")

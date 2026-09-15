@@ -433,6 +433,18 @@ class ActionExecutor:
         act = DesktopAction(ActionType.CLICK, target_label)
         target_el = self._find_element_by_label(target_label)
         if target_el is None:
+            # Fallback inteligente: se AT-SPI não localizou o elemento (ex: app Electron, navegador ou LibreOffice sem bridge),
+            # tenta localizar e clicar visualmente via OCR / Grounding Multimodal
+            try:
+                from ..core.ui_grounding import UIGroundingService
+                ok_vis, msg_vis, _coords = UIGroundingService.click_visual_element(
+                    target_label, driver=self.input_driver, fence=self.input_driver.fence
+                )
+                if ok_vis:
+                    return ExecutionReport(action=act, success=True, message=msg_vis)
+            except Exception as exc:
+                logger.debug("Fallback visual de clique falhou: %s", exc)
+
             return ExecutionReport(
                 action=act,
                 success=False,
@@ -487,6 +499,24 @@ class ActionExecutor:
 
         target_el = self._find_element_by_label(action.target)
         if target_el is None:
+            # Fallback visual: localiza o campo na tela via OCR/Visão
+            try:
+                from ..core.ui_grounding import UIGroundingService
+                candidates = UIGroundingService.find_elements(action.target, fence=self.input_driver.fence)
+                if candidates:
+                    best_el, _score = candidates[0]
+                    self.input_driver.click(best_el.x, best_el.y, label=f"Focando '{best_el.text}'")
+                    ok_t, msg_t = self.input_driver.type_text(
+                        text, press_enter=bool(action.params.get("press_enter", False))
+                    )
+                    return ExecutionReport(
+                        action=action,
+                        success=ok_t,
+                        message=f"Texto digitado em '{best_el.text}' (localizado por visão): {msg_t}",
+                    )
+            except Exception as exc:
+                logger.debug("Fallback visual de digitação falhou: %s", exc)
+
             return ExecutionReport(
                 action=action,
                 success=False,

@@ -110,9 +110,9 @@ class ScreenCaptureService:
                     if (x2 - x1) >= 60 and (y2 - y1) >= 60:
                         img = img.crop((x1, y1, x2, y2))
 
-                # Redimensiona mantendo proporção se exceder max_size
+                # Redimensiona mantendo proporção se exceder max_size (0 ou None desativa resize)
                 w, h = img.size
-                if w > max_size or h > max_size:
+                if max_size and max_size > 0 and (w > max_size or h > max_size):
                     if w > h:
                         new_w = max_size
                         new_h = int(h * (max_size / w))
