@@ -23,7 +23,9 @@ sys.path.insert(
 from zorin_copilot.ai.live import (  # noqa: E402
     LIVE_TOOLS_DECLARATION,
     GeminiLiveClient,
+    build_realtime_audio_msg,
     build_realtime_text_msg,
+    build_realtime_video_msg,
 )
 from zorin_copilot.shell.risk import RiskLevel, RiskPolicy  # noqa: E402
 
@@ -98,6 +100,34 @@ class RealtimePayloadTest(unittest.TestCase):
     def test_build_realtime_text_msg_structure(self):
         msg = build_realtime_text_msg("contexto novo")
         self.assertEqual(msg, {"realtimeInput": {"text": "contexto novo"}})
+
+    def test_build_realtime_audio_msg_structure(self):
+        msg = build_realtime_audio_msg("abc123audio")
+        self.assertEqual(
+            msg,
+            {
+                "realtimeInput": {
+                    "audio": {
+                        "mimeType": "audio/pcm;rate=16000",
+                        "data": "abc123audio",
+                    }
+                }
+            },
+        )
+
+    def test_build_realtime_video_msg_structure(self):
+        msg = build_realtime_video_msg("xyz789video", "image/png")
+        self.assertEqual(
+            msg,
+            {
+                "realtimeInput": {
+                    "video": {
+                        "mimeType": "image/png",
+                        "data": "xyz789video",
+                    }
+                }
+            },
+        )
 
     def test_memory_remember_declared(self):
         names = {

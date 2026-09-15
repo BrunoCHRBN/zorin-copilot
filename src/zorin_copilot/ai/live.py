@@ -95,6 +95,30 @@ def build_realtime_text_msg(text: str) -> dict[str, Any]:
     return {"realtimeInput": {"text": text}}
 
 
+def build_realtime_audio_msg(b64_audio: str, mime_type: str = "audio/pcm;rate=16000") -> dict[str, Any]:
+    """Monta o payload `realtimeInput` de áudio (substitui mediaChunks deprecado)."""
+    return {
+        "realtimeInput": {
+            "audio": {
+                "mimeType": mime_type,
+                "data": b64_audio,
+            }
+        }
+    }
+
+
+def build_realtime_video_msg(b64_image: str, mime_type: str = "image/jpeg") -> dict[str, Any]:
+    """Monta o payload `realtimeInput` de vídeo/imagem (substitui mediaChunks deprecado)."""
+    return {
+        "realtimeInput": {
+            "video": {
+                "mimeType": mime_type,
+                "data": b64_image,
+            }
+        }
+    }
+
+
 LIVE_TOOLS_DECLARATION = [
     {
         "functionDeclarations": [
@@ -1258,16 +1282,7 @@ class GeminiLiveClient:
             # Se não estiver mutado, envia chunk de áudio em base64 para o WebSocket
             if not self._is_muted:
                 b64_audio = base64.b64encode(pcm_bytes).decode("utf-8")
-                msg = {
-                    "realtimeInput": {
-                        "mediaChunks": [
-                            {
-                                "mimeType": "audio/pcm;rate=16000",
-                                "data": b64_audio,
-                            }
-                        ]
-                    }
-                }
+                msg = build_realtime_audio_msg(b64_audio)
                 try:
                     await ws.send(json.dumps(msg))
                 except Exception as exc:
@@ -1292,11 +1307,14 @@ class GeminiLiveClient:
                 reason = getattr(exc.rcvd, "reason", "") or getattr(exc.sent, "reason", "") or getattr(exc, "reason", "")
                 if self._is_running and code != 1000:
                     reason_clean = (reason or "").strip()
-                    # Código 1007 + motivo mencionando áudio/modelo = API recusou
+                    # Código 1007 + motivo mencionando modelo = API recusou
                     # o setup_payload (modelo não suporta CONTENT_TYPE_AUDIO).
                     # Vale orientar o usuário a checar `gemini_live_model` em vez
                     # de sugerir problema de rede ou chave.
-                    if code == 1007 and ("audio" in reason_clean.lower() or "model" in reason_clean.lower()):
+                    if code == 1007 and (
+                        "model" in reason_clean.lower()
+                        or "content_type_audio" in reason_clean.lower()
+                    ) and "media_chunks" not in reason_clean.lower() and "deprecated" not in reason_clean.lower():
                         msg = (
                             "Modelo Live recusado pela API Gemini "
                             f"(código {code}"
@@ -2222,16 +2240,7 @@ class GeminiLiveClient:
                 return
 
             b64_img = base64.b64encode(img_bytes).decode("utf-8")
-            frame_msg = {
-                "realtimeInput": {
-                    "mediaChunks": [
-                        {
-                            "mimeType": "image/jpeg",
-                            "data": b64_img,
-                        }
-                    ]
-                }
-            }
+            frame_msg = build_realtime_video_msg(b64_img)
             asyncio.run_coroutine_threadsafe(self._ws.send(json.dumps(frame_msg)), self._loop)
 
         threading.Thread(target=capture_and_send, daemon=True).start()
@@ -2341,11 +2350,7 @@ class GeminiLiveClient:
                         shield_bytes = ScreenCaptureService.get_privacy_shield_image()
                         if shield_bytes and self._is_video_streaming and self._is_running:
                             b64_img = base64.b64encode(shield_bytes).decode("utf-8")
-                            frame_msg = {
-                                "realtimeInput": {
-                                    "mediaChunks": [{"mimeType": "image/jpeg", "data": b64_img}]
-                                }
-                            }
+                            frame_msg = build_realtime_video_msg(b64_img)
                             asyncio.run_coroutine_threadsafe(
                                 self._ws.send(json.dumps(frame_msg)), self._loop
                             )
@@ -2404,11 +2409,7 @@ class GeminiLiveClient:
                             self._unchanged_frames_count = 0
                             self._last_sent_frame_bytes = img_bytes
                             b64_img = base64.b64encode(img_bytes).decode("utf-8")
-                            frame_msg = {
-                                "realtimeInput": {
-                                    "mediaChunks": [{"mimeType": "image/jpeg", "data": b64_img}]
-                                }
-                            }
+                            frame_msg = build_realtime_video_msg(b64_img)
                             asyncio.run_coroutine_threadsafe(
                                 self._ws.send(json.dumps(frame_msg)), self._loop
                             )
