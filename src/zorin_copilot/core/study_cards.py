@@ -355,7 +355,7 @@ def generate_cards(
         discipline=discipline, title=title or "(sem título)", n_cards=n_cards, text=excerpt
     )
     try:
-        raw = ai.complete(STUDY_SYSTEM_PROMPT, prompt)
+        raw = ai.complete(prompt, system_prompt=STUDY_SYSTEM_PROMPT, json_mode=True)
     except Exception as exc:
         return [], [f"Falha ao consultar o modelo: {exc}"]
 
@@ -475,10 +475,18 @@ def new_deck(
 class StudyAI:
     """Completações de texto para estudo: local (Ollama) ou nuvem (Gemini/OpenAI).
 
-    Falando direto com as APIs, e não via `ai.providers`, por um motivo simples:
-    a camada de provedores monta o próprio system prompt de assistente de desktop
-    e tenta extrair ações. Aqui precisamos de system prompt próprio e JSON puro.
+    Delega para a camada de provedores via
+    ``complete(prompt, system_prompt=..., json_mode=True)`` — a mesma porta que o
+    LLMPlanner do modo agente usa. Essa chamada fala direto com a API do modelo,
+    sem o parser de ações de desktop, então chega system prompt próprio e JSON
+    puro. Além de menos código, herda o reparo de JSON truncado dos provedores.
+
+    Um detalhe: gerar um baralho é tarefa de lote, não de interação — por isso o
+    provedor local é construído com timeout maior (120s) que o padrão do HUD.
     """
+
+    # Baralho de 10 cards num 7B local não cabe no orçamento de 45s do chat.
+    BATCH_TIMEOUT = 120
 
     def __init__(self, config: Any | None = None, provider: Any | None = None, mode: str = "auto") -> None:
         self._config = config
@@ -494,14 +502,19 @@ class StudyAI:
             self._config = CopilotConfig.load()
         return self._config
 
-    def complete(self, system: str, user: str) -> str:
+    def complete(self, prompt: str, system_prompt: str | None = None, json_mode: bool = True) -> str:
+        """Mesma assinatura de `ai.providers`, para o StudyAI ser trocável por um provedor."""
         if self._provider is not None:
             self.used = getattr(self._provider, "name", "injetado")
-            return str(self._provider.complete(system, user))
+            return str(
+                self._provider.complete(prompt, system_prompt=system_prompt, json_mode=json_mode)
+            )
 
         if self.mode in ("auto", "local"):
             try:
-                text = self._ollama(system, user)
+                text = self._local_provider().complete(
+                    prompt, system_prompt=system_prompt, json_mode=json_mode
+                )
                 self.used = "local"
                 return text
             except Exception as exc:
@@ -509,63 +522,36 @@ class StudyAI:
                     raise
                 logger.debug("Ollama falhou, tentando nuvem: %s", exc)
 
-        text = self._cloud(system, user)
+        text = self._cloud_provider().complete(
+            prompt, system_prompt=system_prompt, json_mode=json_mode
+        )
         self.used = "cloud"
         return text
 
-    def _ollama(self, system: str, user: str) -> str:
-        import requests
+    def _local_provider(self) -> Any:
+        from ..ai.providers import OllamaProvider
 
-        url = f"{str(getattr(self.config, 'ollama_url', 'http://127.0.0.1:11434')).rstrip('/')}/api/chat"
-        payload = {
-            "model": getattr(self.config, "ollama_model", "qwen2.5:7b"),
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "stream": False,
-            "format": "json",
-            "options": {"temperature": 0.4, "num_predict": 2048},
-            "keep_alive": "15m",
-        }
-        resp = requests.post(url, json=payload, timeout=120)
-        if resp.status_code != 200:
-            raise RuntimeError(f"Ollama respondeu {resp.status_code}: {resp.text[:160]}")
-        return resp.json().get("message", {}).get("content", "")
+        return OllamaProvider(
+            str(getattr(self.config, "ollama_url", "http://127.0.0.1:11434")),
+            str(getattr(self.config, "ollama_model", "qwen2.5:7b")),
+            str(getattr(self.config, "ollama_vision_model", "minicpm-v")),
+            timeout=self.BATCH_TIMEOUT,
+        )
 
-    def _cloud(self, system: str, user: str) -> str:
-        import requests
+    def _cloud_provider(self) -> Any:
+        from ..ai.providers import GeminiProvider, OpenAICompatProvider
 
         key = str(getattr(self.config, "gemini_api_key", "") or "").strip()
         if key:
-            model = getattr(self.config, "gemini_model", "gemini-flash-latest")
-            url = (
-                "https://generativelanguage.googleapis.com/v1beta/models/"
-                f"{model}:generateContent?key={key}"
-            )
-            payload = {
-                "systemInstruction": {"parts": [{"text": system}]},
-                "contents": [{"parts": [{"text": user}]}],
-                "generationConfig": {"temperature": 0.4, "responseMimeType": "application/json"},
-            }
-            resp = requests.post(url, json=payload, timeout=90)
-            if resp.status_code != 200:
-                raise RuntimeError(f"Gemini respondeu {resp.status_code}: {resp.text[:160]}")
-            data = resp.json()
-            parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
-            return "".join(str(part.get("text", "")) for part in parts)
+            return GeminiProvider(key, str(getattr(self.config, "gemini_model", "gemini-flash-latest")))
 
         openai_key = str(getattr(self.config, "openai_api_key", "") or "").strip()
         if openai_key:
-            from ..ai.providers import OpenAICompatProvider
-
-            provider = OpenAICompatProvider(
-                getattr(self.config, "openai_url", "https://api.openai.com/v1"),
+            return OpenAICompatProvider(
+                str(getattr(self.config, "openai_url", "https://api.openai.com/v1")),
                 openai_key,
-                getattr(self.config, "openai_model", "gpt-4o-mini"),
+                str(getattr(self.config, "openai_model", "gpt-4o-mini")),
             )
-            text, _actions = provider.chat(f"{system}\n\n{user}")
-            return text
 
         raise RuntimeError(
             "Nenhum modelo configurado: suba o Ollama (ollama serve) ou defina a chave do Gemini."

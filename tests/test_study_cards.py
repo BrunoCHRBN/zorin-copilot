@@ -49,8 +49,9 @@ class FakeAI:
         self.payload = payload
         self.calls: list[tuple[str, str]] = []
 
-    def complete(self, system: str, user: str) -> str:
-        self.calls.append((system, user))
+    def complete(self, prompt: str, system_prompt: str | None = None, json_mode: bool = True) -> str:
+        # Mesma assinatura de `ai.providers` para o dublê não esconder desvios.
+        self.calls.append((system_prompt or "", prompt))
         return self.payload
 
 
@@ -386,7 +387,7 @@ class StubAI:
     def __init__(self, *args, **kwargs) -> None:
         self.used = "fake"
 
-    def complete(self, system, user):
+    def complete(self, prompt, system_prompt=None, json_mode=True):
         return json.dumps(CARDS_JSON, ensure_ascii=False)
 
 

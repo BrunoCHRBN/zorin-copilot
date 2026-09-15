@@ -660,10 +660,15 @@ class OllamaProvider(BaseLLMProvider):
         host_url: str = "http://127.0.0.1:11434",
         model: str = "qwen2.5:7b",
         vision_model: str = "minicpm-v",
+        timeout: int = 45,
     ):
         self.host_url = host_url.rstrip("/")
         self.model = model.strip() or "qwen2.5:7b"
         self.vision_model = vision_model.strip() or "minicpm-v"
+        # Tarefas interativas (HUD, chat) querem resposta em segundos; tarefas de
+        # lote (gerar baralho de estudo) precisam de orçamento maior. Quem
+        # constrói o provedor escolhe — o padrão continua 45s para todo o resto.
+        self.timeout = int(timeout) if timeout else 45
 
     def is_configured(self) -> bool:
         return bool(self.host_url)
@@ -776,7 +781,7 @@ class OllamaProvider(BaseLLMProvider):
         if json_mode:
             payload["format"] = "json"
 
-        resp = requests.post(url, json=payload, timeout=45)
+        resp = requests.post(url, json=payload, timeout=self.timeout)
         if resp.status_code != 200:
             raise RuntimeError(f"Erro no Ollama ({resp.status_code}): {resp.text[:200]}")
         data = resp.json()
