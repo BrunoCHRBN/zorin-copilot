@@ -154,16 +154,51 @@ zorin-copilot-cli study abnt --from trabalho.md --out trabalho.docx   # ABNT NBR
 zorin-copilot-cli search "mercado varejo" --academic --source sebrae  # SciELO/IBGE/Sebrae/IPEA/Scholar
 ```
 
+### Modo tutor: perguntar sem copiar (`core/study_tutor.py`)
+
+A resposta direta é o pior produto para quem quer aprender — ela pula o esforço
+que gera aprendizado. O modo tutor troca o contrato do modelo em **duas
+superfícies** com a mesma filosofia socrática (valida o raciocínio, faz
+perguntas-guia, dá dica/primeiro passo, termina com pergunta ou exercício,
+**nunca** entrega resposta final, redação pronta ou cálculo completo):
+
+**1. Área separada de estudos** — `study ask`, com contexto do seu material:
+
+```bash
+zorin-copilot-cli study ask "como calculo o ponto de equilíbrio?" --discipline "Contabilidade Gerencial"
+zorin-copilot-cli study ask "o que é markup?" --no-context --local-only
+```
+
+O contexto **não usa RAG**: pontuação determinística por sobreposição de
+palavras-chave escolhe os parágrafos do material capturado que conversam com a
+pergunta (a pasta da disciplina ganha o desempate). Se nada no material cobrir
+o tema, o tutor avisa — e o prompt o proíbe de fingir que leu.
+
+**2. Injeção no chat/HUD inteiro** — um parágrafo no prompt de sistema:
+
+```bash
+zorin-copilot-cli config --tutor on    # liga
+zorin-copilot-cli config --tutor off   # desliga
+zorin-copilot-cli config --show        # confere o estado
+```
+
+Com o tutor ligado, qualquer pergunta acadêmica no chat vira conversa de
+professor; pedidos operacionais (abrir app, organizar arquivos, gerar o .docx
+do trabalho que **você** escreveu) continuam sendo executados normalmente — a
+regra vale para conteúdo, não para operações de desktop. A injeção acontece em
+`build_system_prompt()`, então pega todos os caminhos de chat de uma vez.
+
 ## 4. Estado do plano
 
 | Fase | Item | Estado |
 |---|---|---|
-| **A** | A1 — Captura de material (AT-SPI + clipboard + gate de qualidade) | ✅ |
-| A | A2 — Organização automática por disciplina/aula | ⏳ |
+| **A** | A1 — Captura de material (AT-SPI + clipboard + OCR + gate de qualidade) | ✅ |
+| A | A2 — Organização automática por disciplina/aula | ✅ |
 | **B** | B1 — Geração de flashcards (prompt v2 + filtro antiburocrático) | ✅ |
 | B | B2 — Revisão espaçada SM-2 no terminal | ✅ |
 | B | B3 — Simulados a partir do material capturado | ⏳ |
-| B | B4 — Resumo + glossário por aula | ⏳ |
+| B | B4 — Resumo + glossário por aula | ✅ |
+| B | B5 — Modo tutor socrático (`study ask` + injeção no HUD) | ✅ |
 | **C** | C1 — Entrega do PI em .docx ABNT | ✅ (gerador existia; agora na CLI) |
 | C | C2 — Revisão por voz (Whisper + Piper, já no repo) | ⏳ |
 | C | C3 — Rotina semanal automatizada | ⏳ |

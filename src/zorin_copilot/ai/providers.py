@@ -33,9 +33,16 @@ def build_system_prompt(env=None) -> str:
     """
     environment = env or current_environment()
     description = describe_for_prompt(environment)
-    if description == DEFAULT_ENV_DESCRIPTION:
-        return SYSTEM_PROMPT
-    return SYSTEM_PROMPT.replace(DEFAULT_ENV_DESCRIPTION, description, 1)
+    prompt = SYSTEM_PROMPT
+    if description != DEFAULT_ENV_DESCRIPTION:
+        prompt = prompt.replace(DEFAULT_ENV_DESCRIPTION, description, 1)
+    try:  # modo tutor socrático (opcional — `config --tutor on`)
+        if CopilotConfig.load().study_tutor:
+            from ..core.study_tutor import TUTOR_ADDON
+            prompt += TUTOR_ADDON
+    except Exception:
+        pass
+    return prompt
 
 
 SYSTEM_PROMPT = """Você é o Zorin Copilot, assistente e parceiro de desktop nativo do usuário no Zorin OS 18 Core (Linux / GNOME 46 no Wayland).

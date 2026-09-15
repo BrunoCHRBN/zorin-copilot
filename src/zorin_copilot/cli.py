@@ -59,6 +59,11 @@ def build_parser() -> argparse.ArgumentParser:
     config_cmd.add_argument("--set-workbuddy-key", help="define a chave de API do WorkBuddy AI / Tencent HY4")
     config_cmd.add_argument("--set-workbuddy-model", help="define o modelo WorkBuddy (ex: hy4-preview)")
     config_cmd.add_argument("--set-provider", choices=["gemini", "ollama", "openai", "workbuddy"], help="define o provedor ativo")
+    config_cmd.add_argument(
+        "--tutor",
+        choices=["on", "off"],
+        help="liga/desliga o modo tutor socrático no chat/HUD: guia com perguntas em vez de entregar respostas prontas",
+    )
 
     # memory
     memory_cmd = sub.add_parser("memory", help="gerencia a base de conhecimento e histórico de execuções")
@@ -205,6 +210,25 @@ def build_parser() -> argparse.ArgumentParser:
     study_abnt = study_sub.add_parser("abnt", help="gera .docx no padrão ABNT a partir de um .md")
     study_abnt.add_argument("--from", dest="source", required=True, help="arquivo .md de origem")
     study_abnt.add_argument("--out", help="arquivo .docx de destino (padrão: mesmo nome)")
+
+    study_ask = study_sub.add_parser(
+        "ask",
+        help="pergunta ao tutor: guia com perguntas e pistas, sem entregar a resposta pronta",
+    )
+    study_ask.add_argument("question", help="sua dúvida sobre o curso, trabalho ou atividade")
+    study_ask.add_argument(
+        "--discipline",
+        default=None,
+        help="nome da disciplina (padrão: 'Gestão Comercial')",
+    )
+    study_ask.add_argument(
+        "--no-context",
+        action="store_true",
+        help="não procura trechos do material capturado em ~/Documentos/Estudos",
+    )
+    study_ask.add_argument("--local-only", action="store_true", help="usa apenas o modelo local")
+    study_ask.add_argument("--cloud", action="store_true", help="usa apenas o modelo em nuvem")
+    study_ask.add_argument("--json", action="store_true", help="saída em JSON")
 
     return parser
 
@@ -414,6 +438,14 @@ def cmd_config(args: argparse.Namespace) -> int:
         changed = True
         print(f"Provedor alterado para '{args.set_provider}'.")
 
+    if args.tutor:
+        cfg.study_tutor = args.tutor == "on"
+        changed = True
+        print(f"Modo tutor {'ativado' if cfg.study_tutor else 'desativado'}.")
+        if cfg.study_tutor:
+            print("  O chat/HUD passa a guiar com perguntas e dicas em vez de")
+            print("  entregar respostas prontas de conteúdo acadêmico.")
+
     if changed:
         cfg.save()
         print("Configuração salva com sucesso.")
@@ -426,6 +458,7 @@ def cmd_config(args: argparse.Namespace) -> int:
         print(f"  WorkBuddy Configurado: {'Sim' if bool(cfg.workbuddy_api_key) else 'Não'}")
         print(f"  WorkBuddy Modelo: {cfg.workbuddy_model}")
         print(f"  Ollama URL: {cfg.ollama_url} (Modelo: {cfg.ollama_model})")
+        print(f"  Modo tutor (HUD): {'ligado' if cfg.study_tutor else 'desligado'}")
         print(f"  Arquivo: {cfg.config_file()}")
 
     return 0
@@ -909,6 +942,8 @@ def cmd_study(args: argparse.Namespace) -> int:
         return _study_review(args)
     if args.study_action == "abnt":
         return _study_abnt(args)
+    if args.study_action == "ask":
+        return _study_ask(args)
     return 0
 
 
@@ -1077,6 +1112,42 @@ def _study_summarize(args: argparse.Namespace) -> int:
         print(f"Salvo em: {path}")
     for warning in warnings:
         print(f"  ⚠️  {warning}")
+    return 0
+
+
+def _study_ask(args: argparse.Namespace) -> int:
+    """Tutor socrático: responde guiando, sem entregar a solução pronta."""
+    from .core.study_summary import build_default_ai
+    from .core.study_tutor import answer
+
+    mode = "local" if args.local_only else ("cloud" if args.cloud else "auto")
+    ai = build_default_ai(mode)
+    text, warnings = answer(
+        args.question,
+        ai,
+        discipline=(args.discipline or "").strip() or "Gestão Comercial",
+        include_context=not args.no_context,
+    )
+
+    if args.json:
+        payload = {
+            "question": args.question,
+            "answer": text,
+            "provider": getattr(ai, "used", ""),
+            "warnings": warnings,
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0 if text else 1
+
+    if not text:
+        print("✗ O tutor não conseguiu responder.")
+        for warning in warnings:
+            print(f"  ⚠️  {warning}")
+        return 1
+
+    print(text)
+    for warning in warnings:
+        print(f"\n  ⚠️  {warning}")
     return 0
 
 

@@ -50,6 +50,10 @@ class CopilotConfig:
     # Pesquisa na Web em tempo real
     web_search_enabled: bool = True
 
+    # Modo Tutor Socrático no chat/HUD: quando ativo, o assistente NÃO entrega
+    # respostas prontas para conteúdo acadêmico — guia com perguntas e pistas.
+    study_tutor: bool = False
+
     # Atalho Global do Sistema (HUD Summon)
     global_shortcut_enabled: bool = True
     global_shortcut_key: str = "<Super>c"
