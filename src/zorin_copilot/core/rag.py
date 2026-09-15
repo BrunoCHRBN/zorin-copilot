@@ -925,9 +925,44 @@ class LocalDocumentRAG:
             "found": True,
         }
 
+    @staticmethod
+    def _resolve_document_path(file_path: str) -> Path:
+        """Resolve caminhos relativos, com til (~), ou com '/home/usuario' alucinado por LLMs."""
+        raw = str(file_path or "").strip()
+        expanded = os.path.expanduser(raw)
+        p = Path(expanded)
+        if p.exists():
+            return p
+
+        home = Path.home()
+        # Se o modelo gerou /home/<usuario_generico>/... (ex.: /home/usuario, /home/user, /home/aluno)
+        parts = p.parts
+        if len(parts) >= 4 and parts[0] == "/" and parts[1] == "home":
+            candidate = home.joinpath(*parts[3:])
+            if candidate.exists():
+                return candidate
+
+        # Se não encontrou ou era apenas o nome do arquivo, busca em diretórios usuais de documentos
+        filename = p.name
+        if filename:
+            search_dirs = [
+                home / "Documentos" / "Gestao_Comercial" / "TCC_Artigos",
+                home / "Documentos" / "Relatorios",
+                home / "Documentos",
+                home / "Downloads",
+                home / "Área de Trabalho",
+                home / "Desktop",
+            ]
+            for sdir in search_dirs:
+                cand = sdir / filename
+                if cand.exists():
+                    return cand
+
+        return p
+
     def open_document(self, file_path: str, page_number: int = 1) -> tuple[bool, str]:
         """Abre o arquivo no leitor padrão (Evince na página exata para PDFs ou visualizador do sistema)."""
-        fpath = Path(file_path)
+        fpath = self._resolve_document_path(file_path)
         if not fpath.exists():
             return False, f"Arquivo '{file_path}' não encontrado no disco."
 
@@ -973,18 +1008,31 @@ class LocalDocumentRAG:
                     except Exception:
                         pass
 
-        # 4. Fallback universal: gio open / xdg-open
+        # 4. Fallback universal: gio open / xdg-open / gerenciador de arquivos
         for opener in ("gio", "xdg-open"):
             if shutil.which(opener):
                 try:
+                    cmd = [opener, "open", str(fpath)] if opener == "gio" else [opener, str(fpath)]
                     subprocess.Popen(
-                        [opener, "open" if opener == "gio" else "", str(fpath)],
+                        cmd,
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                     )
-                    return True, f"Arquivo '{fpath.name}' aberto no aplicativo padrão."
+                    return True, f"Arquivo '{fpath.name}' aberto com o visualizador padrão."
                 except Exception:
                     pass
+
+        # Se não encontrou visualizador específico, abre a pasta do arquivo
+        parent_dir = fpath.parent
+        if parent_dir.exists():
+            for opener in ("gio", "xdg-open"):
+                if shutil.which(opener):
+                    try:
+                        cmd = [opener, "open", str(parent_dir)] if opener == "gio" else [opener, str(parent_dir)]
+                        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        return True, f"Pasta com o arquivo '{fpath.name}' aberta no gerenciador de arquivos."
+                    except Exception:
+                        pass
 
         return False, f"Nenhum visualizador disponível para abrir '{fpath.name}'."
 

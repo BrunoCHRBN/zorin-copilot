@@ -264,11 +264,13 @@ class ActionExecutor:
         )
 
     def _open_document(self, action: DesktopAction) -> ExecutionReport:
-        fpath = action.target
+        fpath = action.target or action.params.get("path") or getattr(self, "last_written_path", "")
         page = int(action.params.get("page_number", 1))
         from ..core.rag import LocalDocumentRAG
         rag = getattr(self, "rag", None) or LocalDocumentRAG()
         ok, msg = rag.open_document(fpath, page_number=page)
+        if not ok and getattr(self, "last_written_path", None) and self.last_written_path != fpath:
+            ok, msg = rag.open_document(self.last_written_path, page_number=page)
         return ExecutionReport(action=action, success=ok, message=msg)
 
     def _copy_ocr_text(self, action: DesktopAction) -> ExecutionReport:
@@ -550,6 +552,8 @@ class ActionExecutor:
                 revert=make_file_revert(path, snapshot),
                 action_type=ActionType.WRITE_FILE.value,
             )
+        if ok:
+            self.last_written_path = path
         return ExecutionReport(action=action, success=ok, message=msg)
 
     def _organize_files(self, action: DesktopAction) -> ExecutionReport:

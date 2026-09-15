@@ -92,7 +92,7 @@ AÇÕES DISPONÍVEIS NO ARRAY "actions":
   * YouTube busca: "https://www.youtube.com/results?search_query=<query>"
   * Google Maps busca: "https://www.google.com/maps/search/<query>"
 - "launch_app": abrir aplicativo do desktop. target: "nome_app".
-- "open_document": abrir arquivo de documento localizado no visualizador ou LibreOffice. target: "/caminho/arquivo", params: {"page_number": 1}.
+- "open_document": abrir arquivo de documento localizado no visualizador ou LibreOffice. target: "~/Documentos/..." ou "nome.docx", params: {"page_number": 1}. IMPORTANTE: NUNCA invente "/home/usuario" ou caminhos fictícios. Use sempre o til "~/" para indicar a pasta pessoal do usuário.
 - "system_control": ajustes do sistema (volume, tema). target: "ação", params: {"action": "...", "value": "..."}.
 - "media_control": controle de música e Spotify. target: "play"|"pause"|"next"|"previous"|"search", params: {"action": "play"|"pause"|"search", "query": "nome da música ou artista", "player": "spotify"}.
 - "type_text": digitar texto na aplicação ativa. target: "descrição do campo", params: {"text": "conteúdo a digitar"}.
@@ -341,6 +341,12 @@ class BaseLLMProvider(ABC):
                         c = params.get("content", "")
                         if not c or str(c).strip().lower() in ("auto", "use_explanation") or len(str(c)) < 30:
                             params["content"] = explanation
+                    elif action_type == ActionType.OPEN_DOCUMENT:
+                        # Se a IA alucinou /home/usuario/ ou /home/<outro>/, normaliza para ~/
+                        p_str = target.replace("\\", "/")
+                        parts = p_str.split("/", 3)
+                        if len(parts) >= 4 and parts[1] == "home":
+                            target = f"~/{parts[3]}"
                     actions.append(
                         DesktopAction(
                             action_type=action_type,

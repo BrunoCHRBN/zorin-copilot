@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import MagicMock
 
-from zorin_copilot.ai.actions import ActionType
+from zorin_copilot.ai.actions import ActionType, DesktopAction
 from zorin_copilot.ai.engine import IntentEngine
 from zorin_copilot.core.config import CopilotConfig
 
@@ -126,6 +126,46 @@ class ActionGuaranteeTest(unittest.TestCase):
         explanation, actions = BaseLLMProvider.parse_response_payload(payload)
         self.assertEqual(len(actions), 1)
         self.assertEqual(actions[0].params.get("content"), explanation)
+
+    def test_open_document_resolves_hallucinated_user_path(self):
+        """Valida que _resolve_document_path mapeia /home/usuario/... para o diretório real do usuário."""
+        from pathlib import Path
+        from zorin_copilot.core.rag import LocalDocumentRAG
+
+        rag = LocalDocumentRAG()
+        # Testa resolução de caminho com /home/usuario/
+        fake_path = "/home/usuario/Documentos/Gestao_Comercial/TCC_Artigos/Introducao_TCC.docx"
+        resolved = rag._resolve_document_path(fake_path)
+
+        # Se o arquivo existir na pasta do usuário real, deve apontar para ele
+        real_target = Path.home() / "Documentos" / "Gestao_Comercial" / "TCC_Artigos" / "Introducao_TCC.docx"
+        if real_target.exists():
+            self.assertEqual(resolved, real_target)
+
+    def test_engine_syncs_open_document_with_write_file_doc_path(self):
+        """Valida que quando a IA gera OPEN_DOCUMENT com caminho alucinado (/home/usuario), o engine sincroniza com o arquivo gerado."""
+        mock_reply = "Aqui está a introdução."
+        mock_actions = [
+            DesktopAction(
+                action_type=ActionType.WRITE_FILE,
+                target="Introducao_TCC.docx",
+                params={"filename": "Introducao_TCC.docx", "directory": "~/Documentos/Gestao_Comercial/TCC_Artigos", "content": "auto"},
+            ),
+            DesktopAction(
+                action_type=ActionType.OPEN_DOCUMENT,
+                target="/home/usuario/Documentos/Gestao_Comercial/TCC_Artigos/Introducao_TCC.docx",
+                params={"page_number": 1},
+            ),
+        ]
+        self.engine.llm_provider.chat = MagicMock(return_value=(mock_reply, mock_actions))
+
+        plan = self.engine.parse("me ajude com o inicio de uma introducao de um projeto integrador")
+
+        open_act = next((a for a in plan.actions if a.action_type == ActionType.OPEN_DOCUMENT), None)
+        self.assertIsNotNone(open_act)
+        # O caminho alucinado '/home/usuario' deve ter sido limpo e sincronizado
+        self.assertNotIn("/home/usuario", open_act.target)
+        self.assertIn("Introducao_TCC.docx", open_act.target)
 
 
 if __name__ == "__main__":

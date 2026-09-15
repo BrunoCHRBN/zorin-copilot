@@ -1456,13 +1456,19 @@ class IntentEngine:
                         target_dir = write_act.params.get("directory") or target_dir
                         doc_path = f"{target_dir.rstrip('/')}/{fname}"
 
-                    # Se a IA não gerou a ação de abrir o documento, gera automaticamente
-                    if not any(a.action_type == ActionType.OPEN_DOCUMENT for a in actions):
+                    # Sincroniza ou gera a ação de abrir o documento
+                    open_act = next((a for a in actions if a.action_type == ActionType.OPEN_DOCUMENT), None)
+                    if open_act:
+                        # Sempre ancora open_document no caminho real resolvido de write_file
+                        open_act.target = doc_path
+                        open_act.params["path"] = doc_path
+                        open_act.description = f"Abrir '{fname}' no LibreOffice Writer"
+                    else:
                         actions.append(
                             DesktopAction(
                                 ActionType.OPEN_DOCUMENT,
                                 doc_path,
-                                {"page_number": 1},
+                                {"page_number": 1, "path": doc_path},
                                 description=f"Abrir '{fname}' no LibreOffice Writer",
                             )
                         )
