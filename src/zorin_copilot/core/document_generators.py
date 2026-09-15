@@ -15,6 +15,7 @@ import re
 __all__ = [
     "MissingOfficeDependencyError",
     "generate_docx",
+    "generate_abnt_docx",
     "generate_pptx",
 ]
 
@@ -186,7 +187,12 @@ def _parse_markdown_blocks(md: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-def generate_docx(path: str, markdown: str) -> None:
+def generate_abnt_docx(path: str, markdown: str, font_name: str = "Arial") -> None:
+    """Escreve um arquivo .docx estritamente formatado nas normas ABNT (NBR 14724/10520/6023)."""
+    generate_docx(path, markdown, abnt=True, font_name=font_name)
+
+
+def generate_docx(path: str, markdown: str, abnt: bool = False, font_name: str = "Arial") -> None:
     """Escreve um arquivo .docx real em `path` a partir de `markdown`."""
     try:
         from docx import Document
@@ -198,59 +204,184 @@ def generate_docx(path: str, markdown: str) -> None:
         ) from exc
 
     doc = Document()
+    if abnt:
+        _setup_abnt_document(doc, font_name=font_name)
+
+    in_references = False
     for block in _parse_markdown_blocks(markdown):
-        _render_docx_block(doc, block)
+        if block["type"] == "heading":
+            h_text = _strip_inline(block.get("text", "")).upper()
+            if "REFERÊNCIA" in h_text or "BIBLIOGRAF" in h_text:
+                in_references = True
+            elif block.get("level", 1) == 1:
+                in_references = False
+        _render_docx_block(doc, block, abnt=abnt, font_name=font_name, in_references=in_references)
     doc.save(path)
 
 
-def _render_docx_block(doc, block: dict) -> None:
-    from docx.shared import Pt, RGBColor  # import local (docx opcional)
+def _setup_abnt_document(doc, font_name: str = "Arial") -> None:
+    """Configura margens e estilos de acordo com ABNT NBR 14724."""
+    from docx.shared import Cm, Pt, RGBColor
+
+    for section in doc.sections:
+        section.top_margin = Cm(3.0)
+        section.left_margin = Cm(3.0)
+        section.bottom_margin = Cm(2.0)
+        section.right_margin = Cm(2.0)
+
+    normal_style = doc.styles["Normal"]
+    normal_style.font.name = font_name
+    normal_style.font.size = Pt(12)
+    normal_style.font.color.rgb = RGBColor(0, 0, 0)
+    normal_style.paragraph_format.line_spacing = 1.5
+    normal_style.paragraph_format.space_before = Pt(0)
+    normal_style.paragraph_format.space_after = Pt(0)
+
+
+def _render_docx_block(
+    doc,
+    block: dict,
+    abnt: bool = False,
+    font_name: str = "Arial",
+    in_references: bool = False,
+) -> None:
+    from docx.enum.table import WD_TABLE_ALIGNMENT
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.shared import Cm, Pt, RGBColor
 
     t = block["type"]
     if t == "heading":
         level = min(max(block["level"], 1), 9)
-        doc.add_heading(_strip_inline(block["text"]), level=level)
+        raw_text = _strip_inline(block["text"])
+        if abnt:
+            p = doc.add_paragraph()
+            p.paragraph_format.first_line_indent = Cm(0)
+            p.paragraph_format.line_spacing = 1.5
+            p.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.LEFT
+            if level == 1:
+                p.paragraph_format.space_before = Pt(12)
+                p.paragraph_format.space_after = Pt(12)
+                run = p.add_run(raw_text.upper())
+                run.bold = True
+            elif level == 2:
+                p.paragraph_format.space_before = Pt(12)
+                p.paragraph_format.space_after = Pt(6)
+                run = p.add_run(raw_text)
+                run.bold = True
+            else:
+                p.paragraph_format.space_before = Pt(6)
+                p.paragraph_format.space_after = Pt(6)
+                run = p.add_run(raw_text)
+                run.italic = True
+            run.font.name = font_name
+            run.font.size = Pt(12)
+            run.font.color.rgb = RGBColor(0, 0, 0)
+        else:
+            doc.add_heading(raw_text, level=level)
+
     elif t == "paragraph":
         p = doc.add_paragraph()
-        _add_inline_runs(p, block["text"])
+        if abnt:
+            if in_references:
+                p.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                p.paragraph_format.first_line_indent = Cm(0)
+                p.paragraph_format.line_spacing = 1.0
+                p.paragraph_format.space_after = Pt(12)
+            else:
+                p.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+                p.paragraph_format.first_line_indent = Cm(1.25)
+                p.paragraph_format.line_spacing = 1.5
+                p.paragraph_format.space_after = Pt(0)
+        _add_inline_runs(p, block["text"], font_name=font_name if abnt else None)
+
     elif t == "ulist":
         for item in block["items"]:
             p = doc.add_paragraph(style="List Bullet")
-            _add_inline_runs(p, item)
+            if abnt:
+                p.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                p.paragraph_format.line_spacing = 1.5
+                p.paragraph_format.first_line_indent = Cm(0)
+            _add_inline_runs(p, item, font_name=font_name if abnt else None)
+
     elif t == "olist":
         for item in block["items"]:
             p = doc.add_paragraph(style="List Number")
-            _add_inline_runs(p, item)
+            if abnt:
+                p.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                p.paragraph_format.line_spacing = 1.5
+                p.paragraph_format.first_line_indent = Cm(0)
+            _add_inline_runs(p, item, font_name=font_name if abnt else None)
+
     elif t == "code":
         p = doc.add_paragraph()
+        if abnt:
+            p.paragraph_format.first_line_indent = Cm(0)
+            p.paragraph_format.left_indent = Cm(1.0)
+            p.paragraph_format.line_spacing = 1.0
         run = p.add_run(block["text"])
         run.font.name = "Courier New"
         run.font.size = Pt(9)
+
     elif t == "quote":
         p = doc.add_paragraph()
-        run = p.add_run(_strip_inline(block["text"]))
-        run.italic = True
+        if abnt:
+            # Citação longa (> 3 linhas - NBR 10520): recuo de 4 cm, fonte 10 pt, espaçamento simples
+            p.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+            p.paragraph_format.left_indent = Cm(4.0)
+            p.paragraph_format.first_line_indent = Cm(0)
+            p.paragraph_format.line_spacing = 1.0
+            p.paragraph_format.space_before = Pt(6)
+            p.paragraph_format.space_after = Pt(6)
+            run = p.add_run(_strip_inline(block["text"]))
+            run.font.name = font_name
+            run.font.size = Pt(10)
+            run.font.color.rgb = RGBColor(0, 0, 0)
+        else:
+            run = p.add_run(_strip_inline(block["text"]))
+            run.italic = True
+
     elif t == "hr":
         doc.add_page_break()
+
     elif t == "table":
         rows = block["rows"]
         if not rows:
             return
         cols = max(len(r) for r in rows)
         table = doc.add_table(rows=len(rows), cols=cols)
-        table.style = "Light Grid Accent 1"
+        if abnt:
+            table.alignment = WD_TABLE_ALIGNMENT.CENTER
+            table.style = "Table Grid"
+        else:
+            table.style = "Light Grid Accent 1"
         for r, row in enumerate(rows):
             for c, cell in enumerate(row):
                 if c < cols:
-                    _add_inline_runs(table.cell(r, c).paragraphs[0], cell)
+                    cell_p = table.cell(r, c).paragraphs[0]
+                    if abnt:
+                        cell_p.paragraph_format.line_spacing = 1.0
+                        cell_p.paragraph_format.first_line_indent = Cm(0)
+                        cell_p.paragraph_format.space_before = Pt(2)
+                        cell_p.paragraph_format.space_after = Pt(2)
+                    _add_inline_runs(
+                        cell_p,
+                        cell,
+                        font_name=font_name if abnt else None,
+                        default_size=Pt(10) if abnt else None,
+                    )
 
 
-def _add_inline_runs(paragraph, text: str) -> None:
+def _add_inline_runs(
+    paragraph,
+    text: str,
+    font_name: str | None = None,
+    default_size: Any | None = None,
+) -> None:
     from docx.shared import RGBColor  # import local (docx opcional)
 
     for kind, *rest in _iter_inline(text):
         if kind == "text":
-            paragraph.add_run(rest[0])
+            run = paragraph.add_run(rest[0])
         elif kind == "bold":
             run = paragraph.add_run(rest[0])
             run.bold = True
@@ -264,6 +395,14 @@ def _add_inline_runs(paragraph, text: str) -> None:
             run = paragraph.add_run(rest[0])
             run.font.color.rgb = RGBColor(0x1A, 0x5F, 0xB4)
             run.underline = True
+        else:
+            continue
+
+        if font_name and kind != "code":
+            run.font.name = font_name
+        if default_size and kind != "code":
+            run.font.size = default_size
+
 
 
 # ---------------------------------------------------------------------------

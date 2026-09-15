@@ -91,8 +91,21 @@ class FileManager:
                 try:
                     os.makedirs(target_dir, exist_ok=True)
                     if ext == ".docx":
-                        generate_docx(full_path, content)
+                        is_abnt = any(
+                            k in clean_name.lower()
+                            for k in (
+                                "abnt",
+                                "tcc",
+                                "monografia",
+                                "artigo_cientifico",
+                                "projeto_integrador",
+                                "pi_",
+                                "pi-",
+                            )
+                        )
+                        generate_docx(full_path, content, abnt=is_abnt)
                     else:
+                        is_abnt = False
                         generate_pptx(full_path, content)
                 except MissingOfficeDependencyError as exc:
                     return (False, str(exc), "")
@@ -101,9 +114,14 @@ class FileManager:
                     return (False, f"Erro ao gerar documento: {exc}", "")
 
                 size_bytes = os.path.getsize(full_path)
-                kind = "apresentação PowerPoint" if ext == ".pptx" else "documento Word"
+                if ext == ".pptx":
+                    kind = "Apresentação PowerPoint"
+                elif is_abnt:
+                    kind = "Documento Word (normas ABNT)"
+                else:
+                    kind = "Documento Word"
                 msg = (
-                    f"{kind.capitalize()} '{clean_name}' gerado em "
+                    f"{kind} '{clean_name}' gerado em "
                     f"'{target_dir}' ({size_bytes} bytes)."
                 )
                 return (True, msg, full_path)

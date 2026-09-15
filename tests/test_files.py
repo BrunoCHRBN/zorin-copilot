@@ -141,6 +141,33 @@ class OfficeDocumentTest(unittest.TestCase):
         self.assertIn("item um", joined)
         self.assertIn("linha_de_codigo()", joined)
 
+    def test_write_document_docx_abnt(self):
+        md = (
+            "# 1 Introdução\n\n"
+            "Este parágrafo contextualiza o trabalho de Gestão Comercial.\n\n"
+            "> Citação direta longa com mais de três linhas extraída de Kotler demonstrando o recuo de 4 cm.\n\n"
+            "# 2 Referências\n\n"
+            "KOTLER, Philip. Administração de Marketing. São Paulo: Pearson, 2018."
+        )
+        ok, msg, path = FileManager.write_document("tcc_gestao_abnt.docx", md, directory=self.test_dir)
+        self.assertTrue(ok, msg)
+        self.assertIn("ABNT", msg)
+        self.assertTrue(zipfile.is_zipfile(path))
+
+        from docx import Document
+
+        doc = Document(path)
+        sec = doc.sections[0]
+        self.assertAlmostEqual(sec.top_margin.cm, 3.0, places=1)
+        self.assertAlmostEqual(sec.left_margin.cm, 3.0, places=1)
+        self.assertAlmostEqual(sec.bottom_margin.cm, 2.0, places=1)
+        self.assertAlmostEqual(sec.right_margin.cm, 2.0, places=1)
+
+        # Citação longa (> 3 linhas) com recuo de 4 cm
+        quote_p = [p for p in doc.paragraphs if "Citação direta longa" in p.text][0]
+        self.assertAlmostEqual(quote_p.paragraph_format.left_indent.cm, 4.0, places=1)
+        self.assertAlmostEqual(quote_p.paragraph_format.line_spacing, 1.0, places=1)
+
     def test_write_document_pptx_real(self):
         md = (
             "# Slide Um\n\n- ponto a\n- ponto b\n\n"

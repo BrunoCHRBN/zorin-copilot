@@ -27,7 +27,7 @@ class LiveVoiceClientTest(unittest.TestCase):
 
         for expected in [
             "launch_app", "system_control", "capture_screen", "open_url",
-            "get_system_info", "web_search", "media_control", "write_document",
+            "get_system_info", "web_search", "academic_search", "media_control", "write_document",
             "organize_directory"
         ]:
             self.assertIn(expected, func_names)
@@ -249,6 +249,18 @@ class LiveVoiceClientTest(unittest.TestCase):
         res = self.client._dispatch_tool("browser_search", {"query": "Python 3.12 novidades", "engine": "google"})
         self.assertTrue(res["success"])
         self.assertIn("google.com/search", res["url"])
+
+    @patch("zorin_copilot.core.web_search.WebSearchClient.academic_search")
+    def test_dispatch_tool_academic_search(self, mock_search):
+        """Testa despacho de busca acadêmica via Live API."""
+        from zorin_copilot.core.web_search import SearchResult
+        mock_search.return_value = [
+            SearchResult(title="Artigo Gestão Comercial", url="https://scielo.br/artigo", snippet="Estudo sobre funil de vendas")
+        ]
+        res = self.client._dispatch_tool("academic_search", {"query": "Gestão Comercial", "source": "scielo"})
+        self.assertTrue(res["success"])
+        self.assertEqual(len(res["results"]), 1)
+        self.assertIn("Artigo Gestão Comercial", res["results"][0]["title"])
 
     def test_dispatch_tool_rag_documents(self):
         """Testa busca, leitura de página e abertura de documento local via Live API."""

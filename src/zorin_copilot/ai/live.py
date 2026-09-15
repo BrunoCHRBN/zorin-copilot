@@ -205,6 +205,28 @@ LIVE_TOOLS_DECLARATION = [
                 },
             },
             {
+                "name": "academic_search",
+                "description": (
+                    "Pesquisa em bases científicas e órgãos acadêmicos/governamentais oficiais (SciELO, IBGE, "
+                    "Sebrae, IPEA, Google Acadêmico, CAPES, etc.) para estudos, Projetos Integradores (PI) e TCC."
+                ),
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "query": {
+                            "type": "STRING",
+                            "description": "Tema, termos-chave ou pergunta acadêmica/estatística a pesquisar",
+                        },
+                        "source": {
+                            "type": "STRING",
+                            "enum": ["all", "scielo", "ibge", "sebrae", "ipea", "scholar", "internacional"],
+                            "description": "Fonte científica alvo opcional (padrão 'all')",
+                        },
+                    },
+                    "required": ["query"],
+                },
+            },
+            {
                 "name": "media_control",
                 "description": "Controla tocadores de música e reprodutores de mídia como Spotify, VLC e navegadores (tocar, pausar, avançar faixa, retroceder, ou consultar que música está tocando).",
                 "parameters": {
@@ -227,10 +249,11 @@ LIVE_TOOLS_DECLARATION = [
                 "name": "write_document",
                 "description": (
                     "Cria ou salva um documento no computador do usuário a partir de conteúdo Markdown. "
-                    "Se o 'filename' terminar em '.docx', gera um documento Word real; se terminar em "
-                    "'.pptx', gera uma apresentação PowerPoint real (slides separados por uma linha '---' "
-                    "e o primeiro cabeçalho de cada slide vira o título). Outras extensões (.md, .txt) "
-                    "salvam o texto/Markdown puro."
+                    "Se o 'filename' terminar em '.docx', gera um documento Word real (se contiver 'abnt', "
+                    "'tcc', 'artigo', 'projeto' ou 'relatorio', aplica formatação ABNT NBR 14724/10520/6023 "
+                    "com margens 3x3x2x2, recuo 1.25cm, entrelinhas 1.5 e citações longas recuadas 4cm); "
+                    "se terminar em '.pptx', gera uma apresentação PowerPoint real (slides separados por '---'); "
+                    "outras extensões (.md, .txt) salvam texto puro."
                 ),
                 "parameters": {
                     "type": "OBJECT",
@@ -1123,7 +1146,7 @@ class GeminiLiveClient:
                     "- Ao redigir ou iniciar e-mails, use 'email_compose'. Não adivinhe e-mails; se não souber, use 'contact_lookup' ou pergunte ao usuário. "
                     "- Quando o usuário pedir para lembrar de algo ('lembre-se que...'), use 'memory_remember' — o fato fica disponível imediatamente nesta sessão e nas futuras. "
                     "- Para compromissos e agenda, use 'calendar_event'. "
-                    "- Para pesquisas na web, use 'browser_search', 'web_search' ou 'deep_web_search'. "
+                    "- Para pesquisas na web, use 'browser_search', 'web_search', 'academic_search' ou 'deep_web_search'. Para estudos, projetos e TCC, prefira 'academic_search' (SciELO, IBGE, Sebrae, IPEA, Scholar). "
                     "- Para ler páginas abertas no navegador, use 'read_open_webpage'. "
                     "- Para documentos locais (PDFs, relatórios), use 'search_documents', 'read_document_page' e 'open_document_file'. "
                     "- Ações de risco (enviar e-mail, sobrescrever arquivo, atalho destrutivo como Alt+F4, ou digitar em campo de senha) NÃO são executadas de imediato: você receberá um 'confirmation_id' e deve pedir confirmação verbal ao usuário; se aprovada, chame 'confirm_action(confirmation_id, approve=true)'. Se o usuário recusar, chame com approve=false."
@@ -1672,6 +1695,17 @@ class GeminiLiveClient:
                 results = client.search(query, max_results=3)
                 formatted = [
                     {"title": r.title, "url": r.url, "snippet": r.snippet[:150]}
+                    for r in results
+                ]
+                return {"success": True, "results": formatted}
+
+            elif name == "academic_search":
+                query = args.get("query", "").strip()
+                source = args.get("source", "all")
+                client = WebSearchClient()
+                results = client.academic_search(query, source=source, max_results=3)
+                formatted = [
+                    {"title": r.title, "url": r.url, "snippet": r.snippet[:200]}
                     for r in results
                 ]
                 return {"success": True, "results": formatted}

@@ -238,6 +238,24 @@ class WebSearchTest(unittest.TestCase):
         self.assertTrue(any(a.action_type == ActionType.READ_PAGE for a in plan.actions))
         self.assertIn("Artigo Sobre IA", plan.thought)
 
+    @patch.object(WebSearchClient, "search")
+    def test_academic_search_query_building(self, mock_search):
+        mock_search.return_value = [
+            SearchResult(title="Estudo SciELO", url="https://scielo.br/artigo", snippet="Resumo do artigo")
+        ]
+        res_scielo = self.client.academic_search("funil de vendas", source="scielo")
+        self.assertEqual(len(res_scielo), 1)
+        # Verifica se o filtro de domínio foi aplicado na query enviada para search()
+        args, _ = mock_search.call_args
+        self.assertIn("site:scielo", args[0])
+
+        res_ibge = self.client.academic_search("comércio varejista", source="ibge")
+        args_ibge, _ = mock_search.call_args
+        self.assertIn("site:ibge.gov.br", args_ibge[0])
+
+    def test_academic_search_empty_query(self):
+        self.assertEqual(self.client.academic_search("   "), [])
+
 
 if __name__ == "__main__":
     unittest.main()

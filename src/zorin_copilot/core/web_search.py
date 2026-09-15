@@ -56,6 +56,47 @@ class WebSearchClient:
         # 3. Fallback para notícias recentes via Google News RSS
         return self._search_google_news_rss(query_clean, max_results)
 
+    def academic_search(
+        self, query: str, source: str = "all", max_results: int = 5
+    ) -> list[SearchResult]:
+        """Pesquisa direcionada a bases acadêmicas e órgãos estatísticos/governamentais.
+
+        Fontes suportadas:
+        - 'scielo': SciELO Brasil e América Latina
+        - 'ibge': IBGE e SIDRA (indicadores de comércio, consumo, demografia)
+        - 'sebrae': Estudos de mercado e relatórios de tendências do Sebrae
+        - 'ipea': Instituto de Pesquisa Econômica Aplicada
+        - 'scholar': Google Acadêmico e Periódicos CAPES
+        - 'internacional': HBR, SSRN, DOAJ
+        - 'all': Fontes científicas e governamentais oficiais de negócios e economia
+        """
+        query_clean = query.strip()
+        if not query_clean:
+            return []
+
+        source_low = (source or "all").lower()
+        if "scielo" in source_low:
+            domain_filter = "(site:scielo.br OR site:scielo.org)"
+        elif "ibge" in source_low:
+            domain_filter = "(site:ibge.gov.br OR site:sidra.ibge.gov.br)"
+        elif "sebrae" in source_low:
+            domain_filter = "site:sebrae.com.br"
+        elif "ipea" in source_low:
+            domain_filter = "site:ipea.gov.br"
+        elif "scholar" in source_low or "capes" in source_low:
+            domain_filter = "(site:scholar.google.com OR site:periodicos.capes.gov.br)"
+        elif "internacional" in source_low or "global" in source_low:
+            domain_filter = "(site:hbr.org OR site:ssrn.com OR site:doaj.org)"
+        else:
+            domain_filter = "(site:scielo.br OR site:ibge.gov.br OR site:sebrae.com.br OR site:ipea.gov.br OR site:scholar.google.com)"
+
+        academic_query = f"{query_clean} {domain_filter}"
+        results = self.search(academic_query, max_results=max_results)
+        if not results:
+            fallback_query = f"{query_clean} artigo científico OU pesquisa acadêmica OU estatística oficial"
+            results = self.search(fallback_query, max_results=max_results)
+        return results
+
     def _search_duckduckgo_html(self, query: str, max_results: int) -> list[SearchResult]:
         url = "https://html.duckduckgo.com/html/"
         try:
