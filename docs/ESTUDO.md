@@ -102,6 +102,20 @@ zorin-copilot-cli study decks
 zorin-copilot-cli study review --deck c99fe2c7e7
 ```
 
+### Resumo e glossário (B4)
+
+Mesmo material dos flashcards, outra saída — serve para reler rápido antes da prova:
+
+```bash
+zorin-copilot-cli study summarize --from ~/Documentos/Estudos/contabilidade-gerencial/aula03.md
+zorin-copilot-cli study summarize --from aula03.md --max-topics 5 --max-terms 8 --json
+```
+
+Gera `resumo-aula03.md` ao lado do material (ou em `--out`). O filtro é o que faz o
+resultado valer: **rótulo de seção** ("Introdução", "Conceitos gerais") e
+**metacomentário** ("o texto aborda...") são descartados, porque não dizem o fato; e
+definição circular do tipo "custeio é custeio" também cai.
+
 ### Por que o prompt é o que é
 
 O gerador usa o **prompt v2**, endurecido a partir de uso real (no study-hub ele gerou

@@ -177,6 +177,23 @@ def build_parser() -> argparse.ArgumentParser:
     study_deck.add_argument("--cloud", action="store_true", help="usa apenas o modelo em nuvem")
     study_deck.add_argument("--json", action="store_true", help="saída em JSON")
 
+    study_sum = study_sub.add_parser(
+        "summarize", help="resumo em tópicos e glossário a partir de um material capturado"
+    )
+    study_sum.add_argument("--from", dest="source", required=True, help="arquivo .md capturado")
+    study_sum.add_argument(
+        "--discipline",
+        default=None,
+        help="nome da disciplina (padrão: a que veio da captura, senão 'Gestão Comercial')",
+    )
+    study_sum.add_argument("--max-topics", type=int, default=8, help="máximo de tópicos (padrão 8)")
+    study_sum.add_argument("--max-terms", type=int, default=12, help="máximo de termos (padrão 12)")
+    study_sum.add_argument("--out", help="arquivo .md de destino (padrão: ao lado do material)")
+    study_sum.add_argument("--local-only", action="store_true", help="usa apenas o modelo local")
+    study_sum.add_argument("--cloud", action="store_true", help="usa apenas o modelo em nuvem")
+    study_sum.add_argument("--no-save", action="store_true", help="não grava arquivo, só mostra")
+    study_sum.add_argument("--json", action="store_true", help="saída em JSON")
+
     study_decks = study_sub.add_parser("decks", help="lista os baralhos e quantos cards estão vencidos")
     study_decks.add_argument("--discipline", help="mostra só os baralhos desta disciplina")
 
@@ -884,6 +901,8 @@ def cmd_study(args: argparse.Namespace) -> int:
         return _study_capture(args)
     if args.study_action == "deck":
         return _study_deck(args)
+    if args.study_action == "summarize":
+        return _study_summarize(args)
     if args.study_action == "decks":
         return _study_decks(args)
     if args.study_action == "review":
@@ -999,6 +1018,63 @@ def _study_deck(args: argparse.Namespace) -> int:
         print(f"  Histórico de revisão preservado: {len(existing.cards)} cards já existiam.")
     print(f"  Salvo em: {path}")
     print(f"  Próximo: zorin-copilot-cli study review --deck {deck.id}")
+    for warning in warnings:
+        print(f"  ⚠️  {warning}")
+    return 0
+
+
+def _study_summarize(args: argparse.Namespace) -> int:
+    """Resumo em tópicos + glossário a partir do material capturado."""
+    from .core.study_cards import read_discipline, read_source
+    from .core.study_summary import build_default_ai, generate_summary, render_markdown
+    from .core.study_summary import save as save_summary
+
+    source = os.path.expanduser(args.source)
+    if not os.path.exists(source):
+        print(f"✗ Arquivo não encontrado: {source}")
+        print("  Dica: capture antes com `zorin-copilot-cli study capture`.")
+        return 1
+
+    discipline = (args.discipline or "").strip() or read_discipline(source) or "Gestão Comercial"
+    title, body = read_source(source)
+    mode = "local" if args.local_only else ("cloud" if args.cloud else "auto")
+    ai = build_default_ai(mode)
+
+    summary, warnings = generate_summary(
+        body,
+        ai,
+        title=title or os.path.basename(source),
+        discipline=discipline,
+        max_topics=args.max_topics,
+        max_terms=args.max_terms,
+    )
+    summary.source = source
+
+    if not summary.topics and not summary.glossary:
+        print("✗ Nenhum conteúdo aproveitável para resumir.")
+        for warning in warnings:
+            print(f"  ⚠️  {warning}")
+        return 1
+
+    path = ""
+    if not args.no_save:
+        target = args.out or os.path.join(
+            os.path.dirname(source), f"resumo-{os.path.basename(source)}"
+        )
+        path = save_summary(summary, target)
+
+    if args.json:
+        payload = summary.to_dict()
+        payload["path"] = path
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+
+    print(f"✓ Resumo de '{summary.title}' — {len(summary.topics)} tópicos, "
+          f"{len(summary.glossary)} termos (modelo: {summary.provider or ai.used})")
+    print()
+    print(render_markdown(summary))
+    if path:
+        print(f"Salvo em: {path}")
     for warning in warnings:
         print(f"  ⚠️  {warning}")
     return 0
