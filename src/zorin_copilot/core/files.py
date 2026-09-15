@@ -52,7 +52,30 @@ class FileManager:
         if directory:
             target_dir = os.path.expanduser(directory.strip())
         else:
-            target_dir = os.path.expanduser("~/Documentos/Relatorios")
+            is_academic = any(
+                k in clean_name.lower()
+                for k in (
+                    "abnt",
+                    "tcc",
+                    "monografia",
+                    "artigo",
+                    "projeto_integrador",
+                    "pi_",
+                    "pi-",
+                    "senac",
+                    "gestao_comercial",
+                    "gestão_comercial",
+                    "plano_de_negocio",
+                    "plano_de_negócio",
+                    "pesquisa_de_mercado",
+                    "relatorio_gerencial",
+                    "relatório_gerencial",
+                )
+            )
+            if is_academic:
+                target_dir = os.path.expanduser("~/Documentos/Gestao_Comercial/TCC_Artigos")
+            else:
+                target_dir = os.path.expanduser("~/Documentos/Relatorios")
         return os.path.join(target_dir, clean_name)
 
     @classmethod
@@ -98,9 +121,18 @@ class FileManager:
                                 "tcc",
                                 "monografia",
                                 "artigo_cientifico",
+                                "artigo",
                                 "projeto_integrador",
                                 "pi_",
                                 "pi-",
+                                "senac",
+                                "gestao_comercial",
+                                "gestão_comercial",
+                                "plano_de_negocio",
+                                "plano_de_negócio",
+                                "pesquisa_de_mercado",
+                                "relatorio_gerencial",
+                                "relatório_gerencial",
                             )
                         )
                         generate_docx(full_path, content, abnt=is_abnt)

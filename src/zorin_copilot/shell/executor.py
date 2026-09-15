@@ -4,11 +4,14 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import subprocess
 from dataclasses import dataclass
 from typing import Sequence
+
+logger = logging.getLogger(__name__)
 
 from ..ai.actions import ActionPlan, ActionType, DesktopAction
 from ..core.a11y import DesktopInspector, UIElement
@@ -438,7 +441,7 @@ class ActionExecutor:
             try:
                 from ..core.ui_grounding import UIGroundingService
                 ok_vis, msg_vis, _coords = UIGroundingService.click_visual_element(
-                    target_label, driver=self.input_driver, fence=self.input_driver.fence
+                    target_label, driver=self.input_driver, fence=getattr(self.input_driver, "fence", None)
                 )
                 if ok_vis:
                     return ExecutionReport(action=act, success=True, message=msg_vis)
@@ -502,7 +505,9 @@ class ActionExecutor:
             # Fallback visual: localiza o campo na tela via OCR/Visão
             try:
                 from ..core.ui_grounding import UIGroundingService
-                candidates = UIGroundingService.find_elements(action.target, fence=self.input_driver.fence)
+                candidates = UIGroundingService.find_elements(
+                    action.target, fence=getattr(self.input_driver, "fence", None)
+                )
                 if candidates:
                     best_el, _score = candidates[0]
                     self.input_driver.click(best_el.x, best_el.y, label=f"Focando '{best_el.text}'")

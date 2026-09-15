@@ -158,11 +158,15 @@ class LLMPlanner:
     ) -> AgentDecision:
         prompt = build_planner_prompt(objective, tools, history)
         try:
-            text, _actions = self.provider.chat(prompt)
+            if hasattr(self.provider, "complete"):
+                raw = self.provider.complete(prompt, system_prompt=_SYSTEM_INSTRUCTION, json_mode=True)
+            else:
+                text, _actions = self.provider.chat(prompt)
+                raw = text
         except Exception as exc:
             return AgentDecision(error=f"Provedor '{self.name}' falhou: {exc}")
 
-        raw = (text or "").strip()
+        raw = (raw or "").strip()
         if not raw:
             return AgentDecision(error=f"Provedor '{self.name}' respondeu vazio.")
 
@@ -281,6 +285,51 @@ def decision_from_json(payload: dict[str, Any]) -> AgentDecision:
         if not args and isinstance(payload.get("parameters"), dict):
             args = payload["parameters"]
     rationale = str(payload.get("rationale") or payload.get("reason") or payload.get("thought") or "")
+
+    # Se o modelo retornou no formato de actions do HUD Copilot
+    if not name and isinstance(payload.get("actions"), list) and payload["actions"]:
+        first_act = payload["actions"][0]
+        if isinstance(first_act, dict):
+            act_type = str(first_act.get("type") or "").strip()
+            target = str(first_act.get("target") or "")
+            act_params = dict(first_act.get("params") or {})
+            rationale = rationale or str(first_act.get("description") or payload.get("explanation") or "")
+
+            # Mapeamento do tipo de ação para ferramenta do agente
+            if act_type == "launch_app":
+                name = "launch_app"
+                args = {"query": target or act_params.get("query", "")}
+            elif act_type in ("write_file", "write_document"):
+                name = "write_document"
+                args = {
+                    "filename": target or act_params.get("filename", "documento.docx"),
+                    "content": act_params.get("content", payload.get("explanation", "")),
+                    "directory": act_params.get("directory", "~/Documentos/Gestao_Comercial/TCC_Artigos"),
+                }
+            elif act_type == "open_document":
+                name = "open_document"
+                args = {"path": target or act_params.get("path", "")}
+            elif act_type == "open_url":
+                name = "open_url"
+                args = {"url": target}
+            elif act_type == "click":
+                name = "click_on_screen"
+                args = {"query": target}
+            elif act_type == "type_text":
+                name = "keyboard_type"
+                args = {"text": act_params.get("text", target)}
+            elif act_type == "organize_files":
+                name = "organize_directory"
+                args = {"directory": target or act_params.get("directory", "~/Downloads")}
+            elif act_type in ("web_search", "academic_search"):
+                name = act_type
+                args = {"query": target or act_params.get("query", "")}
+            else:
+                name = act_type
+                args = act_params or ({"query": target} if target else {})
+
+    if not answer and payload.get("explanation") and not name:
+        answer = str(payload["explanation"]).strip()
 
     if name:
         return AgentDecision(
@@ -426,10 +475,41 @@ class AgentRouter:
         local = self.local_planner()
         cloud = self.cloud_planner()
 
+        pref_provider = getattr(self.config, "provider", "auto") if self.config else "auto"
+        allow_ollama_fallback = getattr(self.config, "fallback_to_ollama", True) if self.config else True
+
+        # Se o usuário configurou provedor de nuvem como prioritário (Gemini / OpenAI / WorkBuddy)
+        if pref_provider in ("gemini", "openai", "workbuddy", "cloud"):
+            if cloud:
+                planner = FallbackPlanner([cloud, local]) if (local and allow_ollama_fallback) else cloud
+                return RouteDecision(
+                    planner,
+                    "cloud",
+                    f"provedor configurado '{pref_provider}' (fallback local: {allow_ollama_fallback})",
+                    complexity,
+                )
+            if local and allow_ollama_fallback:
+                return RouteDecision(local, "local", f"nuvem ({pref_provider}) indisponível; usando fallback local", complexity)
+            return RouteDecision(None, "cloud", f"provedor de nuvem '{pref_provider}' não configurado", complexity)
+
+        # Se o usuário configurou Ollama explicitamente como prioritário
+        if pref_provider == "ollama":
+            if local:
+                planner = FallbackPlanner([local, cloud]) if cloud else local
+                return RouteDecision(
+                    planner,
+                    "local",
+                    "provedor configurado 'ollama' (local)",
+                    complexity,
+                )
+            if cloud:
+                return RouteDecision(cloud, "cloud", "modelo local 'ollama' indisponível; usando nuvem", complexity)
+            return RouteDecision(None, "local", "modelo local 'ollama' indisponível", complexity)
+
+        # Modo Hybrid ou Auto: tarefas simples rodam local se disponível, complexas na nuvem
         if complexity == "simple":
             if local:
-                # Local primeiro, nuvem como rede de segurança: se o Qwen não
-                # responder, uma tarefa simples não deve simplesmente morrer.
+                # Local primeiro, nuvem como rede de segurança
                 return RouteDecision(
                     FallbackPlanner([local, cloud]) if cloud else local,
                     "local",
@@ -440,7 +520,7 @@ class AgentRouter:
 
         if cloud:
             return RouteDecision(
-                FallbackPlanner([cloud, local]) if local else cloud,
+                FallbackPlanner([cloud, local]) if (local and allow_ollama_fallback) else cloud,
                 "cloud",
                 reason,
                 complexity,

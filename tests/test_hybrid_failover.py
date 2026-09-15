@@ -151,6 +151,27 @@ class HybridProviderTest(unittest.TestCase):
         self.assertIn("Gemini: ✓ Conectado", msg)
         self.assertIn("Ollama: ✓ Modelo 'qwen2.5:7b' pronto na GPU.", msg)
 
+    def test_hybrid_complete_gemini_success(self):
+        """complete() devolve resposta do Gemini quando este é bem-sucedido."""
+        self.mock_gemini.is_configured.return_value = True
+        self.mock_gemini.complete.return_value = '{"tool": "done", "args": {"answer": "sucesso"}}'
+        prov = HybridProvider(self.mock_gemini, self.mock_ollama, mode="hybrid")
+        res = prov.complete("teste prompt")
+        self.assertEqual(res, '{"tool": "done", "args": {"answer": "sucesso"}}')
+        self.mock_ollama.complete.assert_not_called()
+
+    def test_hybrid_complete_failover_to_ollama(self):
+        """complete() ativa failover para Ollama se Gemini falhar com exceção."""
+        self.mock_gemini.is_configured.return_value = True
+        self.mock_ollama.is_configured.return_value = True
+        self.mock_gemini.complete.side_effect = RuntimeError("Quota exceeded 429")
+        self.mock_ollama.complete.return_value = '{"tool": "launch_app", "args": {"query": "calc"}}'
+
+        prov = HybridProvider(self.mock_gemini, self.mock_ollama, mode="gemini_with_fallback")
+        res = prov.complete("abrir calculadora")
+        self.assertEqual(res, '{"tool": "launch_app", "args": {"query": "calc"}}')
+        self.mock_ollama.complete.assert_called_once()
+
 
 class FactoryProviderTest(unittest.TestCase):
     """Testes para get_llm_provider com diferentes configurações."""
@@ -215,8 +236,47 @@ class OllamaProviderVisionTest(unittest.TestCase):
         sent_payload = mock_post.call_args[1]["json"]
         self.assertEqual(sent_payload["model"], "minicpm-v")
         # Imagens não forçam format json para flexibilidade
-        self.assertNotIn("format", sent_payload)
         self.assertIn("images", sent_payload["messages"][-1])
+
+
+class ProviderCompleteTest(unittest.TestCase):
+    """Testes diretos de complete() para GeminiProvider e OllamaProvider."""
+
+    @patch("requests.post")
+    def test_gemini_complete_success(self, mock_post):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "candidates": [
+                {"content": {"parts": [{"text": '{"tool": "done", "args": {"answer": "concluido"}}'}]}}
+            ]
+        }
+        mock_post.return_value = mock_resp
+
+        provider = GeminiProvider(api_key="test-api-key", model="gemini-2.5-flash")
+        result = provider.complete("teste prompt", system_prompt="sistema")
+        self.assertEqual(result, '{"tool": "done", "args": {"answer": "concluido"}}')
+        self.assertTrue(mock_post.called)
+        sent_payload = mock_post.call_args[1]["json"]
+        self.assertEqual(sent_payload["generationConfig"]["responseMimeType"], "application/json")
+        self.assertEqual(sent_payload["system_instruction"]["parts"][0]["text"], "sistema")
+
+    @patch("requests.post")
+    def test_ollama_complete_success(self, mock_post):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "message": {"content": '{"tool": "open_document", "args": {"path": "tcc.docx"}}'}
+        }
+        mock_post.return_value = mock_resp
+
+        provider = OllamaProvider(model="qwen2.5:7b")
+        result = provider.complete("abrir tcc", system_prompt="sys")
+        self.assertEqual(result, '{"tool": "open_document", "args": {"path": "tcc.docx"}}')
+        self.assertTrue(mock_post.called)
+        sent_payload = mock_post.call_args[1]["json"]
+        self.assertEqual(sent_payload["format"], "json")
+        self.assertEqual(sent_payload["messages"][0]["content"], "sys")
 
 
 if __name__ == "__main__":

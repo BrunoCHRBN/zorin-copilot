@@ -250,3 +250,66 @@ def test_fallback_recebe_os_dois_caminhos_em_auto():
     route = AgentRouter(local_planner=local, cloud_planner=cloud).route("abrir o Firefox")
     assert isinstance(route.planner, FallbackPlanner)
     assert route.planner.planners == [local, cloud]
+
+
+def test_decision_from_json_converte_actions_hud():
+    payload = {
+        "explanation": "Elaborando capítulo do TCC",
+        "actions": [
+            {
+                "type": "write_document",
+                "target": "tcc_senac.docx",
+                "params": {"content": "# Introdução", "directory": "~/Documentos"},
+                "description": "Criar documento do TCC",
+            }
+        ],
+    }
+    decision = decision_from_json(payload)
+    assert decision.tool_call is not None
+    assert decision.tool_call.name == "write_document"
+    assert decision.tool_call.args["filename"] == "tcc_senac.docx"
+    assert decision.tool_call.args["content"] == "# Introdução"
+
+
+def test_decision_from_json_converte_open_document():
+    payload = {
+        "actions": [
+            {
+                "type": "open_document",
+                "target": "/tmp/relatorio.docx",
+                "params": {},
+            }
+        ]
+    }
+    decision = decision_from_json(payload)
+    assert decision.tool_call is not None
+    assert decision.tool_call.name == "open_document"
+    assert decision.tool_call.args["path"] == "/tmp/relatorio.docx"
+
+
+def test_route_prioriza_gemini_quando_configurado():
+    from zorin_copilot.core.config import CopilotConfig
+
+    config = CopilotConfig(provider="gemini", fallback_to_ollama=True)
+    local = StubPlanner("local")
+    cloud = StubPlanner("cloud")
+    router = AgentRouter(config=config, local_planner=local, cloud_planner=cloud)
+
+    # Mesmo tarefa simples vai para cloud primeiro com fallback local quando provider=gemini
+    route = router.route("abrir o Firefox")
+    assert route.mode == "cloud"
+    assert isinstance(route.planner, FallbackPlanner)
+    assert route.planner.planners == [cloud, local]
+
+
+def test_route_prioriza_gemini_sem_fallback():
+    from zorin_copilot.core.config import CopilotConfig
+
+    config = CopilotConfig(provider="gemini", fallback_to_ollama=False)
+    local = StubPlanner("local")
+    cloud = StubPlanner("cloud")
+    router = AgentRouter(config=config, local_planner=local, cloud_planner=cloud)
+
+    route = router.route("abrir o Firefox")
+    assert route.mode == "cloud"
+    assert route.planner is cloud

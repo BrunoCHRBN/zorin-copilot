@@ -581,6 +581,81 @@ class ToolRegistry:
 
         self.register(
             ToolSpec(
+                name="academic_search",
+                description=(
+                    "Pesquisa em bases científicas e órgãos oficiais (SciELO, IBGE, Sebrae, IPEA, "
+                    "Google Acadêmico, CAPES, HBR) para TCC, artigos e Projetos Integradores (PI) de Gestão Comercial."
+                ),
+                parameters=_param(
+                    {
+                        "query": _str("Tema, conceitos ou termos-chave acadêmicos/estatísticos a pesquisar."),
+                        "source": _str("Fonte alvo opcional: 'all' (padrão), 'scielo', 'ibge', 'sebrae', 'ipea', 'scholar', 'internacional'."),
+                        "limit": _num("Máximo de artigos/resultados (padrão 5)."),
+                    },
+                    required=["query"],
+                ),
+                handler=self._tool_academic_search,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="web_search",
+                description="Pesquisa na internet por fatos atualizados, notícias, cotações e documentações.",
+                parameters=_param(
+                    {
+                        "query": _str("Termo de pesquisa na web."),
+                        "limit": _num("Máximo de resultados (padrão 4)."),
+                    },
+                    required=["query"],
+                ),
+                handler=self._tool_web_search,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="read_web_page",
+                description="Lê e extrai o conteúdo de texto limpo de uma página web ou artigo a partir da URL.",
+                parameters=_param(
+                    {
+                        "url": _str("URL da página a ser lida (ou omita para ler a página aberta no navegador)."),
+                        "max_chars": _num("Limite de caracteres (padrão 6000)."),
+                    }
+                ),
+                handler=self._tool_read_web_page,
+            )
+        )
+
+        self.mutate(
+            ToolSpec(
+                name="open_url",
+                description="Abre uma página web ou link no navegador padrão.",
+                parameters=_param(
+                    {"url": _str("URL a abrir no navegador.")},
+                    required=["url"],
+                ),
+                handler=self._tool_open_url,
+            )
+        )
+
+        self.mutate(
+            ToolSpec(
+                name="open_document",
+                description="Abre um arquivo (.docx, .pdf, .ods, .xlsx) no LibreOffice ou visualizador do sistema.",
+                parameters=_param(
+                    {
+                        "path": _str("Caminho do arquivo (ex: ~/Documentos/Gestao_Comercial/TCC_Artigos/Introducao_TCC.docx)."),
+                        "page_number": _num("Página para abrir (padrão 1)."),
+                    },
+                    required=["path"],
+                ),
+                handler=self._tool_open_document,
+            )
+        )
+
+        self.register(
+            ToolSpec(
                 name="done",
                 description=(
                     "Encerra a tarefa. Chame quando o objetivo estiver cumprido (ou quando "
@@ -983,6 +1058,110 @@ class ToolRegistry:
         except OSError as exc:
             return {"ok": False, "error": f"Falha ao salvar o screenshot: {exc}"}
         return {"ok": True, "path": path, "bytes": len(data), "message": message}
+
+    def _tool_academic_search(self, args: dict[str, Any]) -> dict[str, Any]:
+        query = str(args.get("query") or "").strip()
+        if not query:
+            return {"ok": False, "error": "`query` é obrigatório."}
+        source = str(args.get("source") or "all").strip()
+        limit = int(args.get("limit") or 5)
+        try:
+            from ..core.web_search import WebSearchClient
+
+            client = WebSearchClient()
+            results = client.academic_search(query, source=source, max_results=limit)
+            entries = [
+                {"title": r.title, "url": r.url, "snippet": r.snippet}
+                for r in results
+            ]
+            return {
+                "ok": True,
+                "count": len(entries),
+                "source": source,
+                "query": query,
+                "results": entries,
+            }
+        except Exception as exc:
+            return {"ok": False, "error": f"Falha na pesquisa acadêmica: {exc}"}
+
+    def _tool_web_search(self, args: dict[str, Any]) -> dict[str, Any]:
+        query = str(args.get("query") or "").strip()
+        if not query:
+            return {"ok": False, "error": "`query` é obrigatório."}
+        limit = int(args.get("limit") or 4)
+        try:
+            from ..core.web_search import WebSearchClient
+
+            client = WebSearchClient()
+            results = client.search(query, max_results=limit)
+            entries = [
+                {"title": r.title, "url": r.url, "snippet": r.snippet}
+                for r in results
+            ]
+            return {
+                "ok": True,
+                "count": len(entries),
+                "query": query,
+                "results": entries,
+            }
+        except Exception as exc:
+            return {"ok": False, "error": f"Falha na pesquisa web: {exc}"}
+
+    def _tool_read_web_page(self, args: dict[str, Any]) -> dict[str, Any]:
+        url = str(args.get("url") or "").strip() or None
+        max_chars = int(args.get("max_chars") or 6000)
+        try:
+            from ..core.browser import BrowserManager
+
+            res = BrowserManager.read_page(url=url)
+            if not res.get("success"):
+                return {"ok": False, "error": res.get("text") or "Falha ao ler página web."}
+            text = str(res.get("text") or "")[:max_chars]
+            return {
+                "ok": True,
+                "title": res.get("title") or "Página Web",
+                "url": res.get("url") or url or "",
+                "length": len(text),
+                "content": text,
+            }
+        except Exception as exc:
+            return {"ok": False, "error": f"Falha ao ler página web: {exc}"}
+
+    def _tool_open_url(self, args: dict[str, Any]) -> dict[str, Any]:
+        url = str(args.get("url") or "").strip()
+        if not url:
+            return {"ok": False, "error": "`url` é obrigatório."}
+        if not url.startswith(("http://", "https://", "mailto:")):
+            url = f"https://{url}"
+        try:
+            from gi.repository import Gio
+
+            ok = Gio.AppInfo.launch_default_for_uri(url, None)
+            if ok:
+                return {"ok": True, "message": f"URL '{url}' aberta no navegador.", "url": url}
+        except Exception:
+            pass
+        try:
+            import subprocess
+
+            subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return {"ok": True, "message": f"URL '{url}' aberta com xdg-open.", "url": url}
+        except Exception as exc:
+            return {"ok": False, "error": f"Falha ao abrir URL '{url}': {exc}"}
+
+    def _tool_open_document(self, args: dict[str, Any]) -> dict[str, Any]:
+        path = str(args.get("path") or "").strip()
+        if not path:
+            return {"ok": False, "error": "`path` é obrigatório."}
+        page = int(args.get("page_number") or 1)
+        try:
+            from ..core.rag import LocalDocumentRAG
+
+            rag = LocalDocumentRAG()
+            ok, msg = rag.open_document(path, page_number=page)
+            return {"ok": bool(ok), "message": msg, "path": path}
+        except Exception as exc:
+            return {"ok": False, "error": f"Falha ao abrir documento: {exc}"}
 
     def _tool_done(self, args: dict[str, Any]) -> dict[str, Any]:
         return {"ok": True, "answer": str(args.get("answer") or ""), "finished": True}

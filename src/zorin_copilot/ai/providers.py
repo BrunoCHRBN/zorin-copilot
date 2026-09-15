@@ -150,6 +150,16 @@ class BaseLLMProvider(ABC):
         """Processa a solicitação do usuário e retorna (explicação, lista de ações propostas)."""
         pass
 
+    def complete(
+        self,
+        prompt: str,
+        system_prompt: str | None = None,
+        json_mode: bool = True,
+    ) -> str:
+        """Gera resposta crua do modelo (string direta), ideal para o LLMPlanner do modo agente."""
+        text, _ = self.chat(prompt)
+        return text
+
     @staticmethod
     def _repair_truncated_json(raw: str) -> dict | None:
         """Tenta recuperar estruturas JSON truncadas por limite de tokens ou delimitadores soltos."""
@@ -590,6 +600,57 @@ class GeminiProvider(BaseLLMProvider):
 
         return f"Não foi possível obter resposta do Gemini: {last_error}", []
 
+    def complete(
+        self,
+        prompt: str,
+        system_prompt: str | None = None,
+        json_mode: bool = True,
+    ) -> str:
+        """Gera texto puro diretamente da API Gemini (sem transformar em actions do HUD)."""
+        if not self.is_configured():
+            raise RuntimeError("Chave de API do Google Gemini não configurada.")
+
+        sys_text = system_prompt or build_system_prompt()
+        contents = [{"role": "user", "parts": [{"text": prompt}]}]
+        gen_config: dict[str, Any] = {
+            "temperature": 0.2,
+            "maxOutputTokens": 8192,
+        }
+        if json_mode:
+            gen_config["responseMimeType"] = "application/json"
+
+        payload = {
+            "system_instruction": {"parts": [{"text": sys_text}]},
+            "contents": contents,
+            "generationConfig": gen_config,
+        }
+
+        models_to_try = _with_fallbacks(self.model)
+        timeout_sec = 45
+        last_error = ""
+        for current_model in models_to_try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{current_model}:generateContent?key={self.api_key}"
+            try:
+                resp = requests.post(url, json=payload, timeout=timeout_sec)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    candidates = data.get("candidates", [])
+                    if candidates:
+                        content_parts = candidates[0].get("content", {}).get("parts", [])
+                        if content_parts:
+                            raw_text = content_parts[0].get("text", "")
+                            self._record_usage(
+                                usage_from_gemini(data), provider="gemini", model=current_model
+                            )
+                            return raw_text.strip()
+                last_error = f"Erro no modelo {current_model} ({resp.status_code}): {resp.text[:180]}"
+                if resp.status_code == 429:
+                    continue
+            except Exception as exc:
+                last_error = f"Erro de comunicação com {current_model}: {exc}"
+                continue
+        raise RuntimeError(f"Não foi possível obter resposta do Gemini: {last_error}")
+
 
 class OllamaProvider(BaseLLMProvider):
     """Provedor Ollama para modelos locais e 100% offline (Texto & Visão Multimodal)."""
@@ -689,6 +750,40 @@ class OllamaProvider(BaseLLMProvider):
         except Exception as exc:
             return f"Erro ao consultar Ollama local ({selected_model}): {exc}", []
 
+    def complete(
+        self,
+        prompt: str,
+        system_prompt: str | None = None,
+        json_mode: bool = True,
+    ) -> str:
+        """Gera resposta crua diretamente do Ollama local."""
+        url = f"{self.host_url}/api/chat"
+        sys_text = system_prompt or build_system_prompt()
+        messages = [
+            {"role": "system", "content": sys_text},
+            {"role": "user", "content": prompt},
+        ]
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "stream": False,
+            "options": {
+                "temperature": 0.2,
+                "num_predict": 4096,
+            },
+            "keep_alive": "15m",
+        }
+        if json_mode:
+            payload["format"] = "json"
+
+        resp = requests.post(url, json=payload, timeout=45)
+        if resp.status_code != 200:
+            raise RuntimeError(f"Erro no Ollama ({resp.status_code}): {resp.text[:200]}")
+        data = resp.json()
+        raw_text = data.get("message", {}).get("content", "")
+        self._record_usage(usage_from_ollama(data), provider="ollama", model=self.model)
+        return raw_text.strip()
+
 
 class OpenAICompatProvider(BaseLLMProvider):
     """Provedor para APIs compatíveis com OpenAI (OpenAI, Groq, DeepSeek, etc.)."""
@@ -775,6 +870,37 @@ class OpenAICompatProvider(BaseLLMProvider):
             return self.parse_response_payload(raw_text)
         except Exception as exc:
             return f"Erro na requisição: {exc}", []
+
+    def complete(
+        self,
+        prompt: str,
+        system_prompt: str | None = None,
+        json_mode: bool = True,
+    ) -> str:
+        """Gera resposta crua diretamente de API compatível com OpenAI."""
+        if not self.is_configured():
+            raise RuntimeError("Chave de API ou URL não configurada.")
+        url = f"{self.api_url}/chat/completions"
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        sys_text = system_prompt or build_system_prompt()
+        messages = [
+            {"role": "system", "content": sys_text},
+            {"role": "user", "content": prompt},
+        ]
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+        }
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
+
+        resp = requests.post(url, headers=headers, json=payload, timeout=30)
+        if resp.status_code != 200:
+            raise RuntimeError(f"Erro na API ({resp.status_code}): {resp.text[:200]}")
+        data = resp.json()
+        raw_text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        self._record_usage(usage_from_openai(data), provider="openai", model=self.model)
+        return raw_text.strip()
 
 
 class WorkBuddyProvider(BaseLLMProvider):
@@ -912,6 +1038,37 @@ class WorkBuddyProvider(BaseLLMProvider):
         except Exception as exc:
             return f"Erro na comunicação com WorkBuddy AI: {exc}", []
 
+    def complete(
+        self,
+        prompt: str,
+        system_prompt: str | None = None,
+        json_mode: bool = True,
+    ) -> str:
+        """Gera resposta crua diretamente do WorkBuddy AI."""
+        if not self.is_configured():
+            raise RuntimeError("Chave de API do WorkBuddy AI não configurada.")
+        url = f"{self.api_url}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        sys_text = system_prompt or build_system_prompt()
+        messages = [
+            {"role": "system", "content": sys_text},
+            {"role": "user", "content": prompt},
+        ]
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "stream": False,
+        }
+        resp = requests.post(url, headers=headers, json=payload, timeout=45)
+        if resp.status_code != 200:
+            raise RuntimeError(f"Erro no WorkBuddy AI ({resp.status_code}): {resp.text[:200]}")
+        data = resp.json()
+        raw_text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        return raw_text.strip()
+
 
 class HybridProvider(BaseLLMProvider):
     """Provedor híbrido inteligente: Google Gemini primário com auto-failover instantâneo para Ollama local."""
@@ -1017,6 +1174,26 @@ class HybridProvider(BaseLLMProvider):
             f"e o modelo local Ollama não pôde ser alcançado em {self.ollama.host_url}.",
             [],
         )
+
+    def complete(
+        self,
+        prompt: str,
+        system_prompt: str | None = None,
+        json_mode: bool = True,
+    ) -> str:
+        """Gera resposta crua tentando Gemini primeiro e fazendo failover para Ollama se habilitado."""
+        if self.gemini.is_configured():
+            try:
+                return self.gemini.complete(prompt, system_prompt=system_prompt, json_mode=json_mode)
+            except Exception as exc:
+                logger.warning(f"Exceção no Gemini.complete: {exc}. Ativando failover para Ollama...")
+                if not self.fallback_enabled:
+                    raise
+
+        if self.fallback_enabled and self.ollama.is_configured():
+            return self.ollama.complete(prompt, system_prompt=system_prompt, json_mode=json_mode)
+
+        raise RuntimeError("Nenhum provedor disponível para completar a solicitação.")
 
 
 def get_llm_provider(config: CopilotConfig) -> BaseLLMProvider:

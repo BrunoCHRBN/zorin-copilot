@@ -219,6 +219,19 @@ class OfficeDocumentTest(unittest.TestCase):
         self.assertTrue(ok, msg)
         self.assertTrue(zipfile.is_zipfile(path))
 
+    def test_resolve_destination_path_academic_senac(self):
+        academic_path = FileManager.resolve_target_path("tcc_gestao_comercial.docx")
+        expected_dir = os.path.expanduser("~/Documentos/Gestao_Comercial/TCC_Artigos")
+        self.assertEqual(os.path.dirname(academic_path), expected_dir)
+
+        pi_path = FileManager.resolve_target_path("pi_senac_plano_de_negocio.docx")
+        self.assertEqual(os.path.dirname(pi_path), expected_dir)
+
+    def test_resolve_destination_path_default_relatorios(self):
+        normal_path = FileManager.resolve_target_path("anotacoes_gerais.md")
+        expected_dir = os.path.expanduser("~/Documentos/Relatorios")
+        self.assertEqual(os.path.dirname(normal_path), expected_dir)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -353,3 +353,99 @@ def test_componentes_indisponiveis_viram_erro_em_vez_de_excecao():
     result = registry.call("get_ui_tree", {})
     assert result["ok"] is False
     assert "AT-SPI explodiu" in result["error"]
+
+
+def test_academic_search_valida_query_obrigatoria():
+    registry = make_registry()
+    res = registry.call("academic_search", {})
+    assert res["ok"] is False
+    assert "query" in res["error"]
+
+
+def test_academic_search_executa_pesquisa(monkeypatch):
+    class FakeSearchResult:
+        title = "Gestão de Canais e Distribuição no Varejo"
+        url = "https://scielo.br/artigo1"
+        snippet = "Artigo sobre estratégias omnicanal no Senac..."
+
+    class FakeClient:
+        def academic_search(self, query, source="all", max_results=5):
+            return [FakeSearchResult()]
+
+    from zorin_copilot.core import web_search
+    monkeypatch.setattr(web_search, "WebSearchClient", FakeClient)
+
+    registry = make_registry()
+    res = registry.call("academic_search", {"query": "gestao comercial varejo", "source": "scielo"})
+    assert res["ok"] is True
+    assert res["count"] == 1
+    assert res["results"][0]["title"] == "Gestão de Canais e Distribuição no Varejo"
+
+
+def test_web_search_valida_query_obrigatoria():
+    registry = make_registry()
+    res = registry.call("web_search", {})
+    assert res["ok"] is False
+    assert "query" in res["error"]
+
+
+def test_web_search_executa_pesquisa(monkeypatch):
+    class FakeSearchResult:
+        title = "Notícias do Varejo 2026"
+        url = "https://exemplo.com/noticia"
+        snippet = "Crescimento de 5% no comércio eletrônico..."
+
+    class FakeClient:
+        def search(self, query, max_results=4):
+            return [FakeSearchResult()]
+
+    from zorin_copilot.core import web_search
+    monkeypatch.setattr(web_search, "WebSearchClient", FakeClient)
+
+    registry = make_registry()
+    res = registry.call("web_search", {"query": "mercado varejista"})
+    assert res["ok"] is True
+    assert res["count"] == 1
+    assert res["results"][0]["url"] == "https://exemplo.com/noticia"
+
+
+def test_read_web_page_executa_leitura(monkeypatch):
+    class FakeBrowser:
+        @classmethod
+        def read_page(cls, url=None):
+            return {
+                "success": True,
+                "title": "Página do Curso",
+                "url": "https://senac.br",
+                "text": "Conteúdo da aula de Gestão",
+            }
+
+    from zorin_copilot.core import browser
+    monkeypatch.setattr(browser, "BrowserManager", FakeBrowser)
+
+    registry = make_registry()
+    res = registry.call("read_web_page", {"url": "https://senac.br"})
+    assert res["ok"] is True
+    assert res["title"] == "Página do Curso"
+    assert "Conteúdo da aula" in res["content"]
+
+
+def test_open_document_valida_path():
+    registry = make_registry()
+    res = registry.call("open_document", {})
+    assert res["ok"] is False
+    assert "path" in res["error"]
+
+
+def test_open_document_executa(monkeypatch):
+    class FakeRAG:
+        def open_document(self, path, page_number=1):
+            return True, f"Documento '{path}' aberto com sucesso."
+
+    from zorin_copilot.core import rag
+    monkeypatch.setattr(rag, "LocalDocumentRAG", FakeRAG)
+
+    registry = make_registry()
+    res = registry.call("open_document", {"path": "/tmp/tcc.docx"})
+    assert res["ok"] is True
+    assert "aberto com sucesso" in res["message"]
