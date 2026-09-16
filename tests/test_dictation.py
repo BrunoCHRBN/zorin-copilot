@@ -277,14 +277,20 @@ class SpokenPunctuationAndPolishTest(unittest.TestCase):
             "eu acho que devemos ir para lá",
         )
 
+    @patch("shutil.which", return_value="/usr/bin/canberra-gtk-play")
     @patch("subprocess.run")
-    def test_play_sound_cue_invoked(self, mock_run):
+    def test_play_sound_cue_invoked(self, mock_run, mock_which):
         from zorin_copilot.core.dictation import play_sound_cue
         import time
 
         play_sound_cue("message-new-instant")
-        time.sleep(0.05)  # aguarda brevemente a thread daemon
+        for _ in range(50):
+            if mock_run.called:
+                break
+            time.sleep(0.02)
         self.assertTrue(mock_run.called)
+        args, _ = mock_run.call_args
+        self.assertEqual(args[0], ["canberra-gtk-play", "-i", "message-new-instant"])
 
 
 class VirtualInputDriverMultilineTest(unittest.TestCase):
