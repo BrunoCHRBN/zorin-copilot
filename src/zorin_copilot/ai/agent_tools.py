@@ -105,6 +105,7 @@ class ToolRegistry:
         policy: RiskPolicy | None = None,
         dry_run: bool = False,
         max_tree_chars: int = MAX_TREE_CHARS,
+        mcp_manager: Any | None = None,
     ) -> None:
         self._inspector = inspector
         self._input_driver = input_driver
@@ -113,8 +114,20 @@ class ToolRegistry:
         self.policy = policy or RiskPolicy()
         self.dry_run = dry_run
         self.max_tree_chars = max_tree_chars
+        self.mcp_manager = mcp_manager
         self._specs: dict[str, ToolSpec] = {}
         self._register_builtins()
+        if self.mcp_manager:
+            self.load_mcp_tools(self.mcp_manager)
+
+    def load_mcp_tools(self, manager: Any) -> int:
+        """Carrega ferramentas de servidores MCP para o registro."""
+        try:
+            from ..mcp.adapter import register_mcp_tools_in_registry
+            return register_mcp_tools_in_registry(self, manager)
+        except Exception as exc:
+            logger.debug("Falha ao registrar ferramentas MCP no registro: %s", exc)
+            return 0
 
     # -- ciclo de vida ----------------------------------------------------- #
 

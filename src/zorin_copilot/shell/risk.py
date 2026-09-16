@@ -55,13 +55,33 @@ def _normalize_hotkey(keys: Any) -> str:
 class RiskPolicy:
     """Classifica o risco de uma chamada de ferramenta com base em nome + argumentos."""
 
+    def __init__(self) -> None:
+        self._custom_risk_tools: dict[str, tuple[RiskLevel, str]] = {}
+
+    def register_risk(self, name: str, level: RiskLevel, description: str = "") -> None:
+        """Registra uma regra explícita de risco para uma ferramenta específica (ex: ferramentas MCP)."""
+        self._custom_risk_tools[name] = (level, description)
+
     def classify(self, name: str, args: dict[str, Any] | None = None) -> tuple[RiskLevel, str]:
         """Retorna (nível de risco, descrição). Descrição vazia quando SAFE."""
         args = args or {}
         name = (name or "").strip()
 
+        if name in self._custom_risk_tools:
+            return self._custom_risk_tools[name]
+
         if name in HIGH_RISK_TOOLS:
             return RiskLevel.CONFIRM, RISK_DESCRIPTION.get(name, name)
+
+        # Classificação heurística de ferramentas MCP dinâmicas
+        if name.startswith("mcp__") or name.startswith("mcp_"):
+            lower = name.lower()
+            mutating_verbs = (
+                "write", "create", "delete", "drop", "exec", "run",
+                "update", "insert", "commit", "push", "remove", "kill",
+            )
+            if any(verb in lower for verb in mutating_verbs):
+                return RiskLevel.CONFIRM, f"execução de ferramenta MCP de mutação/sistema ({name})"
 
         if name == "keyboard_hotkey":
             hotkey = _normalize_hotkey(args.get("keys"))

@@ -248,7 +248,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     missing = desktop_shot.missing_dependencies(env)
     if missing:
-        print(f"  ⚠ Captura: faltam {', '.join(missing)}")
+        print(f"  [Aviso] Captura: faltam {', '.join(missing)}")
 
     # Red zones: 80px travados sem barra é a reclamação clássica em Hyprland/Sway.
     try:
@@ -379,7 +379,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     for name, ok, detail in checks:
         if not ok:
             failed += 1
-        print(f"{'✓' if ok else '✗'} {name:<{width}}  {detail}")
+        print(f"{'[OK]' if ok else '[FALHA]'} {name:<{width}}  {detail}")
 
     print(f"\n{len(checks) - failed}/{len(checks)} verificações OK")
     return 1 if failed else 0
@@ -390,10 +390,10 @@ def cmd_ask(args: argparse.Namespace) -> int:
     print(f"Analisando: '{args.prompt}'...\n")
     plan = engine.parse(args.prompt)
 
-    print(f"💡 Resposta / Pensamento:\n{plan.thought}\n")
+    print(f"Resposta / Pensamento:\n{plan.thought}\n")
 
     if plan.actions:
-        print("🎯 Ações Propostas:")
+        print("Ações propostas:")
         for idx, act in enumerate(plan.actions, 1):
             print(f"  {idx}. [{act.action_type.value}] {act.describe()}")
 
@@ -402,7 +402,7 @@ def cmd_ask(args: argparse.Namespace) -> int:
             executor = ActionExecutor()
             reports = executor.execute_plan(plan)
             for r in reports:
-                print(f"  {'✓' if r.success else '✗'} {r.message}")
+                print(f"  {'[OK]' if r.success else '[FALHA]'} {r.message}")
     else:
         print("Nenhuma ação de desktop necessária.")
 
@@ -507,7 +507,7 @@ def cmd_action(args: argparse.Namespace) -> int:
 
     reports = executor.execute_plan(plan, dry_run=args.dry_run)
     for rep in reports:
-        print(f"{'✓' if rep.success else '✗'} {rep.message}")
+        print(f"{'[OK]' if rep.success else '[FALHA]'} {rep.message}")
     return 0 if all(r.success for r in reports) else 1
 
 
@@ -531,7 +531,7 @@ def cmd_memory(args: argparse.Namespace) -> int:
             return 0
         print(f"Histórico de ações no desktop ({len(actions)}):")
         for a in actions:
-            status = "✓" if a["success"] else "✗"
+            status = "[OK]" if a["success"] else "[FALHA]"
             print(f"  {status} [{a['action_type']}] {a['target']} — pedido: '{a['prompt']}' ({a['timestamp'][:19]})")
         return 0
 
@@ -613,7 +613,7 @@ def cmd_rag(args: argparse.Namespace) -> int:
                 for p in target_dir.rglob(f"*{ext}"):
                     if rag.index_file(p):
                         count += 1
-                        print(f"  ✓ {p.name}")
+                        print(f"  [OK] {p.name}")
             print(f"\nIndexação concluída: {count} documentos processados.")
             return 0
 
@@ -652,10 +652,10 @@ def cmd_rag(args: argparse.Namespace) -> int:
             except Exception:
                 pass
         ans = rag.ask(args.question, llm_provider=llm)
-        print("💡 Resposta:")
+        print("Resposta:")
         print(ans["answer"])
         if ans.get("citations"):
-            print("\n📚 Fontes consultadas:")
+            print("\nFontes consultadas:")
             for cit in ans["citations"]:
                 page_str = f" - Pág. {cit['page']}" if cit.get("page", 0) > 0 else ""
                 print(f"  • {cit['file']}{page_str} ({cit['path']})")
@@ -683,9 +683,9 @@ def cmd_rag(args: argparse.Namespace) -> int:
         level, reason = tm.evaluate_file(fpath)
         is_ok = level != TrustLevel.BLOCKED
         icons = {
-            TrustLevel.TRUSTED: "🟢 Confiável (Acesso Pleno)",
-            TrustLevel.CAUTION: "🟡 Zona de Cautela (Quarentena / Download)",
-            TrustLevel.BLOCKED: "🔴 Bloqueado / Restrito (Não Indexável)",
+            TrustLevel.TRUSTED: "[Confiável] Acesso Pleno",
+            TrustLevel.CAUTION: "[Cautela] Zona de Quarentena / Downloads",
+            TrustLevel.BLOCKED: "[Bloqueado] Restrito (Não Indexável)",
         }
         print(f"Avaliação de Confiança e Elegibilidade para RAG:")
         print(f"  • Arquivo: {fpath}")
@@ -733,12 +733,12 @@ def cmd_setup(args: argparse.Namespace) -> int:
         ok2 = ShortcutManager.register_crop()
         ok3 = ShortcutManager.register_voice()
         if ok1 and ok2 and ok3:
-            print(f"  ✓ Atalhos registrados no backend {label}.")
+            print(f"  [OK] Atalhos registrados no backend {label}.")
         elif ok1 or ok2 or ok3:
-            print("  ✓ Atalhos globais registrados com avisos.")
+            print("  [OK] Atalhos globais registrados com avisos.")
             print(f"   Detalhe: {ShortcutManager.last_message}")
         else:
-            print(f"  ✗ Falha ao registrar atalhos no backend {label}.")
+            print(f"  [FALHA] Falha ao registrar atalhos no backend {label}.")
             print(f"   Detalhe: {ShortcutManager.last_message}")
 
     if args.all or args.autostart:
@@ -746,18 +746,18 @@ def cmd_setup(args: argparse.Namespace) -> int:
         print("Configurando inicialização automática no boot/login...")
         ok = AutostartManager.enable()
         if ok:
-            print(f"  ✓ Inicialização automática ativada em {AutostartManager.get_autostart_file()}")
+            print(f"  [OK] Inicialização automática ativada em {AutostartManager.get_autostart_file()}")
         else:
-            print("  ✗ Erro ao criar arquivo de autostart.")
+            print("  [FALHA] Erro ao criar arquivo de autostart.")
 
     if args.disable_autostart:
         did_something = True
         print("Desabilitando inicialização automática...")
         ok = AutostartManager.disable()
         if ok:
-            print("  ✓ Inicialização automática desativada.")
+            print("  [OK] Inicialização automática desativada.")
         else:
-            print("  ✗ Erro ao remover arquivo de autostart.")
+            print("  [FALHA] Erro ao remover arquivo de autostart.")
 
     if args.status or not did_something:
         print("Status dos Componentes do Sistema:")
@@ -765,10 +765,10 @@ def cmd_setup(args: argparse.Namespace) -> int:
         sc_crop = ShortcutManager.is_crop_registered()
         sc_voice = ShortcutManager.is_voice_registered()
         auto = AutostartManager.is_enabled()
-        print(f"  • Atalho Global HUD (Super+C): {'✓ Ativo' if sc else '✗ Não registrado'}")
-        print(f"  • Atalho Recorte (Super+Shift+S): {'✓ Ativo' if sc_crop else '✗ Não registrado'}")
-        print(f"  • Atalho Conversa por Voz (Super+Shift+V): {'✓ Ativo' if sc_voice else '✗ Não registrado'}")
-        print(f"  • Autostart no boot/login: {'✓ Ativo' if auto else '✗ Desativado'}")
+        print(f"  • Atalho Global HUD (Super+C): {'Ativo' if sc else 'Não registrado'}")
+        print(f"  • Atalho Recorte (Super+Shift+S): {'Ativo' if sc_crop else 'Não registrado'}")
+        print(f"  • Atalho Conversa por Voz (Super+Shift+V): {'Ativo' if sc_voice else 'Não registrado'}")
+        print(f"  • Autostart no boot/login: {'Ativo' if auto else 'Desativado'}")
         if not did_something:
             print("\nDica: use --shortcut, --autostart ou --all para configurar.")
 
@@ -781,7 +781,7 @@ def cmd_web(args: argparse.Namespace) -> int:
             print(f"Lendo URL: {args.url}...\n")
             res = WebPageReader.fetch_and_clean(args.url)
             if not res.get("success"):
-                print(f"✗ Erro ao ler página: {res.get('error', 'Desconhecido')}")
+                print(f"Erro ao ler página: {res.get('error', 'Desconhecido')}")
                 return 1
             print(f"Título: {res.get('title', 'Sem título')}")
             print(f"URL: {res.get('url')}")
@@ -796,7 +796,7 @@ def cmd_web(args: argparse.Namespace) -> int:
         print("Inspecionando aba ativa do navegador aberto...")
         res = WebPageReader.read_active_tab()
         if not res.get("success"):
-            print(f"✗ Não foi possível ler a aba aberta: {res.get('error', 'Nenhum navegador com página acessível detectado')}")
+            print(f"Não foi possível ler a aba aberta: {res.get('error', 'Nenhum navegador com página acessível detectado')}")
             print("Dica: forneça uma URL com --url <link> ou mantenha o navegador visível na tela.")
             return 1
         print(f"Navegador: {res.get('browser')}")
@@ -824,7 +824,7 @@ def cmd_web(args: argparse.Namespace) -> int:
         researcher = DeepWebResearcher()
 
         def show_progress(stage: str, msg: str) -> None:
-            icons = {"search": "🔍", "download": "🌐", "synthesis": "🧠", "done": "✓", "failed": "✗"}
+            icons = {"search": "•", "download": "•", "synthesis": "•", "done": "[OK]", "failed": "[FALHA]"}
             print(f"  {icons.get(stage, '•')} {msg}")
 
         result = researcher.deep_search(
@@ -834,12 +834,12 @@ def cmd_web(args: argparse.Namespace) -> int:
             on_progress=show_progress,
         )
         if not result.get("success"):
-            print(f"\n✗ Pesquisa aprofundada falhou: {result.get('error', 'Sem resultados')}")
+            print(f"\nPesquisa aprofundada falhou: {result.get('error', 'Sem resultados')}")
             return 1
 
-        print("📊 Relatório de Pesquisa Aprofundada:\n")
+        print("Relatório de Pesquisa Aprofundada:\n")
         print(result.get("report", ""))
-        print("\n🌐 Fontes consultadas:")
+        print("\nFontes consultadas:")
         for s in result.get("sources", []):
             print(f"  • [{s.get('title', 'Fonte')}]({s.get('url')})")
         return 0
@@ -861,7 +861,7 @@ def cmd_agent(args: argparse.Namespace) -> int:
     complexity, complexity_reason = classify_objective(args.objective)
 
     if route.planner is None:
-        print(f"✗ Nenhum modelo disponível para o modo '{mode.value}': {route.reason}")
+        print(f"Nenhum modelo disponível para o modo '{mode.value}': {route.reason}")
         print("  Dica: configure uma chave (--cloud) ou suba o Ollama (ollama serve).")
         return 1
 
@@ -876,15 +876,15 @@ def cmd_agent(args: argparse.Namespace) -> int:
     )
 
     if not args.json:
-        print(f"🎯 Objetivo: {args.objective}")
-        print(f"🧭 Roteamento: {route.mode} ({route.reason})")
+        print(f"Objetivo: {args.objective}")
+        print(f"Roteamento: {route.mode} ({route.reason})")
         if args.dry_run:
-            print("🧪 Modo simulação: nada será executado.\n")
+            print("Modo simulação: nada será executado.\n")
 
     def on_step(step) -> None:
         if args.json:
             return
-        icon = "✓" if step.ok else ("✗" if step.ok is False else "•")
+        icon = "[OK]" if step.ok else ("[FALHA]" if step.ok is False else "•")
         flag = " [requer aprovação]" if step.requires_approval else ""
         print(f"  {icon} {step.index + 1}. {step.tool}{flag}")
         if args.verbose or not step.ok:
@@ -896,7 +896,7 @@ def cmd_agent(args: argparse.Namespace) -> int:
         level_desc = step.risk
         try:
             answer = input(
-                f"  ⚠️  '{step.tool}' é uma ação sensível ({level_desc}). Aprovar? [s/N] "
+                f"  [Atenção] '{step.tool}' é uma ação sensível ({level_desc}). Aprovar? [s/N] "
             )
         except EOFError:
             return False  # sem terminal interativo: recusa é o padrão seguro
@@ -909,7 +909,7 @@ def cmd_agent(args: argparse.Namespace) -> int:
             result = loop.run(args.objective, on_step=on_step, on_approval=on_approval)
     except KeyboardInterrupt:
         loop.abort()
-        print("\n⏹ Interrompido — sinal de parada enviado.")
+        print("\nInterrompido — sinal de parada enviado.")
         return 130
 
     if args.json:
@@ -918,8 +918,8 @@ def cmd_agent(args: argparse.Namespace) -> int:
 
     print()
     if result.final_answer:
-        print(f"💬 {result.final_answer}")
-    print(f"🏁 Parada: {result.stop_reason} — {result.stop_message}")
+        print(f"Resposta: {result.final_answer}")
+    print(f"Parada: {result.stop_reason} — {result.stop_message}")
     print(f"   Passos: {len(result.steps)} | Tempo: {result.elapsed:.1f}s | Modo: {route.mode}")
     if result.error:
         print(f"   Detalhe: {result.error}")
@@ -962,7 +962,7 @@ def _study_capture(args: argparse.Namespace) -> int:
         return 0 if result.ok else 1
 
     if not result.ok:
-        print(f"✗ {result.warnings[0] if result.warnings else 'Nada capturado.'}")
+        print(f"Falha na captura: {result.warnings[0] if result.warnings else 'Nada capturado.'}")
         print("  Dicas, nesta ordem:")
         print("   1. deixe a aula visível e em foco (a janela não pode estar minimizada);")
         print("   2. selecione o texto com Ctrl+A, Ctrl+C e use --strategy clipboard;")
@@ -976,7 +976,7 @@ def _study_capture(args: argparse.Namespace) -> int:
         target_dir = os.path.dirname(args.out) if args.out else None
         path = capture.save(result, filename=target_name, directory=target_dir)
 
-    print(f"✓ Material capturado — {result.word_count} palavras via {result.strategy}")
+    print(f"Material capturado — {result.word_count} palavras via {result.strategy}")
     print(f"  Título: {result.title}")
     if result.url:
         print(f"  URL: {result.url}")
@@ -984,7 +984,7 @@ def _study_capture(args: argparse.Namespace) -> int:
         print(f"  Salvo em: {path}")
         print("  Próximo: zorin-copilot-cli rag index   (para poder perguntar sobre o material)")
     for warning in result.warnings:
-        print(f"  ⚠️  {warning}")
+        print(f"  [Aviso] {warning}")
     if args.show:
         print("\n--- Conteúdo ---\n")
         print(result.text[:5000])
@@ -1007,7 +1007,7 @@ def _study_deck(args: argparse.Namespace) -> int:
 
     source = os.path.expanduser(args.source)
     if not os.path.exists(source):
-        print(f"✗ Arquivo não encontrado: {source}")
+        print(f"Arquivo não encontrado: {source}")
         print("  Dica: capture antes com `zorin-copilot-cli study capture`.")
         return 1
 
@@ -1025,9 +1025,9 @@ def _study_deck(args: argparse.Namespace) -> int:
     )
 
     if not cards:
-        print("✗ Nenhum card gerado.")
+        print("Nenhum card gerado.")
         for warning in warnings:
-            print(f"  ⚠️  {warning}")
+            print(f"  [Aviso] {warning}")
         return 1
 
     store = DeckStore()
@@ -1048,13 +1048,13 @@ def _study_deck(args: argparse.Namespace) -> int:
         print(json.dumps(deck.to_dict(), ensure_ascii=False, indent=2))
         return 0
 
-    print(f"✓ Baralho '{deck.title}' — {len(deck.cards)} cards (modelo: {ai.used})")
+    print(f"Baralho '{deck.title}' — {len(deck.cards)} cards (modelo: {ai.used})")
     if existing is not None and existing.cards:
         print(f"  Histórico de revisão preservado: {len(existing.cards)} cards já existiam.")
     print(f"  Salvo em: {path}")
     print(f"  Próximo: zorin-copilot-cli study review --deck {deck.id}")
     for warning in warnings:
-        print(f"  ⚠️  {warning}")
+        print(f"  [Aviso] {warning}")
     return 0
 
 
@@ -1252,7 +1252,7 @@ def _study_abnt(args: argparse.Namespace) -> int:
 
     source = os.path.expanduser(args.source)
     if not os.path.exists(source):
-        print(f"✗ Arquivo não encontrado: {source}")
+        print(f"Arquivo não encontrado: {source}")
         return 1
 
     with open(source, encoding="utf-8", errors="replace") as handle:
@@ -1262,14 +1262,14 @@ def _study_abnt(args: argparse.Namespace) -> int:
     try:
         generate_abnt_docx(out, markdown)
     except MissingOfficeDependencyError as exc:
-        print(f"✗ Falta dependência para gerar .docx: {exc}")
+        print(f"Falta dependência para gerar .docx: {exc}")
         print("  Instale com: pip install python-docx")
         return 1
     except Exception as exc:
-        print(f"✗ Falha ao gerar o documento: {exc}")
+        print(f"Falha ao gerar o documento: {exc}")
         return 1
 
-    print(f"✓ Documento ABNT gerado: {out}")
+    print(f"Documento ABNT gerado: {out}")
     return 0
 
 

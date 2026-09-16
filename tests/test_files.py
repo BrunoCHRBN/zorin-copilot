@@ -9,6 +9,18 @@ from unittest.mock import patch
 
 from zorin_copilot.core.files import FileManager
 
+try:
+    import docx
+    HAS_DOCX = True
+except ImportError:
+    HAS_DOCX = False
+
+try:
+    import pptx
+    HAS_PPTX = True
+except ImportError:
+    HAS_PPTX = False
+
 
 class FileManagerTest(unittest.TestCase):
     def setUp(self):
@@ -119,6 +131,7 @@ class OfficeDocumentTest(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.test_dir, ignore_errors=True)
 
+    @unittest.skipUnless(HAS_DOCX, "python-docx não instalado")
     def test_write_document_docx_real(self):
         md = (
             "# Título do Relatório\n\n"
@@ -141,6 +154,7 @@ class OfficeDocumentTest(unittest.TestCase):
         self.assertIn("item um", joined)
         self.assertIn("linha_de_codigo()", joined)
 
+    @unittest.skipUnless(HAS_DOCX, "python-docx não instalado")
     def test_write_document_docx_abnt(self):
         md = (
             "# 1 Introdução\n\n"
@@ -168,6 +182,7 @@ class OfficeDocumentTest(unittest.TestCase):
         self.assertAlmostEqual(quote_p.paragraph_format.left_indent.cm, 4.0, places=1)
         self.assertAlmostEqual(quote_p.paragraph_format.line_spacing, 1.0, places=1)
 
+    @unittest.skipUnless(HAS_PPTX, "python-pptx não instalado")
     def test_write_document_pptx_real(self):
         md = (
             "# Slide Um\n\n- ponto a\n- ponto b\n\n"
@@ -210,6 +225,7 @@ class OfficeDocumentTest(unittest.TestCase):
         self.assertEqual(path, "")
         self.assertIn("python-docx faltando", msg)
 
+    @unittest.skipUnless(HAS_PPTX, "python-pptx não instalado")
     def test_write_document_office_append_ignored(self):
         # append com .docx gera arquivo novo (não anexa ao binário)
         md = "# Apresentação\n\n- bullet"

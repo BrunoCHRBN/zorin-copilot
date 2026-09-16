@@ -69,7 +69,8 @@ class BehaviorAndSituationalAwarenessTest(unittest.TestCase):
             context = self.engine._get_situational_context()
 
             self.assertIn("[Contexto Situacional do Desktop]", context)
-            self.assertIn("code ('main.py — zorin-copilot')", context)
+            self.assertIn("Janela em foco: code", context)
+            self.assertIn("main.py", context)
             self.assertIn("Horário:", context)
             self.assertIn("Instant Crush", context)
             self.assertIn("Daft Punk", context)

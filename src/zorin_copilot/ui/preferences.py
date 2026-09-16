@@ -23,6 +23,7 @@ from ..ai.providers import (
 from ..core.config import CopilotConfig
 from ..core.memory import MemoryManager
 from ..core.shortcuts import AutostartManager, ShortcutManager
+from ..mcp.manager import DEFAULT_MCP_CONFIG_PATH, MCPManager
 
 # Ícones das abas de provedor. O fallback existe porque o Zorin OS pode usar um
 # tema de ícones diferente do Adwaita padrão.
@@ -37,12 +38,19 @@ VALID_PROVIDERS = ("gemini", "ollama", "openai")
 class PreferencesDialog(Adw.PreferencesDialog):
     """Diálogo de configurações do Zorin Copilot usando Libadwaita."""
 
-    def __init__(self, parent: Gtk.Window, on_saved: Callable[[CopilotConfig], None] | None = None):
+    def __init__(self, parent: Gtk.Window | None, on_saved: Callable[[CopilotConfig], None] | None = None):
         super().__init__()
         self.set_title("Configurações do Copilot")
+        self.copilot_parent = parent
         self.on_saved = on_saved
         self.config = CopilotConfig.load()
         self.memory = MemoryManager()
+        self._is_closed = False
+        self._mcp_rows: list[Gtk.Widget] = []
+        self._mcp_manager = getattr(self.copilot_parent, "mcp_manager", None) or MCPManager()
+        self._mcp_change_listener = self._on_mcp_changed
+        self._mcp_manager.add_change_listener(self._mcp_change_listener)
+        self.connect("closed", self._on_dialog_closed)
 
         self._build_ui()
         self._load_values()
@@ -353,6 +361,70 @@ class PreferencesDialog(Adw.PreferencesDialog):
         )
         voice_group.add(voice_info_row)
         page.add(voice_group)
+
+        # ---------------------------------------------------------------------
+        # Grupo: Ditado Global por Voz no Aplicativo em Foco (Voice Typing)
+        # ---------------------------------------------------------------------
+        dictate_group = Adw.PreferencesGroup(
+            title="Ditado Global por Voz (Voice Typing)",
+            description="Permite ditar texto diretamente em qualquer aplicativo ativo (navegador, LibreOffice, editor, terminal) sem roubar o foco.",
+        )
+
+        self.dictate_shortcut_switch_row = Adw.SwitchRow(
+            title="Ativar Atalho de Ditado Global",
+            subtitle="Registra a combinação global no sistema para ditar fala no app em foco",
+        )
+        dictate_group.add(self.dictate_shortcut_switch_row)
+
+        self.dictate_shortcut_options = [
+            ("<Super><Shift>d", "Super + Shift + D (Padrão - Ditado Global)"),
+            ("<Primary><Alt>d", "Ctrl + Alt + D (Ditado)"),
+            ("<Super>d", "Super + D (Ditado)"),
+        ]
+        self.dictate_shortcut_combo_row = Adw.ComboRow(
+            title="Combinação de Teclas de Ditado",
+            subtitle="Selecione a tecla para acionar o ditado por voz",
+            model=Gtk.StringList.new([label for _, label in self.dictate_shortcut_options]),
+        )
+        dictate_group.add(self.dictate_shortcut_combo_row)
+
+        self.dictate_silence_spin = Adw.SpinRow.new_with_range(0.4, 3.0, 0.1)
+        self.dictate_silence_spin.set_title("Tempo de Silêncio para Concluir (VAD)")
+        self.dictate_silence_spin.set_subtitle("Segundos de pausa na fala antes de processar e digitar o texto")
+        dictate_group.add(self.dictate_silence_spin)
+
+        self.dictate_sound_switch_row = Adw.SwitchRow(
+            title="Efeitos Sonoros de Início e Conclusão (Earcons)",
+            subtitle="Toca um som sutil do sistema ao abrir o microfone e ao concluir a digitação",
+        )
+        dictate_group.add(self.dictate_sound_switch_row)
+
+        self.dictate_polish_switch_row = Adw.SwitchRow(
+            title="Polimento Inteligente &amp; Pontuação Verbal",
+            subtitle="Remove hesitações ('tipo assim', repetições) e converte comandos falados ('vírgula', 'ponto', 'nova linha')",
+        )
+        dictate_group.add(self.dictate_polish_switch_row)
+
+        dictate_info_row = Adw.ActionRow(
+            title="Como Funciona o Ditado Global",
+            subtitle="Pressione o atalho enquanto foca em qualquer app. Um indicador surge, escuta a fala, transcreve localmente via Whisper e injeta o texto no cursor.",
+        )
+        dictate_group.add(dictate_info_row)
+        page.add(dictate_group)
+
+        # ---------------------------------------------------------------------
+        # Grupo: Consciência de Contexto (Fase 3: Context Awareness)
+        # ---------------------------------------------------------------------
+        context_group = Adw.PreferencesGroup(
+            title="Consciência de Contexto &amp; Sugestões Proativas",
+            description="Adapta as ações sugeridas na tela inicial de acordo com o aplicativo em foco e o conteúdo copiado.",
+        )
+        self.context_awareness_switch_row = Adw.SwitchRow(
+            title="Ativar Sugestões Conscientes de Contexto",
+            subtitle="Sugere prompts adaptados para código, páginas web, erros de terminal e documentos",
+        )
+        context_group.add(self.context_awareness_switch_row)
+        page.add(context_group)
 
         # ---------------------------------------------------------------------
         # Grupo: Inicialização com o Sistema (Autostart)
@@ -669,6 +741,183 @@ class PreferencesDialog(Adw.PreferencesDialog):
         mgmt_group.add(clear_row)
         page.add(mgmt_group)
 
+        # ---------------------------------------------------------------------
+        # Página 5: Extensões & Servidores MCP
+        # ---------------------------------------------------------------------
+        self._build_mcp_page()
+
+    def _build_mcp_page(self) -> None:
+        page = Adw.PreferencesPage(title="Extensões &amp; MCP", icon_name="application-x-addon-symbolic")
+        self.add(page)
+
+        # 1. Configuração Principal
+        mcp_group = Adw.PreferencesGroup(
+            title="Protocolo de Contexto do Modelo (MCP)",
+            description="Extensibilidade padronizada para conectar o Zorin Copilot a ferramentas externas (Git, SQLite, Docker, APIs).",
+        )
+        self.mcp_switch_row = Adw.SwitchRow(
+            title="Habilitar Extensões MCP",
+            subtitle="Disponibiliza ferramentas de servidores externos para o Modo Agente e o Chat.",
+        )
+        mcp_group.add(self.mcp_switch_row)
+
+        config_row = Adw.ActionRow(
+            title="Arquivo de Configuração (JSON)",
+            subtitle=DEFAULT_MCP_CONFIG_PATH,
+        )
+        open_cfg_btn = Gtk.Button(label="Editar JSON", valign=Gtk.Align.CENTER)
+        open_cfg_btn.add_css_class("pill")
+        open_cfg_btn.connect("clicked", self._on_open_mcp_config)
+        config_row.add_suffix(open_cfg_btn)
+
+        reload_btn = Gtk.Button(label="Recarregar", valign=Gtk.Align.CENTER)
+        reload_btn.add_css_class("suggested-action")
+        reload_btn.add_css_class("pill")
+        reload_btn.connect("clicked", self._on_reload_mcp_servers)
+        config_row.add_suffix(reload_btn)
+
+        mcp_group.add(config_row)
+        page.add(mcp_group)
+
+        # 2. Servidores Configurados
+        self.mcp_servers_group = Adw.PreferencesGroup(
+            title="Servidores Configurados",
+            description="Status e ferramentas ativas em tempo real.",
+        )
+        page.add(self.mcp_servers_group)
+        self._populate_mcp_servers()
+
+    def _on_open_mcp_config(self, _btn: Gtk.Button) -> None:
+        import subprocess
+        try:
+            subprocess.Popen(["xdg-open", DEFAULT_MCP_CONFIG_PATH])
+        except Exception as exc:
+            self.add_toast(Adw.Toast.new(f"Erro ao abrir arquivo: {exc}"))
+
+    def _on_dialog_closed(self, *args) -> None:
+        self._is_closed = True
+        mgr = getattr(self, "_mcp_manager", None)
+        if mgr and getattr(self, "_mcp_change_listener", None):
+            mgr.remove_change_listener(self._mcp_change_listener)
+            self._mcp_change_listener = None
+
+    def _on_mcp_changed(self) -> None:
+        if not getattr(self, "_is_closed", False):
+            GLib.idle_add(self._populate_mcp_servers)
+
+    def _on_reload_mcp_servers(self, _btn: Gtk.Button) -> None:
+        try:
+            mgr = getattr(self, "_mcp_manager", None) or getattr(self.copilot_parent, "mcp_manager", None) or MCPManager()
+            mgr.reload()
+            self._populate_mcp_servers()
+            self.add_toast(Adw.Toast.new("Servidores MCP recarregados!"))
+        except Exception as exc:
+            self.add_toast(Adw.Toast.new(f"Erro ao recarregar MCP: {exc}"))
+
+    def _populate_mcp_servers(self) -> bool:
+        if getattr(self, "_is_closed", False):
+            return GLib.SOURCE_REMOVE
+
+        mgr = getattr(self, "_mcp_manager", None) or getattr(self.copilot_parent, "mcp_manager", None) or MCPManager()
+        summary = mgr.get_status_summary()
+
+        for r in self._mcp_rows:
+            self.mcp_servers_group.remove(r)
+        self._mcp_rows.clear()
+
+        if not summary:
+            empty_row = Adw.ActionRow(
+                title="Nenhum servidor MCP configurado",
+                subtitle="Clique em 'Editar JSON' para adicionar servidores (ex: Git, SQLite, Docker).",
+            )
+            self.mcp_servers_group.add(empty_row)
+            self._mcp_rows.append(empty_row)
+            return GLib.SOURCE_REMOVE
+
+        for item in summary:
+            name = item["name"]
+            tool_cnt = item["tool_count"]
+            state = item["state"]
+            desc = item["description"] or item["command"]
+            error = item.get("error", "")
+            tool_details = item.get("tool_details", [])
+
+            if state == "connected":
+                icon_name = "emblem-ok-symbolic"
+                css_class = "success"
+                state_label = "Conectado"
+            elif state in ("connecting", "restarting"):
+                icon_name = "process-working-symbolic"
+                css_class = "warning"
+                state_label = "Conectando..." if state == "connecting" else "Reiniciando..."
+            elif state == "error":
+                icon_name = "dialog-error-symbolic"
+                css_class = "error"
+                state_label = "Erro"
+            elif state == "disabled":
+                icon_name = "media-playback-stop-symbolic"
+                css_class = "dim-label"
+                state_label = "Desativado"
+            else:
+                icon_name = "network-offline-symbolic"
+                css_class = "dim-label"
+                state_label = state.capitalize()
+
+            if error:
+                sub_text = f"{desc} • {state_label}: {error}"
+            elif state == "connected":
+                sub_text = f"{desc} • {tool_cnt} ferramenta(s)"
+            else:
+                sub_text = f"{desc} • {state_label}"
+
+            expander = Adw.ExpanderRow(
+                title=name,
+                subtitle=sub_text,
+            )
+
+            status_icon = Gtk.Image.new_from_icon_name(icon_name)
+            status_icon.set_valign(Gtk.Align.CENTER)
+            status_icon.add_css_class(css_class)
+            expander.add_prefix(status_icon)
+
+            sw = Gtk.Switch(active=item["enabled"], valign=Gtk.Align.CENTER)
+
+            def on_sw_toggled(switch, _gparam, s_name=name):
+                mgr.set_server_enabled(s_name, switch.get_active())
+                self._populate_mcp_servers()
+
+            sw.connect("notify::active", on_sw_toggled)
+            expander.add_suffix(sw)
+
+            if tool_details:
+                for tool in tool_details:
+                    t_row = Adw.ActionRow(
+                        title=tool["name"],
+                        subtitle=tool.get("description") or "Sem descrição fornecida.",
+                    )
+                    t_row.set_subtitle_lines(2)
+                    t_icon = Gtk.Image.new_from_icon_name("system-run-symbolic")
+                    t_icon.add_css_class("dim-label")
+                    t_row.add_prefix(t_icon)
+                    expander.add_row(t_row)
+            elif state == "connected":
+                empty_tool_row = Adw.ActionRow(
+                    title="Nenhuma ferramenta exportada",
+                    subtitle="Este servidor não registrou ferramentas via tools/list.",
+                )
+                expander.add_row(empty_tool_row)
+            elif state == "error":
+                err_tool_row = Adw.ActionRow(
+                    title="Falha na inicialização",
+                    subtitle=error or "Verifique o comando configurado ou execute os testes.",
+                )
+                expander.add_row(err_tool_row)
+
+            self.mcp_servers_group.add(expander)
+            self._mcp_rows.append(expander)
+
+        return GLib.SOURCE_REMOVE
+
     def _populate_facts_group(self) -> None:
         for r in self.fact_rows:
             self.facts_group.remove(r)
@@ -819,6 +1068,20 @@ class PreferencesDialog(Adw.PreferencesDialog):
                 break
         self.voice_overlay_combo_row.set_selected(matching_overlay_idx)
 
+        # Ditado Global por Voz no Aplicativo em Foco
+        self.dictate_shortcut_switch_row.set_active(getattr(self.config, "dictate_shortcut_enabled", True))
+        matching_dictate_idx = 0
+        current_dictate_key = getattr(self.config, "dictate_shortcut_key", "<Super><Shift>d")
+        for idx, (b_code, _) in enumerate(self.dictate_shortcut_options):
+            if b_code == current_dictate_key:
+                matching_dictate_idx = idx
+                break
+        self.dictate_shortcut_combo_row.set_selected(matching_dictate_idx)
+        self.dictate_silence_spin.set_value(float(getattr(self.config, "dictate_silence_timeout_sec", 0.9)))
+        self.dictate_sound_switch_row.set_active(getattr(self.config, "dictate_sound_effects", True))
+        self.dictate_polish_switch_row.set_active(getattr(self.config, "dictate_smart_polish", True))
+        self.context_awareness_switch_row.set_active(getattr(self.config, "context_awareness_enabled", True))
+
         # Autostart com o Sistema
         is_auto = AutostartManager.is_enabled() or getattr(self.config, "autostart_enabled", False)
         self.autostart_switch_row.set_active(is_auto)
@@ -829,6 +1092,9 @@ class PreferencesDialog(Adw.PreferencesDialog):
         pats = getattr(self.config, "ignored_patterns", [])
         self.ignored_patterns_entry_row.set_text(", ".join(pats))
         self.auto_execute_switch_row.set_active(getattr(self.config, "auto_execute_safe_actions", False))
+
+        # MCP (Model Context Protocol)
+        self.mcp_switch_row.set_active(getattr(self.config, "mcp_enabled", True))
 
         self._update_visibility()
 
@@ -938,6 +1204,18 @@ class PreferencesDialog(Adw.PreferencesDialog):
         else:
             cfg.voice_overlay_mode = "pill"
 
+        # Ditado Global por Voz
+        cfg.dictate_shortcut_enabled = self.dictate_shortcut_switch_row.get_active()
+        sel_dictate = self.dictate_shortcut_combo_row.get_selected()
+        if 0 <= sel_dictate < len(self.dictate_shortcut_options):
+            cfg.dictate_shortcut_key = self.dictate_shortcut_options[sel_dictate][0]
+        else:
+            cfg.dictate_shortcut_key = "<Super><Shift>d"
+        cfg.dictate_silence_timeout_sec = float(self.dictate_silence_spin.get_value())
+        cfg.dictate_sound_effects = self.dictate_sound_switch_row.get_active()
+        cfg.dictate_smart_polish = self.dictate_polish_switch_row.get_active()
+        cfg.context_awareness_enabled = self.context_awareness_switch_row.get_active()
+
         # Autostart
         cfg.autostart_enabled = self.autostart_switch_row.get_active()
 
@@ -950,6 +1228,11 @@ class PreferencesDialog(Adw.PreferencesDialog):
         cfg.quarantine_directories = list(self.config.quarantine_directories)
         cfg.max_file_size_mb = self.config.max_file_size_mb
         cfg.auto_execute_safe_actions = self.auto_execute_switch_row.get_active()
+
+        # MCP (Model Context Protocol)
+        cfg.mcp_enabled = self.mcp_switch_row.get_active()
+        cfg.mcp_config_path = getattr(self.config, "mcp_config_path", "")
+        cfg.mcp_auto_connect = getattr(self.config, "mcp_auto_connect", True)
 
         return cfg
 
@@ -977,8 +1260,7 @@ class PreferencesDialog(Adw.PreferencesDialog):
 
             def update_ui():
                 self.test_spinner.stop()
-                icon = "✓" if ok else "✗"
-                toast = Adw.Toast.new(f"{icon} {msg}")
+                toast = Adw.Toast.new(msg)
                 self.add_toast(toast)
                 return GLib.SOURCE_REMOVE
 
@@ -1007,6 +1289,12 @@ class PreferencesDialog(Adw.PreferencesDialog):
             ShortcutManager.register_voice(getattr(cfg, "voice_shortcut_key", "<Super><Shift>v"))
         else:
             ShortcutManager.unregister_voice()
+
+        # Sincroniza Atalho de Ditado Global
+        if getattr(cfg, "dictate_shortcut_enabled", True):
+            ShortcutManager.register_dictate(getattr(cfg, "dictate_shortcut_key", "<Super><Shift>d"))
+        else:
+            ShortcutManager.unregister_dictate()
 
         # Sincroniza Inicialização com o Sistema (Autostart)
         if cfg.autostart_enabled:

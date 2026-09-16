@@ -151,7 +151,7 @@ class GeminiUILayoutTest(unittest.TestCase):
 
         # Testa Kill Switch
         self.win._on_toggle_kill_switch(popover)
-        self.assertEqual(self.win.fence_lbl.get_text(), "🛑 BLOQUEADO")
+        self.assertEqual(self.win.fence_lbl.get_text(), "BLOQUEADO")
         self.assertTrue(self.win.fence.is_emergency_stopped)
 
         # Destrava Kill Switch

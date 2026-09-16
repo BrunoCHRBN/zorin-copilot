@@ -66,6 +66,17 @@ class CopilotConfig:
     voice_shortcut_enabled: bool = True
     voice_shortcut_key: str = "<Super><Shift>v"
 
+    # Atalho Global Direto de Ditado / Voice Typing no app em foco (Etapa 2)
+    dictate_shortcut_enabled: bool = True
+    dictate_shortcut_key: str = "<Super><Shift>d"
+    dictate_silence_timeout_sec: float = 0.9
+    dictate_sound_effects: bool = True
+    dictate_smart_polish: bool = True
+
+    # Consciência de Contexto Ativo e Sugestões Dinâmicas (Fase 3)
+    context_awareness_enabled: bool = True
+    context_suggestions_limit: int = 4
+
     # Atalho Global de Voz ao Vivo (Fase 3, parte B)
     live_voice_hotkey_enabled: bool = True
     live_voice_hotkey: str = "<Super>v"
@@ -120,6 +131,11 @@ class CopilotConfig:
     # tem barra se o usuário rodar uma). 0 desliga a faixa.
     red_zone_bottom_px: int = -1
     red_zone_top_px: int = -1
+
+    # Servidores MCP (Model Context Protocol - Extensibilidade e Ferramentas Externas)
+    mcp_enabled: bool = True
+    mcp_config_path: str = ""  # vazio = ~/.config/zorin-copilot/mcp_servers.json
+    mcp_auto_connect: bool = True  # conectar automaticamente aos servidores habilitados
 
     # Configurações de Confiança, Privacidade e RAG
 

@@ -693,9 +693,9 @@ class VoicePillWindow(Gtk.Window):
             short_msg = msg.strip().replace("\n", " ")
             if len(short_msg) > 18:
                 short_msg = short_msg[:18] + "..."
-            label_text = f"{'✓' if success else '✗'} {short}: {short_msg}"
+            label_text = f"{short}: {short_msg}"
         else:
-            label_text = f"{'✓' if success else '✗'} {short}"
+            label_text = f"{short}"
         self._show_chip(label_text, ok=success)
         return GLib.SOURCE_REMOVE
 

@@ -290,7 +290,8 @@ def test_estrategia_clipboard_forcada_ignora_atspi():
     assert result.text == "só do clipboard"
 
 
-def test_sem_conteudo_em_lugar_nenhum_devolve_ok_false_com_dica():
+def test_sem_conteudo_em_lugar_nenhum_devolve_ok_false_com_dica(monkeypatch):
+    monkeypatch.setattr(LessonCapture, "_capture_ocr", lambda self, app, url: CaptureResult(ok=False, app=app))
     capture = LessonCapture(
         inspector=FakeInspector(FakeNode("application")), clipboard=FakeClipboard("")
     )
@@ -330,7 +331,7 @@ def test_save_escreve_markdown_com_metadados(tmp_path):
         clipboard=FakeClipboard(None),
         documents_dir=str(tmp_path),
     )
-    result = capture.capture()
+    result = capture.capture(strategy="atspi")
     path = capture.save(result)
 
     content = open(path, encoding="utf-8").read()
@@ -347,9 +348,9 @@ def test_save_nao_sobrescreve_arquivo_existente(tmp_path):
         clipboard=FakeClipboard(None),
         documents_dir=str(tmp_path),
     )
-    first = capture.capture()
+    first = capture.capture(strategy="atspi")
     capture.save(first)
-    second = capture.capture()
+    second = capture.capture(strategy="atspi")
     second_path = capture.save(second)
 
     assert second_path != first.path
@@ -401,6 +402,9 @@ class StubVazio(LessonCapture):
         return CaptureResult(ok=False, app=app, warnings=["nada na tela"])
 
     def _capture_clipboard(self, app, url):
+        return CaptureResult(ok=False, app=app)
+
+    def _capture_ocr(self, app, url):
         return CaptureResult(ok=False, app=app)
 
 

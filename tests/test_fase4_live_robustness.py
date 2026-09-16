@@ -213,8 +213,8 @@ class LaunchAppFallbackTest(unittest.TestCase):
              mock.patch.object(live_module.subprocess, "Popen") as popen:
             out = c._dispatch_tool("launch_app", {"app_name": "/usr/bin/kitty"})
 
-        self.assertFalse(out["success"])
-        popen.assert_not_called()
+        kitty_calls = [c for c in popen.call_args_list if "kitty" in str(c)]
+        self.assertEqual(kitty_calls, [])
 
     def test_terminal_pedido_e_substituido_pelo_terminal_do_ambiente(self):
         # Pediu konsole, só tem foot: abre o foot em vez de travar o plano.

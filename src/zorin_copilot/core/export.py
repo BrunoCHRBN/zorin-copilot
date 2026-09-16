@@ -92,12 +92,112 @@ def _format_timestamp(value: object) -> str:
         return ""
 
 
+def _format_args_inline(tool: str, args: dict[str, object], limit: int = 45) -> str:
+    """Formata os argumentos de uma ferramenta de modo compacto para tabela Markdown."""
+    if not args or not isinstance(args, dict):
+        return "-"
+    for key in ("query", "filename", "path", "directory", "app", "text", "combo", "keys", "url"):
+        if key in args and args[key]:
+            val = str(args[key])
+            if len(val) > limit:
+                val = val[: limit - 1] + "…"
+            return f"`{val}`"
+    for k, v in args.items():
+        if v:
+            val = str(v)
+            if len(val) > limit:
+                val = val[: limit - 1] + "…"
+            return f"`{k}={val}`"
+    return "-"
+
+
 def _render_turn(turn: ChatTurn) -> str:
     stamp = _format_timestamp(turn.timestamp)
     heading = "## Você" + (f" · {stamp}" if stamp else "")
     prompt = turn.prompt.strip() or _EMPTY_PROMPT
     answer = turn.answer.strip() or _EMPTY_ANSWER
-    return "\n".join([heading, "", prompt, "", "## Copilot", "", answer])
+    blocks = [heading, "", prompt, "", "## Copilot", "", answer]
+
+    if getattr(turn, "agent_result", None) and isinstance(turn.agent_result, dict):
+        agent_data = turn.agent_result
+        steps = agent_data.get("steps", [])
+        if steps:
+            blocks.append("")
+            blocks.append("### Auditoria de Execução (Modo Agente)")
+            blocks.append("")
+
+            status_text = (
+                "Concluído com sucesso"
+                if agent_data.get("success")
+                else (agent_data.get("stop_message") or agent_data.get("stop_reason") or "Finalizado")
+            )
+            elapsed = float(agent_data.get("elapsed", 0.0))
+            provider = agent_data.get("provider", "")
+            meta = [
+                f"**Status:** {status_text}",
+                f"**Etapas:** {len(steps)}",
+                f"**Duração:** {elapsed:.1f}s",
+            ]
+            if provider:
+                meta.append(f"**Modelo:** {provider}")
+            blocks.append(" · ".join(meta))
+            blocks.append("")
+
+            # Tabela Markdown de etapas
+            blocks.append("| # | Ferramenta | Argumentos | Status | Tempo |")
+            blocks.append("|---|:---|:---|:---:|---:|")
+            for s in steps:
+                if not isinstance(s, dict):
+                    continue
+                idx = s.get("index", 0) + 1
+                tool = s.get("tool", "")
+                args = s.get("args", {})
+                args_str = _format_args_inline(tool, args)
+                ok = s.get("ok")
+                if ok is True:
+                    status_badge = "OK"
+                elif ok is False:
+                    status_badge = "Erro"
+                else:
+                    status_badge = "Alerta"
+                time_str = f"{float(s.get('elapsed', 0.0)):.1f}s"
+                blocks.append(f"| {idx} | `{tool}` | {args_str} | {status_badge} | {time_str} |")
+
+            # Observações e detalhes expansíveis
+            has_obs = any(
+                s.get("observation") or s.get("error") or s.get("rationale")
+                for s in steps
+                if isinstance(s, dict)
+            )
+            if has_obs:
+                blocks.append("")
+                blocks.append("<details>")
+                blocks.append("<summary><b>Detalhes e Observações das Etapas</b></summary>")
+                blocks.append("")
+                for s in steps:
+                    if not isinstance(s, dict):
+                        continue
+                    idx = s.get("index", 0) + 1
+                    tool = s.get("tool", "")
+                    rationale = s.get("rationale", "")
+                    obs = s.get("observation")
+                    err = s.get("error", "")
+
+                    blocks.append(f"#### Etapa {idx}: `{tool}`")
+                    if rationale:
+                        blocks.append(f"- **Raciocínio:** {rationale}")
+                    if err:
+                        blocks.append(f"- **Erro:** {err}")
+                    if obs:
+                        blocks.append("- **Observação:**")
+                        obs_str = str(obs).strip()
+                        blocks.append("```")
+                        blocks.append(obs_str)
+                        blocks.append("```")
+                    blocks.append("")
+                blocks.append("</details>")
+
+    return "\n".join(blocks)
 
 
 def render_conversation_markdown(

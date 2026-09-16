@@ -18,6 +18,8 @@ CLI : zorin-copilot-cli
 * **Inspeção Semântica da Tela (AT-SPI2):** Lê botões, menus, caixas de texto e janelas em tempo real sem depender de OCR pesado.
 * **Orquestração de Janelas & Multitarefa:** Organiza layouts, move janelas para áreas de trabalho e alterna o foco por comando de voz ou texto.
 * **Automação de Ações no Desktop:** Preenchimento de formulários, cliques guiados em botões da interface e atalhos de produtividade.
+* **Modo Agente Supervisionado (GUI & CLI):** Execução autônoma de tarefas multi-etapa no desktop com visualização de etapas em tempo real (*stepper*), aprovação interativa para ações sensíveis e parada de emergência imediata.
+* **Ditado Global por Voz (Voice Typing):** Fale em qualquer aplicativo em foco (LibreOffice, navegadores, terminal, editores de código) com o atalho `<Super><Shift>D` ou `--dictate`. Pílula flutuante OSD não-intrusiva que preserva 100% do foco, VAD com sensibilidade de silêncio, transcrição Whisper local (CPU INT8) e injeção automática de texto no cursor via drivers de entrada virtual.
 * **Barra de Comandos Estilo Spotlight:** Interface minimalista em GTK4 / Libadwaita acessível globalmente via atalho de teclado (`Super + Espaço`).
 * **Privacidade Híbrida:** Suporte a modelos locais (via Ollama / llama.cpp) e APIs em nuvem com sanitização automática de dados confidenciais.
 

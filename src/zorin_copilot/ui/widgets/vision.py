@@ -112,11 +112,11 @@ class VisionAttachment:
             if label:
                 header_label = f"<b>{html.escape(label)}</b>"
             elif is_clipboard:
-                header_label = "<b>\U0001f4cb Imagem da Área de Transferência Anexada</b>"
+                header_label = "<b>Imagem da Área de Transferência Anexada</b>"
             elif is_area:
-                header_label = "<b>✂️ Recorte de Tela Anexado</b>"
+                header_label = "<b>Recorte de Tela Anexado</b>"
             else:
-                header_label = "<b>\U0001f5a5️ Captura de Tela Inteira Anexada</b>"
+                header_label = "<b>Captura de Tela Inteira Anexada</b>"
             self.hdr_lbl.set_markup(header_label)
             self.active_badge.set_visible(True)
             self.preview_box.set_visible(True)

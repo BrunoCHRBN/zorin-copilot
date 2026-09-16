@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 
 import gi
@@ -23,12 +24,15 @@ from ..ai.actions import ActionPlan
 from ..ai.engine import IntentEngine
 from ..ai.live import GeminiLiveClient
 from ..core.a11y import DesktopInspector
+from ..core.desktop_context import DesktopContext, DesktopContextDetector
 from ..core.attachments import (
     Attachment,
     AttachmentKind,
     compose_prompt,
+    load_attachment,
     load_attachments,
 )
+from ..core.vision import ScreenCaptureService
 from ..core.config import CopilotConfig
 from ..core.export import (
     exportable_turns,
@@ -43,6 +47,7 @@ from ..shell.action_status import ActionOutcome
 from ..shell.executor import ActionExecutor, ExecutionReport
 from ..shell.undo import UndoEntry
 from ..shell.wake_word import WakeWordEngine, default_backend
+from ..mcp.manager import MCPManager
 from ..ai.local_voice import LocalLiveVoiceClient
 from .hyprland_effects import hyprland_effects
 from .live_view import LiveVoiceWidget
@@ -110,7 +115,14 @@ class CopilotWindow(Adw.ApplicationWindow):
 
         self.config = CopilotConfig.load()
         self.inspector = DesktopInspector()
-        self.executor = ActionExecutor(self.inspector)
+        self.context_detector = DesktopContextDetector(self.inspector)
+        self.current_context: DesktopContext | None = None
+        mcp_cfg_path = getattr(self.config, "mcp_config_path", "") or None
+        self.mcp_manager = MCPManager(config_path=mcp_cfg_path)
+        self.executor = ActionExecutor(
+            self.inspector,
+            mcp_manager=self.mcp_manager if getattr(self.config, "mcp_enabled", True) else None,
+        )
         self.engine = IntentEngine(self.inspector, self.config)
         self.session = TopicSession(auto_persist=True)
         self.current_plan: ActionPlan | None = None
@@ -129,6 +141,10 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.live_client: GeminiLiveClient | LocalLiveVoiceClient | None = None
         self.live_voice_widget: LiveVoiceWidget | None = None
         self.voice_pill_window: VoicePillWindow | None = None
+
+        # Ditado Global / Voice Typing no app em foco
+        self.dictation_service: Any | None = None
+        self.dictation_osd_window: Any | None = None
 
         # Wake word ("palavra de ativação") — invocação hands-free.
         # Opt-in via preferências; pausa durante a sessão Live (o microfone já
@@ -153,6 +169,9 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.entry: Gtk.Entry = Gtk.Entry()
         self.answer_label: Gtk.Label = Gtk.Label()
         self.exec_status: Gtk.Label = Gtk.Label()
+        self.agent_mode_active: bool = False
+        self._active_agent_loop: Any | None = None
+        self._active_agent_widget: Any | None = None
 
         # RAG Local & Inteligência Documental (indexação incremental em segundo plano)
         self.rag = LocalDocumentRAG(memory=self.engine.memory)
@@ -172,6 +191,13 @@ class CopilotWindow(Adw.ApplicationWindow):
         # superfície XDG já existe e o compositor pode casar a windowrule.
         self.connect("realize", self._on_realize_window)
         self._init_wake_word()
+        self._init_mcp_servers()
+
+    def _init_mcp_servers(self) -> None:
+        """Inicia servidores MCP habilitados em segundo plano, se ativado."""
+        if getattr(self.config, "mcp_enabled", True) and getattr(self.config, "mcp_auto_connect", True):
+            import threading
+            threading.Thread(target=self.mcp_manager.start_all_enabled, daemon=True).start()
 
     # ------------------------------------------------------------------
     # Wake word ("palavra de ativação")
@@ -228,7 +254,7 @@ class CopilotWindow(Adw.ApplicationWindow):
         if getattr(self.config, "wake_word_enabled", False) and (
             self.wake_word_engine and self.wake_word_engine.running
         ):
-            self.show_toast("🎙️ Palavra de ativação atualizada e ouvindo.")
+            self.show_toast("Palavra de ativação atualizada e ouvindo.")
 
     def _on_wake_word(self, phrase: str, command: str = "") -> None:
         """Chamado pela thread do motor; agenda a abertura da voz no loop principal."""
@@ -249,9 +275,9 @@ class CopilotWindow(Adw.ApplicationWindow):
         # só a pílula flutuante, sem puxar a janela inteira do Copilot.
         use_pill = _overlay_is_pill(self.config)
         if command:
-            self.show_toast(f'🎙️ "{phrase}" — executando: "{command}"')
+            self.show_toast(f'"{phrase}" — executando: "{command}"')
         else:
-            self.show_toast(f'🎙️ Entendi "{phrase}"! Iniciando conversa...')
+            self.show_toast(f'Entendi "{phrase}". Iniciando conversa...')
 
         if use_pill:
             self.start_live_voice(initial_command=command, as_pill=True)
@@ -417,6 +443,10 @@ class CopilotWindow(Adw.ApplicationWindow):
             self.stop_live_voice()
             return True
 
+        if self._active_agent_loop and getattr(self._active_agent_loop, "running", False):
+            self.abort_active_agent()
+            return True
+
         if self._close_open_popovers():
             return True
 
@@ -521,10 +551,35 @@ class CopilotWindow(Adw.ApplicationWindow):
                 "user-trash-symbolic", "", ("apagar", "excluir", "lixeira"),
             ),
             PaletteCommand(
+                "app.toggle-agent", "Alternar Modo Agente", "Execução autônoma de tarefas no desktop",
+                "system-run-symbolic", "", ("agente", "agent", "autônomo", "tarefas"),
+            ),
+            PaletteCommand(
+                "app.context-refresh", "Atualizar sugestões da janela em foco",
+                "Reexamina o aplicativo ativo e gera novas sugestões contextuais",
+                "view-refresh-symbolic", "", ("contexto", "janela", "sugestoes", "foco"),
+            ),
+            PaletteCommand(
+                "app.toggle-dictation", "Ditado por Voz Global", "Digitar fala no aplicativo em foco",
+                "audio-input-microphone-symbolic", "<Super><Shift>d", ("ditado", "voz", "fala", "digitar", "stt"),
+            ),
+            PaletteCommand(
+                "app.mcp-reload", "Recarregar Servidores MCP", "Reconectar e listar ferramentas dos servidores MCP",
+                "network-server-symbolic", "", ("mcp", "extensões", "servidores", "plugins", "recarregar"),
+            ),
+            PaletteCommand(
                 "app.quit", "Sair do Zorin Copilot", "",
                 "application-exit-symbolic", acc("app.quit"), ("fechar", "encerrar"),
             ),
         ]
+
+        if self._active_agent_loop and getattr(self._active_agent_loop, "running", False):
+            commands.append(
+                PaletteCommand(
+                    "app.abort-agent", "Interromper Agente", "Para a execução do agente imediatamente",
+                    "process-stop-symbolic", "Esc", ("parar", "abortar", "cancelar"),
+                )
+            )
 
         # Só aparece quando faz sentido: comando que não tem efeito polui a busca.
         undo_stack = getattr(self.executor, "undo_stack", None)
@@ -555,6 +610,9 @@ class CopilotWindow(Adw.ApplicationWindow):
             "app.toggle-sidebar": self.toggle_sidebar,
             "app.toggle-pin": self._on_toggle_pin,
             "app.toggle-live-voice": self.toggle_live_voice,
+            "app.toggle-dictation": self.toggle_dictation,
+            "app.toggle-agent": self.toggle_agent_mode,
+            "app.abort-agent": self.abort_active_agent,
             "app.capture-area": lambda: self._start_screen_capture(interactive=True),
             "app.analyze-clipboard": lambda: self._trigger_prompt("analisar_copiado"),
             "app.toggle-dark-mode": lambda: self._trigger_prompt("ativar modo escuro"),
@@ -564,8 +622,48 @@ class CopilotWindow(Adw.ApplicationWindow):
             "app.clear-attachments": self.clear_attachments,
             "app.open-settings": self._open_settings,
             "app.clear-history": self.sidebar.clear_history,
+            "app.context-refresh": self._refresh_context_command,
+            "app.mcp-reload": self._reload_mcp_servers,
             "app.quit": self._quit_application,
         }
+
+    def _reload_mcp_servers(self) -> None:
+        """Recarrega os servidores MCP em segundo plano e exibe feedback via toast."""
+        if not getattr(self.config, "mcp_enabled", True):
+            self.show_toast("Suporte a MCP está desativado nas preferências.")
+            return
+
+        def reload_worker():
+            try:
+                self.mcp_manager.reload()
+                self.mcp_manager.start_all_enabled()
+                tool_count = len(self.mcp_manager.get_all_tools())
+                server_count = len(self.mcp_manager.get_running_servers())
+                msg = f"MCP: {server_count} servidor(es) ativo(s), {tool_count} ferramentas carregadas."
+                GLib.idle_add(self.show_toast, msg)
+            except Exception as exc:
+                logger.error("Erro ao recarregar servidores MCP: %s", exc)
+                GLib.idle_add(self.show_toast, f"Erro ao recarregar MCP: {exc}")
+
+        import threading
+        threading.Thread(target=reload_worker, daemon=True).start()
+        self.show_toast("Recarregando servidores MCP...")
+
+    def _refresh_context_command(self) -> None:
+        """Atualiza manualmente o contexto e as sugestões a partir do desktop."""
+        try:
+            ctx = self.context_detector.detect_context()
+            self.current_context = ctx
+            self.chat_stream.update_context(ctx)
+            if hasattr(self, "prompt_bar") and hasattr(self.prompt_bar, "set_active_context"):
+                self.prompt_bar.set_active_context(ctx)
+            if ctx.has_active_window:
+                self.show_toast(f"Contexto: {ctx.app_name}")
+            else:
+                self.show_toast("Sugestões atualizadas")
+        except Exception as exc:
+            logger.debug("Falha ao atualizar contexto: %s", exc)
+            self.show_toast("Não foi possível atualizar contexto")
 
     def run_palette_command(self, command: PaletteCommand) -> None:
         """Executa o comando escolhido no painel."""
@@ -673,6 +771,21 @@ class CopilotWindow(Adw.ApplicationWindow):
     @property
     def spinner(self) -> Gtk.Spinner:
         return self.prompt_bar.spinner
+
+    @property
+    def agent_btn(self) -> Gtk.ToggleButton:
+        return self.prompt_bar.agent_btn
+
+    def toggle_agent_mode(self, _btn: Gtk.Widget | None = None) -> None:
+        """Alterna o estado do botão de Modo Agente na barra de prompt."""
+        active = not self.agent_btn.get_active()
+        self.agent_btn.set_active(active)
+
+    def abort_active_agent(self) -> None:
+        """Interrompe a execução ativa do agente, se houver uma em andamento."""
+        if self._active_agent_loop:
+            self._active_agent_loop.abort()
+            self.show_toast("⏹ Sinal de parada enviado ao agente.")
 
     # Delegações de comportamento
     def toggle_sidebar(self, _btn: Gtk.Button | None = None) -> None:
@@ -784,6 +897,17 @@ class CopilotWindow(Adw.ApplicationWindow):
 
     def summon_hud(self) -> None:
         """Apresenta a janela com foco imediato no campo de busca com zero latência."""
+        # Captura contexto externo antes de trazer a janela para o primeiro plano
+        if getattr(self.config, "context_awareness_enabled", True):
+            try:
+                ctx = self.context_detector.detect_context()
+                self.current_context = ctx
+                self.chat_stream.update_context(ctx)
+                if hasattr(self, "prompt_bar") and hasattr(self.prompt_bar, "set_active_context"):
+                    self.prompt_bar.set_active_context(ctx)
+            except Exception as exc:
+                logger.debug("Falha ao detectar contexto do desktop no summon_hud: %s", exc)
+
         self.set_visible(True)
         self.present()
         self.entry.grab_focus()
@@ -811,6 +935,8 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.engine.reload_config(new_config)
         self.header.update_provider_badge()
         self._reconfigure_wake_word()
+        if hasattr(self, "executor") and hasattr(self, "mcp_manager"):
+            self.executor.mcp_manager = self.mcp_manager if getattr(new_config, "mcp_enabled", True) else None
 
     # ------------------------------------------------------------------
     # Sugestões rápidas
@@ -819,6 +945,89 @@ class CopilotWindow(Adw.ApplicationWindow):
         """Abre o diálogo de comparação side-by-side de respostas (item #5)."""
         dlg = CompareResponsesDialog(self, anchor_turn)
         dlg.present(self)
+
+    def _trigger_suggestion(self, suggestion: Any) -> None:
+        """Dispara uma ação ou preenche o prompt a partir de uma ContextSuggestion."""
+        action_type = getattr(suggestion, "action_type", "prompt")
+        s_id = getattr(suggestion, "id", "")
+
+        if action_type == "voz_ao_vivo":
+            self.toggle_live_voice()
+            return
+        if action_type == "recortar_area":
+            self._start_screen_capture(interactive=True)
+            return
+        if action_type == "capturar_tela":
+            self._start_screen_capture(interactive=False)
+            return
+        if action_type == "analisar_copiado":
+            self.entry.set_text("Analisar conteúdo da área de transferência")
+            self.prompt_bar.submit(self.entry)
+            return
+
+        prompt_text = getattr(suggestion, "prompt_template", "") or str(suggestion)
+
+        # 1. Auto-grounding visual para páginas web e documentos em foco
+        if s_id in ("summarize_page", "summarize_doc"):
+            ctx = getattr(self, "current_context", None)
+            crop_rect = getattr(ctx, "bbox", None) if ctx else None
+            self.set_visible(False)
+
+            def capture_worker():
+                time.sleep(0.15)
+                success, img_bytes, _ = ScreenCaptureService.capture(
+                    interactive=False, crop_rect=crop_rect
+                )
+
+                def on_done():
+                    self.set_visible(True)
+                    self.present()
+                    if success and img_bytes:
+                        self._active_image_bytes = img_bytes
+                        self._active_image_is_area = bool(crop_rect)
+                        lbl = "Janela em foco capturada" if crop_rect else "Tela inteira capturada"
+                        self.vision.render_thumbnail(img_bytes, is_area=bool(crop_rect), label=lbl)
+                    self.entry.set_text(prompt_text)
+                    self.prompt_bar.submit(self.entry)
+
+                GLib.idle_add(on_done)
+
+            threading.Thread(target=capture_worker, daemon=True).start()
+            return
+
+        # 2. Auto-grounding de código para arquivos identificados no editor
+        if s_id in ("explain_code_file", "generate_unit_tests", "refactor_code"):
+            ctx = getattr(self, "current_context", None)
+            if ctx and ctx.extracted_target:
+                target_path = ctx.extracted_target.strip()
+                resolved_file = None
+                if os.path.isabs(target_path) and os.path.isfile(target_path):
+                    resolved_file = target_path
+                elif ctx.git_repo and os.path.isdir(ctx.git_repo):
+                    candidate = os.path.join(ctx.git_repo, target_path)
+                    if os.path.isfile(candidate):
+                        resolved_file = candidate
+                    else:
+                        for root, _, files in os.walk(ctx.git_repo):
+                            if target_path in files:
+                                resolved_file = os.path.join(root, target_path)
+                                break
+                elif os.path.isfile(target_path):
+                    resolved_file = os.path.abspath(target_path)
+
+                if resolved_file:
+                    try:
+                        att = load_attachment(resolved_file)
+                        if att.ok:
+                            existing = [a.path for a in self.attachments]
+                            if att.path not in existing:
+                                self.attachments.append(att)
+                                self.attachment_bar.refresh()
+                    except Exception as exc:
+                        logger.debug("Falha ao anexar arquivo de contexto: %s", exc)
+
+        self.entry.set_text(prompt_text)
+        self.prompt_bar.submit(self.entry)
 
     def _trigger_prompt(self, text: str) -> None:
         """Dispara um prompt ou ação a partir de um chip de sugestão rápida."""
@@ -895,7 +1104,7 @@ class CopilotWindow(Adw.ApplicationWindow):
             reports = self.execute_plan_with_undo(plan)
             ok_count = sum(1 for r in reports if r.success)
             if ok_count:
-                self.show_toast(f"✓ {ok_count} ação(ões) executada(s) automaticamente no desktop!")
+                self.show_toast(f"{ok_count} ação(ões) executada(s) automaticamente no desktop")
         except Exception as exc:
             logger.debug(f"Falha na auto-execução de ações seguras: {exc}")
         return GLib.SOURCE_REMOVE
@@ -907,7 +1116,7 @@ class CopilotWindow(Adw.ApplicationWindow):
         display = Gdk.Display.get_default()
         if display:
             display.get_clipboard().set(text)
-            self.show_toast("✓ Resposta copiada para a área de transferência!")
+            self.show_toast("Resposta copiada para a área de transferência")
 
     def _on_copy_ocr_text(self, _btn: Gtk.Button) -> None:
         ocr_text = getattr(self, "_current_ocr_text", None)
@@ -916,6 +1125,157 @@ class CopilotWindow(Adw.ApplicationWindow):
         from ..core.clipboard import ClipboardService
         if ClipboardService.set_text(ocr_text):
             self.show_toast("Texto copiado para a área de transferência!")
+
+    # ------------------------------------------------------------------
+    # Execução do Modo Agente
+    # ------------------------------------------------------------------
+    def start_agent_execution(
+        self,
+        objective: str,
+        attached_image: bytes | None = None,
+        full_prompt: str | None = None,
+    ) -> None:
+        """Inicia a execução autônoma supervisionada de um objetivo no desktop."""
+        import threading
+        from ..ai.agent import AgentLoop
+        from ..ai.agent_router import AgentRouter, RouteMode
+        from ..ai.agent_tools import ToolRegistry
+        from .widgets.agent_card import AgentExecutionWidget
+
+        self._is_busy = True
+        self.prompt_bar.set_busy(True)
+        self.chat_stream.welcome_box.set_visible(False)
+
+        prompt_to_run = full_prompt or objective
+
+        # Adiciona a bolha do usuário e cria o widget de execução do agente
+        temp_turn = ChatTurn(prompt=objective, answer="")
+        user_bubble = self.chat_stream._build_user_bubble(temp_turn, attached_image)
+
+        agent_widget = AgentExecutionWidget(
+            objective=objective,
+            ctx=self,
+            on_abort=self.abort_active_agent,
+        )
+        self._active_agent_widget = agent_widget
+
+        turn_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        turn_box.append(user_bubble)
+        turn_box.append(agent_widget)
+
+        self.chat_stream.stream_box.append(turn_box)
+        self.chat_stream.scroll_to_bottom()
+
+        def agent_thread():
+            router = AgentRouter(self.config)
+            route = router.route(prompt_to_run, RouteMode.AUTO)
+
+            if route.planner is None:
+                err_msg = f"Nenhum modelo disponível para o modo agente: {route.reason}."
+                GLib.idle_add(
+                    agent_widget.status_lbl.set_text,
+                    err_msg,
+                )
+                GLib.idle_add(self._on_agent_finished, None, objective, agent_widget, err_msg)
+                return
+
+            undo_stack = getattr(self.executor, "undo_stack", None)
+            mcp_mgr = self.mcp_manager if getattr(self.config, "mcp_enabled", True) else None
+            registry = ToolRegistry(
+                inspector=self.inspector,
+                input_driver=getattr(self.executor, "input_driver", None),
+                undo_stack=undo_stack,
+                fence=self.fence,
+                mcp_manager=mcp_mgr,
+            )
+
+            max_steps = getattr(self.config, "agent_max_steps", 12)
+            loop = AgentLoop(
+                route.planner,
+                registry,
+                max_steps=max_steps,
+                max_seconds=180.0,
+                memory=self.engine.memory,
+            )
+            self._active_agent_loop = loop
+
+            def on_step(step):
+                GLib.idle_add(agent_widget.add_step, step)
+
+            def on_approval(step) -> bool:
+                approval_event = threading.Event()
+                result_dict = {"approved": False}
+
+                def show_approval():
+                    agent_widget.prompt_approval(step, approval_event, result_dict)
+                    return GLib.SOURCE_REMOVE
+
+                GLib.idle_add(show_approval)
+                approval_event.wait(timeout=180.0)
+                return result_dict["approved"]
+
+            try:
+                result = loop.run(prompt_to_run, on_step=on_step, on_approval=on_approval)
+            except Exception as exc:
+                logger.exception("Erro durante a execução do agente")
+                result = None
+                err = str(exc)
+            else:
+                err = ""
+
+            GLib.idle_add(self._on_agent_finished, result, objective, agent_widget, err)
+
+        threading.Thread(target=agent_thread, daemon=True).start()
+
+    def _on_agent_finished(
+        self,
+        result: Any | None,
+        objective: str,
+        widget: Any,
+        error_msg: str = "",
+    ) -> bool:
+        """(main thread) Finaliza a execução do agente e atualiza o histórico e a UI."""
+        self._is_busy = False
+        self._active_agent_loop = None
+        self._active_agent_widget = None
+        self.prompt_bar.set_busy(False)
+
+        if result is not None:
+            widget.finish(result)
+            answer_text = result.final_answer or result.stop_message
+            self.session.record_turn(
+                prompt=objective,
+                answer=answer_text,
+                agent_result=result.to_dict(),
+            )
+        else:
+            self.session.record_turn(
+                prompt=objective,
+                answer=error_msg or "Falha na execução do agente.",
+            )
+
+        self._save_current_session()
+        self._update_pin_ui()
+        if self.session.title:
+            self.window_title.set_subtitle(self.session.title)
+        self.sidebar.populate(filter_query=self.sidebar.search.get_text().strip())
+        self.chat_stream.scroll_to_bottom()
+        self.entry.grab_focus()
+
+        # Atualiza tokens e status
+        self.header.refresh_token_usage()
+        self.status_bar.refresh_tokens()
+
+        if result and result.success:
+            self.show_toast(f"Modo Agente: objetivo cumprido em {len(result.steps)} passos.")
+        elif result and result.stop_reason == "aborted":
+            self.show_toast("Modo Agente: execução interrompida.")
+        elif result and result.stop_reason == "rejected":
+            self.show_toast("Modo Agente: ação recusada pelo usuário.")
+        elif error_msg:
+            self.show_toast(f"Modo Agente: {error_msg}")
+
+        return GLib.SOURCE_REMOVE
 
     # ------------------------------------------------------------------
     # Desfazer ações (Ctrl+Z)
@@ -950,7 +1310,7 @@ class CopilotWindow(Adw.ApplicationWindow):
 
     def _offer_undo(self, entry: UndoEntry) -> None:
         """Toast com botão "Desfazer" — o jeito GTK de não interromper o fluxo."""
-        toast = Adw.Toast.new(f"✓ {entry.label}")
+        toast = Adw.Toast.new(entry.label)
         toast.set_button_label("Desfazer")
         # Mais tempo que o padrão: decidir se quer desfazer leva alguns segundos.
         toast.set_timeout(10)
@@ -970,7 +1330,7 @@ class CopilotWindow(Adw.ApplicationWindow):
             self.chat_stream.outcomes.record(
                 entry.ui_key, ActionOutcome(success=ok, message=message, undone=ok)
             )
-        self.show_toast(f"{'↩' if ok else '✗'} {message}")
+        self.show_toast(message)
 
     def _on_undo_shortcut(self, *_args) -> bool:
         """`Ctrl+Z` desfaz a ação — mas não rouba o undo de texto do campo.
@@ -1056,7 +1416,7 @@ class CopilotWindow(Adw.ApplicationWindow):
             self.show_toast("Não foi possível gravar o arquivo.")
             return
 
-        self.show_toast(f"✓ Conversa exportada para {os.path.basename(path)}")
+        self.show_toast(f"Conversa exportada para {os.path.basename(path)}")
 
     # ------------------------------------------------------------------
     # Anexos (arrastar e soltar)
@@ -1133,7 +1493,7 @@ class CopilotWindow(Adw.ApplicationWindow):
             parts.append(f"{n} ignorado{'s' if n > 1 else ''}: {first.name}{detail}")
         if not parts:
             return "Nada para anexar."
-        return "✓ " + " · ".join(parts)
+        return " · ".join(parts)
 
     def clear_attachments(self, *_args) -> None:
         """Remove todos os anexos de texto/PDF (não mexe na imagem ativa)."""
@@ -1199,7 +1559,7 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.sidebar.populate(filter_query=self.sidebar.search.get_text().strip())
         self.entry.set_text("")
         self.entry.grab_focus()
-        self.show_toast("✨ Nova conversa iniciada!")
+        self.show_toast("Nova conversa iniciada")
 
     def _build_history_popover(self) -> None:
         """Método de compatibilidade para histórico."""
@@ -1237,7 +1597,7 @@ class CopilotWindow(Adw.ApplicationWindow):
                     executor=self.executor,
                     memory=self.engine.memory,
                 )
-                toast_msg = "🎙️ Voz Local Soberana iniciada! Pode falar..."
+                toast_msg = "Voz Local iniciada. Pode falar..."
             except Exception as exc:
                 if not self.config.gemini_api_key.strip():
                     self.show_toast(f"Falha ao iniciar voz local: {exc}")
@@ -1246,7 +1606,7 @@ class CopilotWindow(Adw.ApplicationWindow):
 
         if not use_local:
             if not self.config.gemini_api_key.strip():
-                self.show_toast("Chave de API do Google Gemini necessária para voz ao vivo. Configure em ⚙️.")
+                self.show_toast("Chave de API do Google Gemini necessária para voz ao vivo. Configure nas Preferências.")
                 self._open_settings()
                 return
 
@@ -1256,7 +1616,7 @@ class CopilotWindow(Adw.ApplicationWindow):
                     executor=self.executor,
                     memory=self.engine.memory,
                 )
-            toast_msg = "🎙️ Conversa ao vivo iniciada! Pode falar..."
+            toast_msg = "Conversa ao vivo iniciada. Pode falar..."
 
         if hasattr(self.live_client, "rag"):
             self.live_client.rag = self.rag
@@ -1268,7 +1628,7 @@ class CopilotWindow(Adw.ApplicationWindow):
             self.live_client.queue_initial_text(initial_command)
 
         def _on_live_error(err: str) -> None:
-            GLib.idle_add(lambda: self.show_toast(f"⚠️ Chamada de voz: {err}"))
+            GLib.idle_add(lambda: self.show_toast(f"Chamada de voz: {err}"))
 
         self.live_client.on_error = _on_live_error
         # Encerramento autônomo: o agente pode pedir para encerrar a sessão
@@ -1362,19 +1722,19 @@ class CopilotWindow(Adw.ApplicationWindow):
                     t_name = act.get("tool", "")
                     t_args = act.get("args", {})
                     if t_name == "launch_app":
-                        lines.append(f"- \U0001f680 Abriu o aplicativo **{t_args.get('app_name', '')}**")
+                        lines.append(f"- Abriu o aplicativo **{t_args.get('app_name', '')}**")
                     elif t_name == "system_control":
                         lines.append(
-                            f"- ⚙️ Controle do sistema: **{t_args.get('action', '')}** ({t_args.get('value', '')})"
+                            f"- Controle do sistema: **{t_args.get('action', '')}** ({t_args.get('value', '')})"
                         )
                     elif t_name == "open_url":
-                        lines.append(f"- \U0001f310 Abriu link: `{t_args.get('url', '')}`")
+                        lines.append(f"- Abriu link: `{t_args.get('url', '')}`")
                     elif t_name == "capture_screen":
-                        lines.append("- \U0001f4f8 Capturou a tela para inspeção visual")
+                        lines.append("- Capturou a tela para inspeção visual")
                     elif t_name == "web_search":
-                        lines.append(f"- \U0001f50d Pesquisa na web: *{t_args.get('query', '')}*")
+                        lines.append(f"- Pesquisa na web: *{t_args.get('query', '')}*")
                     elif t_name == "media_control":
-                        lines.append(f"- \U0001f3b5 Controle de mídia: **{t_args.get('action', '')}**")
+                        lines.append(f"- Controle de mídia: **{t_args.get('action', '')}**")
                     elif t_name == "write_document":
                         _fn = (t_args.get("filename") or "").lower()
                         _label = (
@@ -1384,11 +1744,11 @@ class CopilotWindow(Adw.ApplicationWindow):
                             if _fn.endswith(".docx")
                             else "documento"
                         )
-                        lines.append(f"- \U0001f4dd Salvou {_label}: `{t_args.get('filename', '')}`")
+                        lines.append(f"- Salvou {_label}: `{t_args.get('filename', '')}`")
                     elif t_name == "organize_directory":
-                        lines.append(f"- \U0001f4c1 Organizou pasta: `{t_args.get('directory', 'Downloads')}`")
+                        lines.append(f"- Organizou pasta: `{t_args.get('directory', 'Downloads')}`")
                     else:
-                        lines.append(f"- ⚡ Executou ferramenta: `{t_name}`")
+                        lines.append(f"- Executou ferramenta: `{t_name}`")
                 lines.append("")
             else:
                 lines.append("Conversa bidirecional em tempo real concluída.")
@@ -1396,14 +1756,14 @@ class CopilotWindow(Adw.ApplicationWindow):
             if summary.get("video_streamed"):
                 frames = summary.get("video_frames", 0)
                 lines.append(
-                    f"**\U0001f3a5 Live Video:** Compartilhamento de tela contínuo ativo "
+                    f"**Vídeo ao vivo:** Compartilhamento de tela contínuo ativo "
                     f"({frames} frames analisados).\n"
                 )
 
             prompt_label = (
-                "\U0001f399️\U0001f3a5 Chamada de Voz e Tela ao Vivo"
+                "Chamada de Voz e Tela ao Vivo"
                 if summary.get("video_streamed")
-                else "\U0001f399️ Conversa de Voz ao Vivo"
+                else "Conversa de Voz ao Vivo"
             )
             turn = self.session.record_turn(prompt=prompt_label, answer="\n".join(lines).strip())
             self._save_current_session()
@@ -1530,6 +1890,92 @@ class CopilotWindow(Adw.ApplicationWindow):
             self.set_visible(False)
         self.vision.start_capture(interactive=True, direct_mode=True)
 
+    # ------------------------------------------------------------------
+    # Ditado Global / Voice Typing no aplicativo em foco
+    # ------------------------------------------------------------------
+    def toggle_dictation(self) -> None:
+        """Alterna a ativação do Ditado Global no aplicativo em foco."""
+        if self.dictation_service and self.dictation_service.is_active():
+            self.stop_dictation()
+        else:
+            self.start_dictation()
+
+    def start_dictation(self) -> None:
+        """Inicia o processo de escuta e ditado para o aplicativo ativo."""
+        from ..core.dictation import DictationService, DictationState
+        from .dictation_osd import DictationOSDWindow
+
+        if not self.dictation_service:
+            self.dictation_service = DictationService(config=self.config)
+
+        # Se a janela principal do Copilot estiver visível e com foco, digita direto no prompt
+        if self.get_visible() and self.is_active():
+            def _inject_to_entry(text: str) -> bool:
+                GLib.idle_add(lambda: self._insert_text_to_entry(text))
+                return True
+            self.dictation_service.custom_text_injector = _inject_to_entry
+        else:
+            self.dictation_service.custom_text_injector = None
+
+        if self.dictation_osd_window:
+            try:
+                self.dictation_osd_window.close_osd()
+            except Exception:
+                pass
+            self.dictation_osd_window = None
+
+        osd = DictationOSDWindow(
+            application=self.get_application(),
+            on_cancel=self.stop_dictation,
+        )
+        self.dictation_osd_window = osd
+
+        def _on_state_change(state: DictationState, msg: str) -> None:
+            GLib.idle_add(lambda: osd.update_state(state, msg) if osd else None)
+            if state in (DictationState.DONE, DictationState.ERROR, DictationState.IDLE):
+                if self.wake_word_engine is not None:
+                    self.wake_word_engine.resume()
+
+        def _on_audio_level(level: float) -> None:
+            GLib.idle_add(lambda: osd.update_audio_level(level) if osd else None)
+
+        self.dictation_service.on_state_change = _on_state_change
+        self.dictation_service.on_audio_level = _on_audio_level
+
+        if self.wake_word_engine is not None:
+            self.wake_word_engine.pause()
+
+        osd.present()
+        started = self.dictation_service.start()
+        if not started:
+            osd.update_state(DictationState.ERROR, "Microfone indisponível")
+            if self.wake_word_engine is not None:
+                self.wake_word_engine.resume()
+
+    def stop_dictation(self) -> None:
+        """Interrompe o ditado atual."""
+        if self.dictation_service:
+            self.dictation_service.stop(cancel=True)
+        if self.dictation_osd_window:
+            try:
+                self.dictation_osd_window.close_osd()
+            except Exception:
+                pass
+            self.dictation_osd_window = None
+        if self.wake_word_engine is not None:
+            self.wake_word_engine.resume()
+
+    def _insert_text_to_entry(self, text: str) -> None:
+        """Insere o texto transcrito no campo de prompt do Copilot."""
+        if hasattr(self, "entry") and self.entry:
+            current = self.entry.get_text()
+            if current:
+                self.entry.set_text(f"{current} {text.strip()}")
+            else:
+                self.entry.set_text(text.strip())
+            self.entry.grab_focus()
+
+
 
 class ZorinCopilotApp(Adw.Application):
     """Aplicação Zorin Copilot com suporte a comando de linha, modo HUD e atalhos globais."""
@@ -1555,6 +2001,10 @@ class ZorinCopilotApp(Adw.Application):
             "Inicia imediatamente a conversa de voz ao vivo (Gemini Live)", None,
         )
         self.add_main_option(
+            "dictate", ord("d"), GLib.OptionFlags.NONE, GLib.OptionArg.NONE,
+            "Inicia o ditado por voz contínuo no aplicativo atualmente em foco", None,
+        )
+        self.add_main_option(
             "background", 0, GLib.OptionFlags.NONE, GLib.OptionArg.NONE,
             "Inicia o Copilot silenciosamente em segundo plano (autostart)", None,
         )
@@ -1572,6 +2022,8 @@ class ZorinCopilotApp(Adw.Application):
                     ShortcutManager.register_crop(getattr(cfg, "crop_shortcut_key", "<Super><Shift>s"))
                 if getattr(cfg, "live_voice_hotkey_enabled", True):
                     ShortcutManager.register_voice(getattr(cfg, "live_voice_hotkey", "<Super>v"))
+                if getattr(cfg, "dictate_shortcut_enabled", True):
+                    ShortcutManager.register_dictate(getattr(cfg, "dictate_shortcut_key", "<Super><Shift>d"))
             else:
                 try:
                     from ..core.shortcuts_portal import PortalShortcutManager
@@ -1623,17 +2075,23 @@ class ZorinCopilotApp(Adw.Application):
             win.trigger_direct_crop()
         elif shortcut_id == "voice":
             win.toggle_live_voice()
+        elif shortcut_id == "dictate":
+            win.toggle_dictation()
         else:
             logger.debug(f"Atalho de portal desconhecido: {shortcut_id}")
 
     def do_shutdown(self):
-        # Encerra a thread de wake word junto com o processo (no close-request
-        # ela continua ativa de propósito — o modo HUD depende dela).
+        # Encerra a thread de wake word e servidores MCP junto com o processo
         for win in self.get_windows():
             if isinstance(win, CopilotWindow):
                 win._cancel_pending_end_session()
                 if win.wake_word_engine is not None:
                     win.wake_word_engine.stop()
+                if hasattr(win, "mcp_manager") and win.mcp_manager is not None:
+                    try:
+                        win.mcp_manager.stop_all()
+                    except Exception as exc:
+                        logger.debug("Erro ao parar servidores MCP no shutdown: %s", exc)
                 try:
                     hyprland_effects.remove_window_blur(__app_id__)
                 except Exception:
@@ -1650,6 +2108,7 @@ class ZorinCopilotApp(Adw.Application):
         is_toggle = options.contains("toggle")
         is_crop = options.contains("crop")
         is_voice = options.contains("voice")
+        is_dictate = options.contains("dictate")
         args = command_line.get_arguments()
         if "--background" in args:
             is_background = True
@@ -1659,6 +2118,8 @@ class ZorinCopilotApp(Adw.Application):
             is_crop = True
         if "--voice" in args or "-v" in args:
             is_voice = True
+        if "--dictate" in args or "-d" in args:
+            is_dictate = True
 
         win = self._get_or_create_window()
         if is_background:
@@ -1667,6 +2128,8 @@ class ZorinCopilotApp(Adw.Application):
             self.hold()
             self._setup_background_tray(win)
             return 0
+        elif is_dictate:
+            win.toggle_dictation()
         elif is_voice:
             if _overlay_is_pill(win.config) and not win.get_visible():
                 win.toggle_live_voice(as_pill=True)

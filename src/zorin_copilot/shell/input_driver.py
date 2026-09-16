@@ -294,12 +294,30 @@ class VirtualInputDriver:
 
         try:
             if self.wtype_bin:
-                cmd = [self.wtype_bin, "--", text]
-                res = subprocess.run(cmd, capture_output=True, text=True, timeout=5.0, check=False)
-                if res.returncode != 0:
-                    msg = _backend_error("wtype", "digitar", res.returncode, res.stderr or res.stdout or "")
-                    logger.error(msg)
-                    return False, msg
+                if "\n" in text:
+                    lines = text.split("\n")
+                    for idx, line_chunk in enumerate(lines):
+                        if line_chunk:
+                            res = subprocess.run(
+                                [self.wtype_bin, "--", line_chunk],
+                                capture_output=True, text=True, timeout=5.0, check=False,
+                            )
+                            if res.returncode != 0:
+                                msg = _backend_error("wtype", "digitar", res.returncode, res.stderr or res.stdout or "")
+                                logger.error(msg)
+                                return False, msg
+                        if idx < len(lines) - 1:
+                            subprocess.run(
+                                [self.wtype_bin, "-k", "Return"],
+                                capture_output=True, text=True, timeout=1.0, check=False,
+                            )
+                else:
+                    cmd = [self.wtype_bin, "--", text]
+                    res = subprocess.run(cmd, capture_output=True, text=True, timeout=5.0, check=False)
+                    if res.returncode != 0:
+                        msg = _backend_error("wtype", "digitar", res.returncode, res.stderr or res.stdout or "")
+                        logger.error(msg)
+                        return False, msg
 
                 if press_enter:
                     time.sleep(0.05)

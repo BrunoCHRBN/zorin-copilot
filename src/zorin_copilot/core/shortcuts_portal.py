@@ -40,6 +40,7 @@ class PortalShortcutManager:
         ("toggle-hud", "Abrir ou fechar o Zorin Copilot", "<Super>c"),
         ("crop", "Recorte inteligente de tela", "<Super><Shift>s"),
         ("voice", "Conversa por voz ao vivo", "<Super><Shift>v"),
+        ("dictate", "Ditado por voz no aplicativo em foco", "<Super><Shift>d"),
     ]
 
     def __init__(self, on_activated: Callable[[str], None]):

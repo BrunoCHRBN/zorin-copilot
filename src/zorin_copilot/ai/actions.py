@@ -31,6 +31,7 @@ class ActionType(str, Enum):
     OPEN_DOCUMENT = "open_document"
     READ_PAGE = "read_page"
     DEEP_RESEARCH = "deep_research"
+    MCP_TOOL = "mcp_tool"
 
 
 @dataclass
@@ -107,6 +108,8 @@ class DesktopAction:
             return f"Ler conteúdo da página web '{url_val}'"
         if self.action_type == ActionType.DEEP_RESEARCH:
             return f"Pesquisa aprofundada sobre '{self.target}'"
+        if self.action_type == ActionType.MCP_TOOL:
+            return f"Executar ferramenta MCP '{self.target}'"
         return f"Ação {self.action_type.value} em {self.target}"
 
 

@@ -391,13 +391,24 @@ class LocalVoiceTranscriber:
             logger.error(f"Erro ao carregar modelo faster-whisper: {exc}")
             return False
 
-    def transcribe_pcm(self, pcm_bytes: bytes, sample_rate: int = 16000) -> str:
+    def transcribe_pcm(
+        self,
+        pcm_bytes: bytes,
+        sample_rate: int = 16000,
+        initial_prompt: Optional[str] = None,
+    ) -> str:
         """Transcreve bytes PCM brutos (16-bit mono 16kHz) em texto em português com salvaguardas anti-alucinação."""
         if not pcm_bytes or len(pcm_bytes) < 3200:
             return ""
 
         if not self.load():
             return ""
+
+        default_prompt = (
+            "Zorin Copilot, assistente do Zorin OS. Linux, Python, Bash, terminal, GNOME, Wayland, "
+            "systemctl, git, apt, Docker, kernel, sudo, GitHub, Neovim, VS Code, Flatpak, PipeWire."
+        )
+        prompt = initial_prompt or default_prompt
 
         try:
             # Converte bytes int16 para array numpy float32 normalizado (-1.0 a 1.0)
@@ -418,7 +429,7 @@ class LocalVoiceTranscriber:
                 no_speech_threshold=0.45,
                 log_prob_threshold=-1.0,
                 compression_ratio_threshold=2.4,
-                initial_prompt="Zorin Copilot. Assistente de inteligência artificial do sistema operacional Zorin OS.",
+                initial_prompt=prompt,
                 vad_filter=True,
                 vad_parameters=dict(min_silence_duration_ms=300),
             )

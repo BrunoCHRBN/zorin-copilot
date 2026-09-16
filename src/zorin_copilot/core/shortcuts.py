@@ -64,12 +64,14 @@ APP_SHORTCUTS: Final[tuple[AppShortcut, ...]] = (
 COPILOT_BINDING_PATH: Final = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/zorin-copilot/"
 CROP_BINDING_PATH: Final = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/zorin-copilot-crop/"
 VOICE_BINDING_PATH: Final = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/zorin-copilot-voice/"
+DICTATE_BINDING_PATH: Final = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/zorin-copilot-dictate/"
 
 #: Flags que cada slot executa.
 _SLOT_FLAGS: Final[dict[str, str]] = {
     "hud": "--toggle",
     "crop": "--crop",
     "voice": "--voice",
+    "dictate": "--dictate",
 }
 
 
@@ -190,6 +192,27 @@ class ShortcutManager:
     @classmethod
     def unregister_voice(cls) -> bool:
         return cls._unregister("voice")
+
+    # -------------------------------------------------------------------------
+    # Atalho de ditado contínuo no app em foco (Super+Shift+D)
+    # -------------------------------------------------------------------------
+    @classmethod
+    def is_dictate_registered(cls) -> bool:
+        return cls._is_registered("dictate")
+
+    @classmethod
+    def get_dictate_binding(cls) -> str:
+        from .config import CopilotConfig
+
+        return CopilotConfig.load().dictate_shortcut_key
+
+    @classmethod
+    def register_dictate(cls, binding: str = "<Super><Shift>d") -> bool:
+        return cls._register("dictate", binding)
+
+    @classmethod
+    def unregister_dictate(cls) -> bool:
+        return cls._unregister("dictate")
 
 
 class AutostartManager:

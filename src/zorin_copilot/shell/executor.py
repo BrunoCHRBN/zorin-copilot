@@ -33,6 +33,7 @@ class ExecutionReport:
     action: DesktopAction
     success: bool
     message: str
+    output: str = ""
 
 
 @dataclass(frozen=True)
@@ -142,10 +143,12 @@ class ActionExecutor:
         inspector: DesktopInspector | None = None,
         undo_stack: UndoStack | None = None,
         input_driver: VirtualInputDriver | None = None,
+        mcp_manager: Any | None = None,
     ):
         self.inspector = inspector or DesktopInspector()
         self.undo_stack = undo_stack or UndoStack()
         self.input_driver = input_driver or VirtualInputDriver()
+        self.mcp_manager = mcp_manager
 
     def execute_plan(
         self, plan: ActionPlan, dry_run: bool = False
@@ -223,11 +226,48 @@ class ActionExecutor:
         if action.action_type == ActionType.DEEP_RESEARCH:
             return self._deep_research(action)
 
+        if action.action_type == ActionType.MCP_TOOL:
+            return self._execute_mcp_tool(action)
+
         return ExecutionReport(
             action=action,
             success=False,
             message=f"Tipo de ação não implementado: {action.action_type}",
         )
+
+    def _execute_mcp_tool(self, action: DesktopAction) -> ExecutionReport:
+        """Executa uma ferramenta de um servidor MCP conectado."""
+        if not self.mcp_manager:
+            return ExecutionReport(
+                action=action,
+                success=False,
+                message="Gerenciador de servidores MCP não está ativo no executor.",
+            )
+
+        tool_name = action.target
+        params = action.params or {}
+        try:
+            res = self.mcp_manager.call_tool(tool_name, params)
+            text_out = res.text
+            if res.is_error:
+                return ExecutionReport(
+                    action=action,
+                    success=False,
+                    message=f"Erro ao executar ferramenta MCP '{tool_name}': {text_out}",
+                    output=text_out,
+                )
+            return ExecutionReport(
+                action=action,
+                success=True,
+                message=f"Ferramenta MCP '{tool_name}' executada com sucesso.",
+                output=text_out,
+            )
+        except Exception as exc:
+            return ExecutionReport(
+                action=action,
+                success=False,
+                message=f"Falha ao chamar ferramenta MCP '{tool_name}': {exc}",
+            )
 
     def _read_web_page(self, action: DesktopAction) -> ExecutionReport:
         from ..core.browser import BrowserManager

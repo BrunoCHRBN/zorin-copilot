@@ -19,6 +19,7 @@ from ..core.a11y import DesktopInspector
 from ..core.apps import AppManager
 from ..core.clipboard import ClipboardService
 from ..core.config import CopilotConfig
+from ..core.desktop_context import DesktopContext, DesktopContextDetector
 from ..core.files import FileManager
 from ..core.media import MediaPlayerManager
 from ..core.memory import MemoryManager
@@ -97,6 +98,7 @@ class IntentEngine:
         rag: LocalDocumentRAG | None = None,
     ):
         self.inspector = inspector or DesktopInspector()
+        self.context_detector = DesktopContextDetector(self.inspector)
         self.config = config or CopilotConfig.load()
         self.memory = memory or MemoryManager()
         self.search_client = search_client or WebSearchClient()
@@ -113,14 +115,36 @@ class IntentEngine:
         self.llm_provider = get_llm_provider(self.config)
         self.llm_provider.usage_tracker = self.usage_tracker
 
-    def _get_situational_context(self) -> str:
-        """Coleta contexto situacional silencioso do desktop (janela ativa, horário, mídia tocando)."""
+    def _get_situational_context(self, desktop_context: DesktopContext | None = None) -> str:
+        """Coleta contexto situacional silencioso do desktop (janela ativa, git, clipboard, horário, mídia)."""
         details = []
         try:
-            active_app, active_win, _ = self.inspector.get_active_window_info()
-            if active_app:
-                title_info = f" ('{active_win[:60]}')" if active_win else ""
-                details.append(f"Janela em foco: {active_app}{title_info}")
+            if getattr(self.config, "context_awareness_enabled", True):
+                ctx = desktop_context if desktop_context is not None else self.context_detector.detect_context()
+                if ctx.has_active_window:
+                    app_info = f"Janela em foco: {ctx.app_name}"
+                    if ctx.extracted_target:
+                        app_info += f" (Arquivo/Alvo: '{ctx.extracted_target}')"
+                    elif ctx.window_title:
+                        app_info += f" ('{ctx.window_title[:60]}')"
+                    if ctx.category.value != "general":
+                        app_info += f" [Categoria: {ctx.category.value}]"
+                    details.append(app_info)
+
+                if ctx.git_repo:
+                    diff_info = "com alterações não salvas" if ctx.git_has_diff else "árvore limpa"
+                    details.append(f"Repositório Git: {ctx.git_repo} (branch: '{ctx.git_branch}', {diff_info})")
+
+                if ctx.clipboard_category.value == "error_traceback":
+                    snip = ctx.clipboard_text[:350].replace("\n", " ")
+                    details.append(f"Área de transferência contém Traceback/Erro: {snip}")
+                elif ctx.clipboard_category.value == "url":
+                    details.append(f"Área de transferência contém Link: {ctx.clipboard_text.strip()[:80]}")
+            else:
+                active_app, active_win, _ = self.inspector.get_active_window_info()
+                if active_app:
+                    title_info = f" ('{active_win[:60]}')" if active_win else ""
+                    details.append(f"Janela em foco: {active_app}{title_info}")
         except Exception as exc:
             logger.debug(f"Erro ao obter janela em foco para contexto: {exc}")
 
@@ -375,6 +399,7 @@ class IntentEngine:
         history: list[dict[str, str]] | None = None,
         image_bytes: bytes | None = None,
         is_area_capture: bool = False,
+        desktop_context: DesktopContext | None = None,
     ) -> ActionPlan:
         prompt_clean = prompt.strip()
         low = prompt_clean.lower()
@@ -407,7 +432,7 @@ class IntentEngine:
                 try:
                     app_names = [a.get_name() for a in AppManager.get_all_apps() if a.get_name()]
                     context_parts = [self.memory.get_context_summary()]
-                    situational = self._get_situational_context()
+                    situational = self._get_situational_context(desktop_context=desktop_context)
                     if situational:
                         context_parts.append(situational)
                     context_summary = "\n\n".join(p for p in context_parts if p)
@@ -1272,7 +1297,7 @@ class IntentEngine:
                 # Obtém nomes de alguns apps instalados para dar contexto ao LLM
                 app_names = [a.get_name() for a in AppManager.get_all_apps() if a.get_name()]
                 context_parts = [self.memory.get_context_summary()]
-                situational = self._get_situational_context()
+                situational = self._get_situational_context(desktop_context=desktop_context)
                 if situational:
                     context_parts.append(situational)
 

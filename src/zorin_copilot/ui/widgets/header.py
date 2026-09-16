@@ -142,14 +142,23 @@ class HeaderBarWidget:
 
         for m in self.ctx.fence.monitors:
             suffix = " (Principal)" if m.is_primary else " (Secundária)"
-            row_btn = Gtk.Button(label=f"\U0001f5a5️ {m.name}{suffix}")
+            row_btn = Gtk.Button()
             row_btn.add_css_class("flat")
+            row_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            row_icon = Gtk.Image.new_from_icon_name("video-display-symbolic")
+            row_box.append(row_icon)
+            row_box.append(Gtk.Label(label=f"{m.name}{suffix}"))
+            row_btn.set_child(row_box)
             idx = m.index
             row_btn.connect("clicked", lambda _, i=idx, pop=popover: self.on_select_fence_monitor(i, pop))
             vbox.append(row_btn)
 
-        all_btn = Gtk.Button(label="\U0001f310 Todas as Telas (Livre)")
+        all_btn = Gtk.Button()
         all_btn.add_css_class("flat")
+        all_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        all_box.append(Gtk.Image.new_from_icon_name("network-wired-symbolic"))
+        all_box.append(Gtk.Label(label="Todas as Telas (Livre)"))
+        all_btn.set_child(all_box)
         all_btn.connect("clicked", lambda _, pop=popover: self.on_select_all_monitors(pop))
         vbox.append(all_btn)
 
@@ -158,9 +167,13 @@ class HeaderBarWidget:
         sep.set_margin_bottom(4)
         vbox.append(sep)
 
-        kill_btn = Gtk.Button(label="\U0001f6d1 Parada de Emergência (Kill Switch)")
+        kill_btn = Gtk.Button()
         kill_btn.add_css_class("destructive-action")
         kill_btn.add_css_class("pill")
+        kill_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        kill_box.append(Gtk.Image.new_from_icon_name("process-stop-symbolic"))
+        kill_box.append(Gtk.Label(label="Parada de Emergência (Kill Switch)"))
+        kill_btn.set_child(kill_box)
         kill_btn.connect("clicked", lambda _, pop=popover: self.on_toggle_kill_switch(pop))
         vbox.append(kill_btn)
 
@@ -190,7 +203,7 @@ class HeaderBarWidget:
             }.get(config.provider, "IA Ativa")
             self.status_badge.set_text(f"● {prov_name}{token_txt}")
         else:
-            self.status_badge.set_text(f"○ IA não configurada (⚙️){token_txt}")
+            self.status_badge.set_text(f"○ IA não configurada{token_txt}")
 
     def refresh_token_usage(self) -> None:
         """Atualiza apenas o contador de tokens do badge (chamado após cada resposta)."""
@@ -199,7 +212,7 @@ class HeaderBarWidget:
     def refresh_fence_label(self) -> None:
         """Resincroniza o rótulo do monitor com o estado da cerca espacial."""
         if self.ctx.fence.is_emergency_stopped:
-            self.fence_lbl.set_text("\U0001f6d1 BLOQUEADO")
+            self.fence_lbl.set_text("BLOQUEADO")
             return
         mon = self.ctx.fence.get_active_monitor()
         self.fence_lbl.set_text(mon.name if mon else NO_MONITOR_LABEL)
@@ -219,14 +232,14 @@ class HeaderBarWidget:
             name = mon.name if mon else f"Monitor {monitor_idx}"
             self.fence_lbl.set_text(name)
             self._sync_live_client_fence()
-            self.ctx.show_toast(f"\U0001f5a5️ Cerca espacial fixada em: {name}")
+            self.ctx.show_toast(f"Cerca espacial fixada em: {name}")
 
     def on_select_all_monitors(self, popover: Gtk.Popover) -> None:
         popover.popdown()
         self.ctx.fence.set_all_monitors()
         self.fence_lbl.set_text("Todas as Telas")
         self._sync_live_client_fence()
-        self.ctx.show_toast("\U0001f310 Cerca espacial expandida para todas as telas.")
+        self.ctx.show_toast("Cerca espacial expandida para todas as telas.")
 
     def on_toggle_kill_switch(self, popover: Gtk.Popover | None = None) -> None:
         # `popover` é opcional: a bandeja dispara isso sem popover algum.
@@ -237,8 +250,8 @@ class HeaderBarWidget:
             fence.reset_emergency_stop()
             mon = fence.get_active_monitor()
             self.fence_lbl.set_text(mon.name if mon else NO_MONITOR_LABEL)
-            self.ctx.show_toast("✓ Parada de emergência desativada.")
+            self.ctx.show_toast("Parada de emergência desativada.")
         else:
             fence.trigger_emergency_stop()
-            self.fence_lbl.set_text("\U0001f6d1 BLOQUEADO")
-            self.ctx.show_toast("\U0001f6d1 KILL SWITCH ATIVADO: Automações suspensas.")
+            self.fence_lbl.set_text("BLOQUEADO")
+            self.ctx.show_toast("Kill Switch ativado: automações suspensas.")

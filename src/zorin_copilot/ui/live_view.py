@@ -284,7 +284,7 @@ class LiveVoiceWidget(Gtk.Box):
         mode_btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         self.mode_icon = Gtk.Image.new_from_icon_name("window-restore-symbolic")
         self.mode_icon.set_pixel_size(14)
-        self.mode_lbl = Gtk.Label(label="🪟 Janela")
+        self.mode_lbl = Gtk.Label(label="Janela")
         self.mode_lbl.add_css_class("caption")
         mode_btn_box.append(self.mode_icon)
         mode_btn_box.append(self.mode_lbl)
@@ -427,7 +427,7 @@ class LiveVoiceWidget(Gtk.Box):
         status_color = "#2ec27e" if success else "#e5a50a"
         self._append_log_row(
             self._tool_icon(name),
-            f"<span foreground='{status_color}'><b>⚡ {name}:</b> {message}</span>"
+            f"<span foreground='{status_color}'><b>{name}:</b> {message}</span>"
             f"  <span alpha='60%'>{self._timestamp()}</span>",
         )
         return GLib.SOURCE_REMOVE
@@ -482,7 +482,7 @@ class LiveVoiceWidget(Gtk.Box):
         return GLib.SOURCE_REMOVE
 
     def _ui_on_error(self, err: str) -> bool:
-        self.subtitle_lbl.set_text(f"⚠️ {err}")
+        self.subtitle_lbl.set_text(err)
         self._append_log_row("dialog-warning-symbolic", f"<b>Erro:</b> {err}")
         return GLib.SOURCE_REMOVE
 
@@ -809,7 +809,7 @@ class LiveVoiceWidget(Gtk.Box):
             )
             self.video_badge.set_visible(True)
             self.subtitle_lbl.set_text(
-                f"\U0001f3a5 Compartilhamento de tela ativo no {mon_name} ({mode_label} • 1 FPS). "
+                f"Compartilhamento de tela ativo no {mon_name} ({mode_label} • 1 FPS). "
                 "O assistente pode ver suas janelas."
             )
         else:
@@ -834,12 +834,12 @@ class LiveVoiceWidget(Gtk.Box):
         if hasattr(self, "mode_icon") and hasattr(self, "mode_lbl"):
             if mode == "active_window":
                 self.mode_icon.set_from_icon_name("window-restore-symbolic")
-                self.mode_lbl.set_text("🪟 Janela")
+                self.mode_lbl.set_text("Janela")
                 if hasattr(self, "mode_btn"):
                     self.mode_btn.set_tooltip_text("Modo Janela Ativa ativo. Clique para alternar para Tela Inteira.")
             else:
                 self.mode_icon.set_from_icon_name("video-display-symbolic")
-                self.mode_lbl.set_text("🖥️ Tela")
+                self.mode_lbl.set_text("Tela")
                 if hasattr(self, "mode_btn"):
                     self.mode_btn.set_tooltip_text("Modo Tela Inteira ativo. Clique para alternar para Janela Ativa.")
 
@@ -849,14 +849,14 @@ class LiveVoiceWidget(Gtk.Box):
                 if hasattr(self.live_client, "panic_stop_video"):
                     self.live_client.panic_stop_video()
                 self._update_video_ui(False)
-                self.subtitle_lbl.set_text("🛑 Transmissão de vídeo interrompida (Modo Pânico - Esc).")
+                self.subtitle_lbl.set_text("Transmissão de vídeo interrompida (Esc).")
                 return True
         return False
 
     def _on_send_screen(self, _btn: Gtk.Button) -> None:
         ok = self.live_client.send_screen_frame()
         if ok:
-            self.subtitle_lbl.set_text("\U0001f4f8 Imagem da tela enviada para a conversa ao vivo!")
+            self.subtitle_lbl.set_text("Imagem da tela enviada para a conversa ao vivo!")
 
     def _on_end_call(self) -> None:
         self._stop_timer()

@@ -14,6 +14,12 @@ from datetime import date, timedelta
 
 import pytest
 
+try:
+    import docx
+    HAS_DOCX = True
+except ImportError:
+    HAS_DOCX = False
+
 from zorin_copilot import cli
 from zorin_copilot.core.study_cards import (
     GRADE_SCALE,
@@ -483,6 +489,7 @@ def test_cli_study_review_nota_invalida_encera_sem_quebrar(monkeypatch, capsys, 
     assert DeckStore(directory=str(tmp_path)).load(deck.id).cards[0].repetitions == 0
 
 
+@pytest.mark.skipif(not HAS_DOCX, reason="python-docx não instalado")
 def test_cli_study_abnt_gera_docx(tmp_path, capsys):
     source = tmp_path / "trabalho.md"
     source.write_text("# Trabalho\n\nIntrodução do trabalho acadêmico.\n", encoding="utf-8")

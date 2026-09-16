@@ -27,15 +27,20 @@ class ChatTurn:
     # e a um restart do app — antes só o último turno os exibia.
     # `compare=False` mantém a igualdade por conteúdo de texto, usada nos testes.
     plan: ActionPlan | None = field(default=None, compare=False)
+    # Resultado da execução do modo agente quando aplicável.
+    agent_result: dict | None = field(default=None, compare=False)
 
     def to_dict(self) -> dict:
-        return {
+        data = {
             "prompt": self.prompt,
             "answer": self.answer,
             "timestamp": self.timestamp,
             "id": self.id,
             "plan": self.plan.to_dict() if self.plan and not self.plan.is_empty else None,
         }
+        if self.agent_result:
+            data["agent_result"] = self.agent_result
+        return data
 
     @classmethod
     def from_dict(cls, data: dict) -> ChatTurn:
@@ -55,6 +60,7 @@ class ChatTurn:
             # leitura — aceitável, porque o registro de execução é em memória.
             id=data.get("id") or uuid.uuid4().hex,
             plan=plan,
+            agent_result=data.get("agent_result"),
         )
 
 
@@ -149,14 +155,20 @@ class TopicSession:
             return cleaned
         return cleaned[:47].rstrip() + "..."
 
-    def record_turn(self, prompt: str, answer: str, plan: ActionPlan | None = None) -> ChatTurn:
+    def record_turn(
+        self,
+        prompt: str,
+        answer: str,
+        plan: ActionPlan | None = None,
+        agent_result: dict | None = None,
+    ) -> ChatTurn:
         """Registra uma interação usuário/assistente na demanda ativa.
 
         Retorna o turno criado para que a interface possa renderizá-lo imediatamente.
         """
         clean_p = prompt.strip()
         clean_a = answer.strip()
-        turn = ChatTurn(prompt=clean_p, answer=clean_a, plan=plan)
+        turn = ChatTurn(prompt=clean_p, answer=clean_a, plan=plan, agent_result=agent_result)
 
         if not self.title and clean_p:
             self.title = self._derive_title(clean_p)

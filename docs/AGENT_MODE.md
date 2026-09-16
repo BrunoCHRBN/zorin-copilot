@@ -5,7 +5,7 @@ de receber um objetivo em linguagem natural ("abre o Firefox, pesquisa X e salva
 `~/Documentos`") e executá-lo como uma sequência de ações reais no desktop, com
 **confirmação, cerca digital e desfazer**.
 
-> **Status:** Fase 1 (núcleo) — implementada. Fases 2–4 planejadas abaixo.
+> **Status:** Fase 1 (núcleo CLI) e Fase 2 (UI GTK4 / Stepper / Aprovação) — implementadas. Fases 3–4 planejadas abaixo.
 
 ---
 
@@ -159,6 +159,18 @@ zorin-copilot-cli agent "clicar em Iniciar" --local-only --dry-run
 Flags: `--dry-run`, `--max-steps N`, `--max-seconds N`, `--local-only`, `--cloud`,
 `--json` (saída legível por máquina), `--verbose`.
 
+### 3.5 Interface Gráfica (GTK4 / Libadwaita)
+
+O Modo Agente está integrado de forma nativa e bidirecional na janela do Copilot:
+
+1. **Toggle no PromptBar**: Botão circular (`system-run-symbolic`) com atalho via paleta (`Ctrl+K` -> *Alternar Modo Agente*) ou prefixo de comando (`/agente <tarefa>`).
+2. **Stepper Visual (`AgentExecutionWidget`)**: Card dinâmico com atualização em tempo real via callbacks GLib em thread daemon dedicada.
+3. **Inspeção de Etapas (`Revealer`)**: Cada etapa possui botão expansor com ícone chevron para visualização de `observation` estruturada (JSON/texto), raciocínio (`rationale`) e mensagens de erro (que abrem reveladas por padrão).
+4. **Confirmação Inline com "Aprovar Todas"**: Ações classificadas como sensíveis (`CONFIRM`) acionam banner de aprovação inline. O botão "Aprovar Todas" permite ao usuário conceder autorização contínua para ações subsequentes na mesma execução sem fadiga de confirmação.
+5. **Botão Inline de Desfazer (`Ctrl+Z`)**: Se a execução realizou mutações reversíveis no sistema de arquivos (`write_document`, `organize_directory`), um botão no rodapé do card permite reverter as alterações imediatamente.
+6. **Ingestão de Anexos e Capturas**: Anexos de documentos (PDF, TXT, MD, código) e imagens/screenshots são integrados ao contexto do objetivo através de `compose_prompt`.
+7. **Auditoria em Exportação Markdown**: As conversas exportadas (`export.py`) incluem uma tabela completa de auditoria com status, ferramentas, parâmetros, tempos e seção expansível `<details>` com as observações.
+
 ## 4. Segurança
 
 | Camada | Mecanismo | Onde |
@@ -195,7 +207,7 @@ exigido pelos testes de UI existentes).
 
 | Fase | Entrega |
 |---|---|
-| **2** | UI do modo agente (painel de plano, aprovação por passo, barra de parada) + reaproveitar o registry no `live.py` |
+| **2** | UI do modo agente (painel de plano, aprovação por passo, barra de parada, stepper dinâmico na GUI) ✅ |
 | **3** | Grounding visual: MiniCPM-V (Ollama) para localizar elementos quando a árvore AT-SPI é insuficiente (canvas remoto, SCORM do AVA) |
 | **4** | Refatorar `ai/live.py` para consumir o mesmo `ToolRegistry`, eliminando a duplicação de 28 ferramentas |
 
