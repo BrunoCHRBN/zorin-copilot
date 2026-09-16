@@ -21,7 +21,9 @@ from zorin_copilot.ai.agent import (
     STOP_TIMEOUT,
     AgentDecision,
     AgentLoop,
+    AgentResult,
     ScriptedPlanner,
+    Step,
     ToolCall,
 )
 from zorin_copilot.ai.agent_tools import ToolRegistry
@@ -359,3 +361,50 @@ def test_historico_entregue_ao_planejador_cresce():
     loop_for(planner, StubRegistry()).run("x")
     assert len(planner.calls[0]) == 0
     assert len(planner.calls[1]) == 1
+
+
+def test_continuidade_com_initial_steps():
+    # Simula continuar uma execução que parou com 2 passos
+    step0 = Step(index=0, tool="get_ui_tree", ok=True)
+    step1 = Step(index=1, tool="get_ui_tree", ok=True)
+    planner = ScriptedPlanner([ToolCall("get_ui_tree"), ToolCall("done", {"answer": "concluído"})])
+    
+    result = loop_for(planner, StubRegistry(), max_steps=4).run("x", initial_steps=[step0, step1])
+    assert result.success is True
+    assert result.stop_reason == STOP_DONE
+    assert len(result.steps) == 3
+    assert result.steps[2].index == 2
+
+
+def test_from_dict_reconstroi_resultado():
+    planner = ScriptedPlanner([ToolCall("get_ui_tree"), ToolCall("done", {"answer": "feito"})])
+    result = loop_for(planner, StubRegistry()).run("x")
+    d = result.to_dict()
+
+    rebuilt = AgentResult.from_dict(d)
+    assert rebuilt.objective == result.objective
+    assert rebuilt.stop_reason == result.stop_reason
+    assert len(rebuilt.steps) == len(result.steps)
+    assert rebuilt.steps[0].tool == "get_ui_tree"
+
+
+def test_get_step_budget_adaptativo():
+    from zorin_copilot.ai.agent_router import get_step_budget
+
+    # Tarefa simples
+    steps_simple, secs_simple = get_step_budget("abrir o terminal", base_max_steps=15, adaptive=True)
+    assert steps_simple <= 10
+    assert secs_simple <= 120.0
+
+    # Tarefa complexa (análise / síntese / commits)
+    steps_complex, secs_complex = get_step_budget(
+        "analisar os commits recentes e o que pode ser melhorado", base_max_steps=15, adaptive=True
+    )
+    assert steps_complex >= 30
+    assert secs_complex >= 480.0
+
+    # Sem adaptativo respeita o base
+    steps_fixed, secs_fixed = get_step_budget("qualquer coisa", base_max_steps=20, base_max_seconds=250.0, adaptive=False)
+    assert steps_fixed == 20
+    assert secs_fixed == 250.0
+

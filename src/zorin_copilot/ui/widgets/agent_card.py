@@ -50,6 +50,8 @@ TOOL_LABELS: dict[str, str] = {
     "capture_screen": "Capturar tela",
     "read_file": "Ler arquivo",
     "list_directory": "Listar arquivos",
+    "git_log": "Histórico Git (Commits)",
+    "git_status": "Status do Git",
     "get_ui_tree": "Inspecionar acessibilidade (AT-SPI)",
     "screen_fence_control": "Controle de cerca de tela",
     "undo_last": "Desfazer última ação",
@@ -76,6 +78,8 @@ TOOL_ICONS: dict[str, str] = {
     "capture_screen": "camera-photo-symbolic",
     "read_file": "document-open-symbolic",
     "list_directory": "system-file-manager-symbolic",
+    "git_log": "vcs-branch-symbolic",
+    "git_status": "dialog-information-symbolic",
     "get_ui_tree": "preferences-desktop-accessibility-symbolic",
     "screen_fence_control": "security-high-symbolic",
     "undo_last": "edit-undo-symbolic",
@@ -114,6 +118,12 @@ def _format_args_summary(tool: str, args: dict[str, Any]) -> str:
         return str(args.get("url") or "")
     if tool in ("read_file", "list_directory"):
         return str(args.get("path") or args.get("directory") or "")
+    if tool == "git_log":
+        path = args.get("path") or ""
+        count = args.get("max_count", 10)
+        return f"{path} ({count} commits)" if path else f"({count} commits)"
+    if tool == "git_status":
+        return str(args.get("path") or "")
 
     # Fallback genérico: primeiro argumento não nulo
     for k, v in args.items():
@@ -321,9 +331,25 @@ class AgentExecutionWidget(Gtk.Box):
         self.summary_lbl.add_css_class("dim-label")
         self.conclusion_box.append(self.summary_lbl)
 
-        # Ações pós-execução (ex: Desfazer alterações no sistema de arquivos)
+        # Ações pós-execução (ex: Continuar mais passos, Desfazer alterações)
         self.conclusion_actions_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         self.conclusion_actions_box.set_margin_top(4)
+
+        self.continue_btn = Gtk.Button()
+        self.continue_btn.add_css_class("pill")
+        self.continue_btn.add_css_class("suggested-action")
+        cont_content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        cont_ic = Gtk.Image.new_from_icon_name("media-playback-start-symbolic")
+        cont_ic.set_pixel_size(14)
+        cont_content.append(cont_ic)
+        self.continue_btn_lbl = Gtk.Label(label="Continuar (+10 passos)")
+        self.continue_btn_lbl.add_css_class("caption")
+        cont_content.append(self.continue_btn_lbl)
+        self.continue_btn.set_child(cont_content)
+        self.continue_btn.set_tooltip_text("Concede mais 10 passos ao agente mantendo o contexto atual")
+        self.continue_btn.connect("clicked", self._on_continue_clicked)
+        self.continue_btn.set_visible(False)
+        self.conclusion_actions_box.append(self.continue_btn)
 
         self.undo_btn = Gtk.Button()
         self.undo_btn.add_css_class("pill")
@@ -347,6 +373,20 @@ class AgentExecutionWidget(Gtk.Box):
     # ------------------------------------------------------------------
     # Handlers de Aprovação e Ações
     # ------------------------------------------------------------------
+
+    def _on_continue_clicked(self, _btn: Gtk.Button) -> None:
+        if not self._last_result or not hasattr(self.ctx, "continue_agent_execution"):
+            return
+        self.continue_btn.set_sensitive(False)
+        self.continue_btn.set_visible(False)
+        self.spinner.set_visible(True)
+        self.spinner.start()
+        self.abort_btn.set_visible(True)
+        self.status_lbl.set_text("● Continuando execução (+10 passos)…")
+        self.status_lbl.remove_css_class("error")
+        self.status_lbl.remove_css_class("success")
+        self.status_lbl.add_css_class("dim-label")
+        self.ctx.continue_agent_execution(self._last_result, self, additional_steps=10)
 
     def _on_approve_clicked(self, _btn: Gtk.Button) -> None:
         self.approval_box.set_visible(False)
@@ -418,6 +458,8 @@ class AgentExecutionWidget(Gtk.Box):
         # Número da etapa
         idx_lbl = Gtk.Label(label=f"<b>{step.index + 1}.</b>", use_markup=True, xalign=0)
         idx_lbl.add_css_class("caption")
+        idx_lbl.add_css_class("tabular-nums")
+        idx_lbl.add_css_class("step-index-label")
         row.append(idx_lbl)
 
         # Ícone e nome amigável da ferramenta
@@ -599,6 +641,32 @@ class AgentExecutionWidget(Gtk.Box):
         # Botão de Desfazer se houver alterações de arquivos
         self._update_undo_button_visibility(result.steps)
 
+        self._last_result = result
+        if result.stop_reason == STOP_MAX_STEPS and hasattr(self.ctx, "continue_agent_execution"):
+            self.continue_btn.set_visible(True)
+            self.continue_btn.set_sensitive(True)
+        else:
+            self.continue_btn.set_visible(False)
+
+        self.conclusion_box.set_visible(True)
+        if hasattr(self.ctx, "chat_stream") and hasattr(self.ctx.chat_stream, "scroll_to_bottom"):
+            self.ctx.chat_stream.scroll_to_bottom()
+
+    def finish_error(self, error_message: str) -> None:
+        """Finaliza o widget em caso de erro sem resultado."""
+        self.spinner.stop()
+        self.spinner.set_visible(False)
+        self.abort_btn.set_visible(False)
+        self.approval_box.set_visible(False)
+
+        msg = error_message or "Falha na execução do agente."
+        self.status_lbl.set_text(f"● Parada: {msg}")
+        self.status_lbl.remove_css_class("dim-label")
+        self.status_lbl.add_css_class("error")
+
+        self.answer_lbl.set_markup(format_markdown_to_markup(msg))
+        self.summary_lbl.set_text(f"● {msg}")
+
         self.conclusion_box.set_visible(True)
         if hasattr(self.ctx, "chat_stream") and hasattr(self.ctx.chat_stream, "scroll_to_bottom"):
             self.ctx.chat_stream.scroll_to_bottom()
@@ -664,6 +732,13 @@ class AgentExecutionWidget(Gtk.Box):
 
         # Botão de Desfazer se houver alterações de arquivos
         widget._update_undo_button_visibility(widget.steps)
+
+        widget._last_result = AgentResult.from_dict(data)
+        if data.get("stop_reason") == STOP_MAX_STEPS and hasattr(ctx, "continue_agent_execution"):
+            widget.continue_btn.set_visible(True)
+            widget.continue_btn.set_sensitive(True)
+        else:
+            widget.continue_btn.set_visible(False)
 
         widget.conclusion_box.set_visible(True)
         return widget

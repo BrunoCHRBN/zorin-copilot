@@ -108,7 +108,9 @@ class MCPClient:
         for k, v in self.env.items():
             full_env[k] = os.path.expandvars(str(v))
 
-        full_cmd = [self.command] + self.args
+        # Expande variáveis de ambiente e caminhos de usuário nos argumentos
+        expanded_args = [os.path.expanduser(os.path.expandvars(str(arg))) for arg in self.args]
+        full_cmd = [self.command] + expanded_args
 
         try:
             self._process = subprocess.Popen(

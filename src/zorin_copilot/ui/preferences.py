@@ -205,6 +205,28 @@ class PreferencesDialog(Adw.PreferencesDialog):
         page.add(features_group)
 
         # ---------------------------------------------------------------------
+        # Grupo: Modo Agente e Automação
+        # ---------------------------------------------------------------------
+        agent_group = Adw.PreferencesGroup(
+            title="Modo Agente e Automação",
+            description="Controle do orçamento de raciocínio e execução de tarefas autônomas no desktop.",
+        )
+        self.agent_adaptive_row = Adw.SwitchRow(
+            title="Orçamento Adaptativo de Passos",
+            subtitle="Amplia automaticamente o número de passos e tempo para tarefas complexas de análise e pesquisa.",
+        )
+        agent_group.add(self.agent_adaptive_row)
+
+        self.agent_steps_adj = Gtk.Adjustment(value=15, lower=5, upper=50, step_increment=1, page_increment=5)
+        self.agent_steps_row = Adw.SpinRow(
+            title="Limite Padrão de Passos",
+            subtitle="Número máximo de ações consecutivas por execução antes de pausar ou pedir confirmação.",
+            adjustment=self.agent_steps_adj,
+        )
+        agent_group.add(self.agent_steps_row)
+        page.add(agent_group)
+
+        # ---------------------------------------------------------------------
         # Grupo: Ações e Teste
         # ---------------------------------------------------------------------
         action_group = Adw.PreferencesGroup(title="Validação e Salvamento")
@@ -1003,6 +1025,10 @@ class PreferencesDialog(Adw.PreferencesDialog):
         # Pesquisa Web
         self.web_search_row.set_active(self.config.web_search_enabled)
 
+        # Modo Agente e Automação
+        self.agent_adaptive_row.set_active(getattr(self.config, "agent_adaptive_budget", True))
+        self.agent_steps_row.set_value(float(getattr(self.config, "agent_max_steps", 15)))
+
         # Atalho Global do Sistema (HUD)
         self.shortcut_switch_row.set_active(self.config.global_shortcut_enabled)
         matching_idx = 0
@@ -1143,6 +1169,11 @@ class PreferencesDialog(Adw.PreferencesDialog):
 
         # Pesquisa Web
         cfg.web_search_enabled = self.web_search_row.get_active()
+
+        # Modo Agente e Automação
+        cfg.agent_adaptive_budget = self.agent_adaptive_row.get_active()
+        cfg.agent_max_steps = int(self.agent_steps_row.get_value())
+        cfg.agent_max_seconds = float(getattr(self.config, "agent_max_seconds", 300.0))
 
         # Atalho Global do Sistema (HUD)
         cfg.global_shortcut_enabled = self.shortcut_switch_row.get_active()

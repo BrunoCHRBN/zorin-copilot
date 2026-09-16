@@ -313,3 +313,39 @@ def test_route_prioriza_gemini_sem_fallback():
     route = router.route("abrir o Firefox")
     assert route.mode == "cloud"
     assert route.planner is cloud
+
+
+def test_system_instruction_contem_regra_anti_alucinacao():
+    from zorin_copilot.ai.agent_router import _SYSTEM_INSTRUCTION
+
+    assert "NUNCA invente, presuma ou alucine" in _SYSTEM_INSTRUCTION
+    assert "timeout" in _SYSTEM_INSTRUCTION
+    assert "8." in _SYSTEM_INSTRUCTION
+
+
+def test_build_planner_prompt_expande_observacao_para_passos_recentes():
+    from zorin_copilot.ai.agent_router import build_planner_prompt
+
+    # Long observation (1000 chars)
+    long_obs = "x" * 1000
+    history = [
+        {"index": 0, "tool": "read_file", "args": {"path": "a.py"}, "ok": True, "observation": long_obs},
+        {"index": 1, "tool": "git_log", "args": {}, "ok": True, "observation": long_obs},
+    ]
+
+    prompt = build_planner_prompt("analisar commits", [], history)
+    # Both steps are recent (recency <= 4), so the observation should not be clipped to 300 chars
+    assert "x" * 900 in prompt
+
+    # Older step (e.g. 5 steps earlier) should be clipped to 600 chars
+    old_history = [
+        {"index": i, "tool": f"tool_{i}", "args": {}, "ok": True, "observation": f"step_{i}_" + ("y" * 1000)}
+        for i in range(6)
+    ]
+    prompt_old = build_planner_prompt("objetivo", [], old_history)
+    # Step 1 (0-based index 0) is 6 steps ago, recency = 6 > 4 -> clipped to 600
+    # Step 6 (index 5) is recency = 1 <= 4 -> up to 3500 chars
+    assert "step_5_" + ("y" * 900) in prompt_old
+    assert "step_0_" + ("y" * 700) not in prompt_old
+    assert "step_0_" in prompt_old
+

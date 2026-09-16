@@ -549,3 +549,75 @@ def test_capture_lesson_nao_pede_confirmacao():
     level, _motivo = registry.classify("capture_lesson", {})
     assert level == RiskLevel.SAFE
     assert registry.requires_approval("capture_lesson", {}) is False
+
+
+# --------------------------------------------------------------------------- #
+# Salvaguardas de Timeout e Ferramentas Git
+# --------------------------------------------------------------------------- #
+
+
+def test_tool_timeout_individual_retorna_payload_com_sugestao():
+    import time
+    from zorin_copilot.ai.agent_tools import ToolSpec
+
+    def slow_handler(args):
+        time.sleep(0.3)
+        return {"ok": True, "done": True}
+
+    registry = ToolRegistry(default_timeout=0.1)
+    registry.register(
+        ToolSpec(
+            name="slow_tool",
+            description="Ferramenta lenta de teste",
+            parameters={},
+            handler=slow_handler,
+            timeout=0.1,
+        )
+    )
+
+    res = registry.call("slow_tool", {})
+    assert res["ok"] is False
+    assert res["timeout"] is True
+    assert "excedeu o tempo limite" in res["error"]
+    assert "suggestion" in res
+    assert "Não invente nem presuma" in res["suggestion"]
+    registry.close()
+
+
+def test_git_log_executa_e_extrai_commits():
+    registry = ToolRegistry()
+    res = registry.call("git_log", {"max_count": 5})
+    assert res["ok"] is True
+    assert "commits" in res
+    assert isinstance(res["commits"], list)
+    assert len(res["commits"]) > 0
+    assert "summary" in res
+    registry.close()
+
+
+def test_git_log_caminho_invalido_retorna_sugestao():
+    registry = ToolRegistry()
+    res = registry.call("git_log", {"path": "/caminho/completamente/inexistente/xyz"})
+    assert res["ok"] is False
+    assert "não encontrado" in res["error"]
+    assert "suggestion" in res
+    registry.close()
+
+
+def test_git_status_executa_em_repositorio():
+    registry = ToolRegistry()
+    res = registry.call("git_status", {})
+    assert res["ok"] is True
+    assert "status" in res
+    assert "path" in res
+    registry.close()
+
+
+def test_git_tools_sao_classificadas_como_safe():
+    registry = ToolRegistry()
+    assert registry.classify("git_log", {})[0] == RiskLevel.SAFE
+    assert registry.classify("git_status", {})[0] == RiskLevel.SAFE
+    assert registry.requires_approval("git_log", {}) is False
+    assert registry.requires_approval("git_status", {}) is False
+    registry.close()
+

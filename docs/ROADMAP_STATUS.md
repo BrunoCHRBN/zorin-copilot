@@ -39,10 +39,15 @@ O Zorin Copilot é um assistente de inteligência artificial nativo para Linux (
 - **Núcleo Headless (`ai/agent.py` & `ai/agent_router.py`):**
   - Máquina de estados desacoplada de bibliotecas gráficas, permitindo execução pura via CLI ou GUI.
   - Modos `plan()` (dry-run) e `run()` (execução real com callbacks `on_step` e `on_approval`).
+  - **Orçamento Adaptativo de Passos:** Heurística `get_step_budget` diferenciando tarefas simples (10 passos / 120s) e tarefas analíticas/pesquisa (30 passos / 480s), configurável nas Preferências.
+  - **Síntese Automática ao Exaurir Orçamento:** Quando o limite de passos é atingido, o agente sintetiza os achados acumulados via LLM em vez de falhar silenciosamente.
+  - **Salvaguardas Críticas Anti-Alucinação:** Regra 8 rígida no prompt (`_SYSTEM_INSTRUCTION`), expansão da janela de observação para até 3.500 caracteres nos passos recentes (evitando cegueira por clip de 300 chars) e timeouts individuais por ferramenta no `ToolRegistry` retornando payload estruturado com sugestão acionável.
+  - **Ferramentas Nativas de Git (`git_log` e `git_status`):** Consulta ultrarrápida de commits e working tree local sem dependência de APIs lentas de rede.
   - Critérios estritos de parada: `done`, `max_steps`, `timeout`, `repeated_failure`, `rejected`, `aborted` e `error`.
   - Roteamento determinístico entre Ollama (tarefas simples) e Gemini (sínteses complexas).
 - **Interface Gráfica do Agente (`ui/widgets/agent_card.py`):**
   - *Stepper visual* com timeline interativa em tempo real.
+  - **Botão de Continuação ("Continuar (+10 passos)"):** Permite retomar a execução imediatamente a partir do último passo, preservando histórico e dados do turno sem perda de contexto.
   - Inspeção detalhada de raciocínio, parâmetros e saídas com botão expansor.
   - Banner de aprovação para ações sensíveis com opção "Aprovar Todas" para fluxos contínuos.
   - Reversão com botão de desfazer integrado ao card.

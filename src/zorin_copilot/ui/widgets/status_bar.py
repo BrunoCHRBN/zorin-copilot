@@ -64,18 +64,23 @@ class StatusBarWidget:
 
         self.tokens_lbl = Gtk.Label()
         self.tokens_lbl.add_css_class("status-text")
+        self.tokens_lbl.add_css_class("tabular-nums")
+        self.tokens_lbl.add_css_class("status-bar-tokens")
         self.tokens_item = self._make_item(_ICON_TOKENS, self.tokens_lbl)
 
         self.load_lbl = Gtk.Label()
         self.load_lbl.add_css_class("status-text")
+        self.load_lbl.add_css_class("tabular-nums")
         self.load_item = self._make_item(_ICON_LOAD, self.load_lbl)
 
         self.ram_lbl = Gtk.Label()
         self.ram_lbl.add_css_class("status-text")
+        self.ram_lbl.add_css_class("tabular-nums")
         self.ram_item = self._make_item(_ICON_RAM, self.ram_lbl)
 
         self.rag_lbl = Gtk.Label()
         self.rag_lbl.add_css_class("status-text")
+        self.rag_lbl.add_css_class("tabular-nums")
         self.rag_item = self._make_item(_ICON_RAG, self.rag_lbl)
 
         # Monta os itens separados por divisórias verticais sutis.

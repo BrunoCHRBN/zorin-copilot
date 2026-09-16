@@ -110,7 +110,7 @@ class LiveVoiceWidget(Gtk.Box):
         except Exception:
             pass
 
-        tip = f"Visualizador: {new_label} (clique para alternar)"
+        tip = f"Visualizador: {new_label} (clique ou pressione Enter para alternar)"
         if hasattr(self, "style_btn"):
             self.style_btn.set_tooltip_text(tip)
             self.style_btn.set_icon_name(icons.get(self.visualizer_style, "audio-speakers-symbolic"))
@@ -133,7 +133,12 @@ class LiveVoiceWidget(Gtk.Box):
         card.append(self._build_visualizer())
         card.append(self._build_session_log())
 
-        self.subtitle_lbl = Gtk.Label(label="Fale naturalmente com o assistente...", xalign=0.5)
+        # Subtítulo com instrução e atalhos
+        self.subtitle_lbl = Gtk.Label(
+            label="Diga algo ou compartilhe sua tela. Pressione Esc para parar vídeo ou sair.",
+            xalign=0.5,
+        )
+        self.subtitle_lbl.add_css_class("caption")
         self.subtitle_lbl.add_css_class("dim-label")
         self.subtitle_lbl.set_wrap(True)
         self.subtitle_lbl.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
@@ -166,6 +171,8 @@ class LiveVoiceWidget(Gtk.Box):
         self.timer_lbl = Gtk.Label(label="00:00", xalign=0)
         self.timer_lbl.add_css_class("caption")
         self.timer_lbl.add_css_class("dim-label")
+        self.timer_lbl.add_css_class("tabular-nums")
+        self.timer_lbl.add_css_class("timer-label")
         self.timer_lbl.set_visible(False)
         header_box.append(self.timer_lbl)
 
@@ -204,17 +211,29 @@ class LiveVoiceWidget(Gtk.Box):
         self.drawing_area.set_content_width(280)
         self.drawing_area.set_content_height(105)
         self.drawing_area.set_draw_func(self._draw_audio_visualizer)
-        self.drawing_area.set_tooltip_text(f"Visualizador: {self._get_style_label()} (clique para alternar)")
+        self.drawing_area.add_css_class("audio-visualizer-area")
+        self.drawing_area.set_focusable(True)
+        self.drawing_area.set_tooltip_text(f"Visualizador: {self._get_style_label()} (clique ou pressione Enter para alternar)")
 
         # Alternar estilo por clique na área
         click_gesture = Gtk.GestureClick.new()
         click_gesture.connect("pressed", lambda *_: self._cycle_visualizer_style())
         self.drawing_area.add_controller(click_gesture)
 
+        # Suporte a teclado no visualizador (A11Y001)
+        area_key_ctrl = Gtk.EventControllerKey.new()
+        def _on_drawing_key(_ctrl: Gtk.EventControllerKey, keyval: int, _keycode: int, _state: Gdk.ModifierType) -> bool:
+            if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_space):
+                self._cycle_visualizer_style()
+                return True
+            return False
+        area_key_ctrl.connect("key-pressed", _on_drawing_key)
+        self.drawing_area.add_controller(area_key_ctrl)
+
         # Tick callback de animação contínua e suave
         self._tick_id = self.drawing_area.add_tick_callback(self._on_visualizer_tick)
 
-        # Controlador de teclas (Escape -> Botão de Pânico)
+        # Controlador de teclas global (Escape -> Botão de Pânico / Encerrar)
         key_ctrl = Gtk.EventControllerKey.new()
         key_ctrl.connect("key-pressed", self._on_key_pressed)
         self.add_controller(key_ctrl)
@@ -517,10 +536,23 @@ class LiveVoiceWidget(Gtk.Box):
         """Tempo decorrido da chamada, em segundos."""
         return self._elapsed_sec
 
+    def do_unroot(self) -> None:
+        self._stop_timer()
+        if getattr(self, "_tick_id", 0) != 0:
+            try:
+                self.drawing_area.remove_tick_callback(self._tick_id)
+            except Exception:
+                pass
+            self._tick_id = 0
+        Gtk.Box.do_unroot(self)
+
     # ------------------------------------------------------------------
     # Visualizador Dinâmico e Animação
     # ------------------------------------------------------------------
     def _on_visualizer_tick(self, _widget: Gtk.DrawingArea, frame_clock: Gdk.FrameClock) -> bool:
+        if self.get_root() is None:
+            self._tick_id = 0
+            return GLib.SOURCE_REMOVE
         if not self.get_mapped() or not self.get_visible():
             return GLib.SOURCE_CONTINUE
 
@@ -851,6 +883,8 @@ class LiveVoiceWidget(Gtk.Box):
                 self._update_video_ui(False)
                 self.subtitle_lbl.set_text("Transmissão de vídeo interrompida (Esc).")
                 return True
+            self._on_end_call()
+            return True
         return False
 
     def _on_send_screen(self, _btn: Gtk.Button) -> None:

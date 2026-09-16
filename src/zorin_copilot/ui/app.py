@@ -41,7 +41,7 @@ from ..core.export import (
 )
 from ..core.fence import ScreenFenceManager
 from ..core.rag import LocalDocumentRAG
-from ..core.session import TopicSession
+from ..core.session import ChatTurn, TopicSession
 from ..core.shortcuts import APP_SHORTCUTS, ShortcutManager, is_gnome_desktop
 from ..shell.action_status import ActionOutcome
 from ..shell.executor import ActionExecutor, ExecutionReport
@@ -1138,33 +1138,44 @@ class CopilotWindow(Adw.ApplicationWindow):
         """Inicia a execução autônoma supervisionada de um objetivo no desktop."""
         import threading
         from ..ai.agent import AgentLoop
-        from ..ai.agent_router import AgentRouter, RouteMode
+        from ..ai.agent_router import AgentRouter, RouteMode, get_step_budget
         from ..ai.agent_tools import ToolRegistry
         from .widgets.agent_card import AgentExecutionWidget
 
-        self._is_busy = True
-        self.prompt_bar.set_busy(True)
-        self.chat_stream.welcome_box.set_visible(False)
+        try:
+            self._is_busy = True
+            self.prompt_bar.set_busy(True)
+            self.chat_stream.welcome_box.set_visible(False)
 
-        prompt_to_run = full_prompt or objective
+            prompt_to_run = full_prompt or objective
 
-        # Adiciona a bolha do usuário e cria o widget de execução do agente
-        temp_turn = ChatTurn(prompt=objective, answer="")
-        user_bubble = self.chat_stream._build_user_bubble(temp_turn, attached_image)
+            # Adiciona a bolha do usuário e cria o widget de execução do agente
+            temp_turn = ChatTurn(prompt=objective, answer="")
+            user_bubble = self.chat_stream._build_user_bubble(temp_turn, attached_image)
 
-        agent_widget = AgentExecutionWidget(
-            objective=objective,
-            ctx=self,
-            on_abort=self.abort_active_agent,
-        )
-        self._active_agent_widget = agent_widget
+            agent_widget = AgentExecutionWidget(
+                objective=objective,
+                ctx=self,
+                on_abort=self.abort_active_agent,
+            )
+            self._active_agent_widget = agent_widget
 
-        turn_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        turn_box.append(user_bubble)
-        turn_box.append(agent_widget)
+            turn_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+            turn_box.append(user_bubble)
+            turn_box.append(agent_widget)
 
-        self.chat_stream.stream_box.append(turn_box)
-        self.chat_stream.scroll_to_bottom()
+            self.chat_stream.stream_box.append(turn_box)
+            self.chat_stream.scroll_to_bottom()
+        except Exception as exc:
+            logger.exception("Erro ao iniciar execução do modo agente: %s", exc)
+            self._is_busy = False
+            self.prompt_bar.set_busy(False)
+            if not self.session.turns:
+                self.chat_stream.welcome_box.set_visible(True)
+            self.show_toast(f"Erro no modo agente: {exc}")
+            return
+
+        session_history = self.session.get_history_for_llm() if hasattr(self, "session") and self.session else []
 
         def agent_thread():
             router = AgentRouter(self.config)
@@ -1189,13 +1200,23 @@ class CopilotWindow(Adw.ApplicationWindow):
                 mcp_manager=mcp_mgr,
             )
 
-            max_steps = getattr(self.config, "agent_max_steps", 12)
+            base_steps = getattr(self.config, "agent_max_steps", 15)
+            base_seconds = getattr(self.config, "agent_max_seconds", 300.0)
+            adaptive = getattr(self.config, "agent_adaptive_budget", True)
+            max_steps, max_seconds = get_step_budget(
+                prompt_to_run,
+                base_max_steps=base_steps,
+                base_max_seconds=base_seconds,
+                adaptive=adaptive,
+            )
+
             loop = AgentLoop(
                 route.planner,
                 registry,
                 max_steps=max_steps,
-                max_seconds=180.0,
+                max_seconds=max_seconds,
                 memory=self.engine.memory,
+                session_context=session_history,
             )
             self._active_agent_loop = loop
 
@@ -1227,12 +1248,103 @@ class CopilotWindow(Adw.ApplicationWindow):
 
         threading.Thread(target=agent_thread, daemon=True).start()
 
+    def continue_agent_execution(
+        self,
+        previous_result: Any,
+        agent_widget: Any,
+        additional_steps: int = 10,
+    ) -> None:
+        """Continua a execução de uma tarefa do Modo Agente que pausou por limite de passos."""
+        import threading
+        from ..ai.agent import AgentLoop
+        from ..ai.agent_router import AgentRouter, RouteMode
+        from ..ai.agent_tools import ToolRegistry
+
+        if self._is_busy:
+            self.show_toast("Aguarde a operação atual terminar.")
+            return
+
+        self._is_busy = True
+        self.prompt_bar.set_busy(True)
+        self._active_agent_widget = agent_widget
+
+        objective = previous_result.objective
+        existing_steps = list(previous_result.steps or [])
+        new_max_steps = len(existing_steps) + max(1, int(additional_steps))
+        timeout_seconds = getattr(self.config, "agent_max_seconds", 300.0)
+        session_history = self.session.get_history_for_llm() if hasattr(self, "session") and self.session else []
+
+        def continue_thread():
+            router = AgentRouter(self.config)
+            route = router.route(objective, RouteMode.AUTO)
+
+            if route.planner is None:
+                err_msg = f"Nenhum modelo disponível para continuar: {route.reason}."
+                GLib.idle_add(agent_widget.status_lbl.set_text, err_msg)
+                GLib.idle_add(self._on_agent_finished, None, objective, agent_widget, err_msg)
+                return
+
+            undo_stack = getattr(self.executor, "undo_stack", None)
+            mcp_mgr = self.mcp_manager if getattr(self.config, "mcp_enabled", True) else None
+            registry = ToolRegistry(
+                inspector=self.inspector,
+                input_driver=getattr(self.executor, "input_driver", None),
+                undo_stack=undo_stack,
+                fence=self.fence,
+                mcp_manager=mcp_mgr,
+            )
+
+            loop = AgentLoop(
+                route.planner,
+                registry,
+                max_steps=new_max_steps,
+                max_seconds=timeout_seconds,
+                memory=self.engine.memory,
+                session_context=session_history,
+                run_id=previous_result.run_id or None,
+            )
+            self._active_agent_loop = loop
+
+            def on_step(step):
+                GLib.idle_add(agent_widget.add_step, step)
+
+            def on_approval(step) -> bool:
+                approval_event = threading.Event()
+                result_dict = {"approved": False}
+
+                def show_approval():
+                    agent_widget.prompt_approval(step, approval_event, result_dict)
+                    return GLib.SOURCE_REMOVE
+
+                GLib.idle_add(show_approval)
+                approval_event.wait(timeout=180.0)
+                return result_dict["approved"]
+
+            try:
+                result = loop.run(
+                    objective,
+                    on_step=on_step,
+                    on_approval=on_approval,
+                    initial_steps=existing_steps,
+                )
+            except Exception as exc:
+                logger.exception("Erro durante a continuação do agente")
+                result = None
+                err = str(exc)
+            else:
+                err = ""
+
+            GLib.idle_add(self._on_agent_finished, result, objective, agent_widget, err, True)
+
+        threading.Thread(target=continue_thread, daemon=True).start()
+
     def _on_agent_finished(
         self,
         result: Any | None,
         objective: str,
         widget: Any,
         error_msg: str = "",
+        is_continuation: bool = False,
     ) -> bool:
         """(main thread) Finaliza a execução do agente e atualiza o histórico e a UI."""
         self._is_busy = False
@@ -1243,12 +1355,20 @@ class CopilotWindow(Adw.ApplicationWindow):
         if result is not None:
             widget.finish(result)
             answer_text = result.final_answer or result.stop_message
-            self.session.record_turn(
-                prompt=objective,
-                answer=answer_text,
-                agent_result=result.to_dict(),
-            )
+            if is_continuation and self.session.turns and self.session.turns[-1].agent_result:
+                self.session.turns[-1].answer = answer_text
+                self.session.turns[-1].agent_result = result.to_dict()
+                from datetime import datetime
+                self.session.updated_at = datetime.now().isoformat()
+            else:
+                self.session.record_turn(
+                    prompt=objective,
+                    answer=answer_text,
+                    agent_result=result.to_dict(),
+                )
         else:
+            if hasattr(widget, "finish_error"):
+                widget.finish_error(error_msg or "Falha na execução do agente.")
             self.session.record_turn(
                 prompt=objective,
                 answer=error_msg or "Falha na execução do agente.",
@@ -1268,6 +1388,8 @@ class CopilotWindow(Adw.ApplicationWindow):
 
         if result and result.success:
             self.show_toast(f"Modo Agente: objetivo cumprido em {len(result.steps)} passos.")
+        elif result and result.stop_reason == "max_steps":
+            self.show_toast("Modo Agente: limite de passos atingido. Clique em 'Continuar' para conceder mais passos.")
         elif result and result.stop_reason == "aborted":
             self.show_toast("Modo Agente: execução interrompida.")
         elif result and result.stop_reason == "rejected":

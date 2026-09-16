@@ -1132,11 +1132,41 @@ window.dark-glass .prompt-context-pill {
     opacity: 0.88;
 }
 
+/* Escala tipográfica modular (Fase 3: Desktop Craft / GNOME HIG) */
+.type-micro {
+    font-size: 10px;
+    line-height: 1.2;
+}
+
+.type-caption {
+    font-size: 12px;
+    line-height: 1.35;
+}
+
+.type-body {
+    font-size: 14px;
+    line-height: 1.45;
+}
+
+.type-subtitle {
+    font-size: 16px;
+    font-weight: 600;
+    line-height: 1.35;
+}
+
+.type-title {
+    font-size: 18px;
+    font-weight: 700;
+    line-height: 1.3;
+}
+
 /* Numerais tabulares para métricas e temporizadores (evita oscilação/jitter) */
 .tabular-nums,
 .timer-label,
 .status-bar-tokens,
-.session-timer {
+.session-timer,
+.status-item label,
+.step-index-label {
     font-feature-settings: "tnum" 1;
 }
 
@@ -1144,7 +1174,15 @@ window.dark-glass .prompt-context-pill {
 button:focus-visible,
 .glass-chip:focus-visible,
 .glass-row:focus-visible,
-.sidebar-chat-row:focus-visible {
+.sidebar-chat-row:focus-visible,
+.audio-visualizer-area:focus-visible,
+drawingarea:focus-visible,
+.prompt-action-pill:focus-visible,
+.prompt-tag-chip:focus-visible,
+.command-row:focus-visible,
+.agent-card:focus-visible,
+.drop-zone:focus-visible,
+entry:focus-visible {
     outline: 2px solid @accent_color;
     outline-offset: 2px;
 }

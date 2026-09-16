@@ -87,6 +87,14 @@ SYNTHESIS_MARKERS = (
     # estudos" é tarefa boba e não deve escalar para a nuvem por causa do nome.
     "estudar",
     "sintetiz",
+    "melhorar",
+    "melhoria",
+    "implementar",
+    "auditar",
+    "revisar",
+    "investig",
+    "diagnóstic",
+    "diagnostic",
 )
 
 #: Acima deste número de verbos o objetivo é tratado como composto.
@@ -124,6 +132,30 @@ def classify_objective(objective: str) -> tuple[str, str]:
     return "simple", f"verbo(s) direto(s): {', '.join(verbs[:3])}"
 
 
+def get_step_budget(
+    objective: str,
+    base_max_steps: int = 15,
+    base_max_seconds: float = 300.0,
+    adaptive: bool = True,
+) -> tuple[int, float]:
+    """Calcula o orçamento de passos e tempo para um objetivo.
+
+    Se `adaptive=True`, objetivos complexos (síntese, pesquisa, auditoria, análise)
+    recebem um orçamento ampliado para permitir raciocínio aprofundado sem
+    interrupção prematura por limite de passos.
+    """
+    base_steps = max(1, int(base_max_steps))
+    base_secs = max(30.0, float(base_max_seconds))
+    if not adaptive:
+        return base_steps, base_secs
+
+    complexity, _reason = classify_objective(objective)
+    if complexity == "complex":
+        return max(base_steps, 30), max(base_secs, 480.0)
+
+    return min(base_steps, 10), min(base_secs, 120.0)
+
+
 # --------------------------------------------------------------------------- #
 # Planejador sobre LLM (provider-agnóstico)
 # --------------------------------------------------------------------------- #
@@ -139,7 +171,11 @@ _SYSTEM_INSTRUCTION = (
     "4. Use o `rationale` curto (uma frase).\n"
     "5. Prefira `find_element` + `click_element` a `mouse_click` por coordenada.\n"
     "6. Se uma ação falhou, mude de estratégia — não repita os mesmos argumentos.\n"
-    "7. Se faltar informação que só o usuário tem, encerre com `final_answer` perguntando."
+    "7. Se faltar informação que só o usuário tem, encerre com `final_answer` perguntando.\n"
+    "8. NUNCA invente, presuma ou alucine conteúdos de arquivos, logs, commits ou saídas de comandos "
+    "quando uma ferramenta falhar ou retornar timeout. Se uma ferramenta retornar erro ou timeout, "
+    "reconheça a limitação, explique com precisão na resposta final o que ocorreu, ou tente uma "
+    "ferramenta/parâmetro com escopo mais restrito."
 )
 
 
@@ -155,8 +191,12 @@ class LLMPlanner:
         objective: str,
         tools: list[dict[str, Any]],
         history: list[dict[str, Any]],
+        session_context: Sequence[dict[str, str]] | None = None,
+        max_steps: int | None = None,
     ) -> AgentDecision:
-        prompt = build_planner_prompt(objective, tools, history)
+        prompt = build_planner_prompt(
+            objective, tools, history, session_context=session_context, max_steps=max_steps
+        )
         try:
             if hasattr(self.provider, "complete"):
                 raw = self.provider.complete(prompt, system_prompt=_SYSTEM_INSTRUCTION, json_mode=True)
@@ -182,15 +222,26 @@ def build_planner_prompt(
     objective: str,
     tools: list[dict[str, Any]],
     history: Sequence[dict[str, Any]] | None,
+    session_context: Sequence[dict[str, str]] | None = None,
+    max_steps: int | None = None,
 ) -> str:
-    """Monta o prompt de um passo. Separada para poder ser testada isoladamente."""
+    """Monta o prompt de um passo com suporte a contexto conversacional de turnos anteriores."""
     lines = [
         _SYSTEM_INSTRUCTION,
-        "",
-        f"OBJETIVO: {objective}",
-        "",
-        "FERRAMENTAS DISPONÍVEIS:",
     ]
+
+    if session_context:
+        lines.append("")
+        lines.append("CONTEXTO DAS MENSAGENS ANTERIORES NESTE CHAT:")
+        for turn in session_context[-6:]:
+            role = "Usuário" if turn.get("role") == "user" else "Assistente"
+            content = _clip(turn.get("content", "").strip(), 500)
+            lines.append(f"{role}: {content}")
+
+    lines.append("")
+    lines.append(f"OBJETIVO ATUAL DO USUÁRIO: {objective}")
+    lines.append("")
+    lines.append("FERRAMENTAS DISPONÍVEIS:")
     for tool in tools:
         name = tool.get("name", "")
         args = _describe_args(tool.get("parameters") or {})
@@ -198,8 +249,9 @@ def build_planner_prompt(
 
     if history:
         lines.append("")
-        lines.append("HISTÓRICO (ações já executadas e seus resultados):")
-        for entry in history:
+        lines.append("HISTÓRICO DE AÇÕES DESTE OBJETIVO (passos já executados neste turno):")
+        total_steps = len(history)
+        for idx_entry, entry in enumerate(history):
             # +1 porque o índice interno é 0-based; o modelo raciocina melhor
             # com passos começando em 1.
             index = _step_number(entry.get("index", 0))
@@ -209,10 +261,29 @@ def build_planner_prompt(
             observation = json.dumps(
                 entry.get("observation") or entry.get("error") or "", ensure_ascii=False, default=str
             )
-            lines.append(f"{index}. {tool}({args}) -> {ok}: {_clip(observation, 300)}")
+            # Passos mais recentes (últimos 4) recebem limite expandido (3.500 caracteres)
+            # para evitar que o modelo fique cego ao ler arquivos, diffs ou logs. Passos mais antigos
+            # são comprimidos (600 caracteres) para preservar a janela de contexto.
+            recency = total_steps - idx_entry
+            clip_limit = 3500 if recency <= 4 else 600
+            lines.append(f"{index}. {tool}({args}) -> {ok}: {_clip(observation, clip_limit)}")
     else:
         lines.append("")
-        lines.append("HISTÓRICO: nenhuma ação executada ainda.")
+        lines.append("HISTÓRICO: nenhuma ação executada ainda neste objetivo.")
+
+    if max_steps is not None and max_steps > 0:
+        steps_taken = len(history) if history else 0
+        remaining = max(0, max_steps - steps_taken)
+        lines.append("")
+        if remaining <= 1 and steps_taken > 0:
+            lines.append(
+                f"ATENÇÃO - ETAPA FINAL ({steps_taken + 1}/{max_steps}): Você atingiu o último passo disponível "
+                "deste orçamento. NÃO chame ferramentas adicionais de leitura ou exploração. Conclua o objetivo "
+                "usando `final_answer` (ou a ferramenta `done`), sintetizando claramente tudo o que foi identificado até aqui "
+                "e apontando os próximos passos recomendados."
+            )
+        else:
+            lines.append(f"ORÇAMENTO DE ETAPAS: Passo {steps_taken + 1} de {max_steps} ({remaining} restantes).")
 
     lines.append("")
     lines.append("PRÓXIMO PASSO (JSON apenas):")
@@ -359,10 +430,23 @@ class FallbackPlanner:
         objective: str,
         tools: list[dict[str, Any]],
         history: list[dict[str, Any]],
+        session_context: Sequence[dict[str, str]] | None = None,
+        max_steps: int | None = None,
     ) -> AgentDecision:
         errors: list[str] = []
         for planner in self.planners:
-            decision = planner.decide(objective, tools, history)
+            try:
+                import inspect
+                sig = inspect.signature(planner.decide)
+                kwargs: dict[str, Any] = {}
+                if "session_context" in sig.parameters:
+                    kwargs["session_context"] = session_context
+                if "max_steps" in sig.parameters:
+                    kwargs["max_steps"] = max_steps
+                decision = planner.decide(objective, tools, history, **kwargs)
+            except Exception as exc:
+                decision = AgentDecision(error=f"Planejador falhou: {exc}")
+
             if not decision.error:
                 self.used = getattr(planner, "name", "?")
                 logger.debug("Planejador '%s' respondeu.", self.used)

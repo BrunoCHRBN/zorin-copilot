@@ -81,6 +81,11 @@ class LiveSessionLogTest(unittest.TestCase):
         self.window.set_child(self.widget)
         self.window.present()
 
+    def tearDown(self):
+        self.widget._on_end_call()
+        self.window.set_child(None)
+        self.window.destroy()
+
     def _rows(self):
         rows = []
         child = self.widget.log_box.get_first_child()

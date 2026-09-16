@@ -213,7 +213,10 @@ class LaunchAppFallbackTest(unittest.TestCase):
              mock.patch.object(live_module.subprocess, "Popen") as popen:
             out = c._dispatch_tool("launch_app", {"app_name": "/usr/bin/kitty"})
 
-        kitty_calls = [c for c in popen.call_args_list if "kitty" in str(c)]
+        kitty_calls = [
+            call_item for call_item in popen.call_args_list
+            if call_item.args and any("kitty" in str(arg) for arg in (call_item.args[0] if isinstance(call_item.args[0], (list, tuple)) else [call_item.args[0]]))
+        ]
         self.assertEqual(kitty_calls, [])
 
     def test_terminal_pedido_e_substituido_pelo_terminal_do_ambiente(self):

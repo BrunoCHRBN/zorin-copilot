@@ -137,6 +137,11 @@ class CopilotConfig:
     mcp_config_path: str = ""  # vazio = ~/.config/zorin-copilot/mcp_servers.json
     mcp_auto_connect: bool = True  # conectar automaticamente aos servidores habilitados
 
+    # Modo Agente: limites de passos, tempo e orçamento adaptativo de raciocínio
+    agent_max_steps: int = 15
+    agent_max_seconds: float = 300.0
+    agent_adaptive_budget: bool = True
+
     # Configurações de Confiança, Privacidade e RAG
 
     @staticmethod

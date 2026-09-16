@@ -21,7 +21,7 @@ from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
 Adw.init()
 
-from zorin_copilot.ai.agent import AgentResult, Step, STOP_ABORTED, STOP_DONE, STOP_REJECTED  # noqa: E402
+from zorin_copilot.ai.agent import AgentResult, Step, STOP_ABORTED, STOP_DONE, STOP_MAX_STEPS, STOP_REJECTED  # noqa: E402
 from zorin_copilot.core.export import render_conversation_markdown  # noqa: E402
 from zorin_copilot.core.session import ChatTurn, TopicSession  # noqa: E402
 from zorin_copilot.ui.widgets.agent_card import (  # noqa: E402
@@ -520,7 +520,126 @@ class TestAgentIntegration(unittest.TestCase):
         called_args = mock_win.start_agent_execution.call_args[0]
         self.assertEqual(called_args[0], "abrir o navegador e pesquisar linux")
 
+    def test_agent_execution_widget_finish_error(self):
+        widget = AgentExecutionWidget(
+            objective="tarefa com falha",
+            ctx=MagicMock(),
+        )
+        self.assertTrue(widget.spinner.get_visible())
+        self.assertTrue(widget.abort_btn.get_visible())
+        self.assertFalse(widget.conclusion_box.get_visible())
+
+        widget.finish_error("Falha de conexão com o modelo")
+        self.assertFalse(widget.spinner.get_visible())
+        self.assertFalse(widget.abort_btn.get_visible())
+        self.assertTrue(widget.conclusion_box.get_visible())
+        self.assertIn("Falha de conexão", widget.status_lbl.get_text())
+        self.assertIn("Falha de conexão", widget.answer_lbl.get_text())
+
+    def test_start_agent_execution_invokes_turn_creation_without_name_error(self):
+        from zorin_copilot.ui.app import CopilotWindow
+
+        mock_win = MagicMock()
+        mock_win.config = MagicMock()
+        mock_win.config.mcp_enabled = False
+        mock_win.config.agent_max_steps = 12
+        mock_win.inspector = MagicMock()
+        mock_win.executor = MagicMock()
+        mock_win.fence = MagicMock()
+        mock_win.engine = MagicMock()
+        mock_win.prompt_bar = MagicMock()
+        mock_win.chat_stream = MagicMock()
+        user_bubble = Gtk.Box()
+        mock_win.chat_stream._build_user_bubble.return_value = user_bubble
+        stream_box = Gtk.Box()
+        mock_win.chat_stream.stream_box = stream_box
+
+        with patch("threading.Thread") as mock_thread:
+            CopilotWindow.start_agent_execution(mock_win, "listar diretório atual")
+            mock_win.prompt_bar.set_busy.assert_called_with(True)
+            mock_win.chat_stream.welcome_box.set_visible.assert_called_with(False)
+            mock_win.chat_stream._build_user_bubble.assert_called_once()
+            # Verifica que o turn_box foi criado e adicionado ao stream_box
+            self.assertIsNotNone(stream_box.get_first_child())
+            mock_thread.assert_called_once()
+
+    def test_agent_execution_widget_continue_btn_on_max_steps(self):
+        mock_ctx = MagicMock()
+        mock_ctx.continue_agent_execution = MagicMock()
+
+        widget = AgentExecutionWidget(
+            objective="tarefa longa",
+            ctx=mock_ctx,
+        )
+        self.assertFalse(widget.continue_btn.get_visible())
+
+        result = AgentResult(
+            objective="tarefa longa",
+            success=False,
+            stop_reason=STOP_MAX_STEPS,
+            steps=[Step(index=0, tool="list_directory", ok=True)],
+        )
+        widget.finish(result)
+
+        self.assertTrue(widget.conclusion_box.get_visible())
+        self.assertTrue(widget.continue_btn.get_visible())
+        self.assertTrue(widget.continue_btn.get_sensitive())
+
+        # Ao clicar no botão Continuar, invoca continue_agent_execution
+        widget._on_continue_clicked(widget.continue_btn)
+        mock_ctx.continue_agent_execution.assert_called_once_with(result, widget, additional_steps=10)
+
+    def test_continue_agent_execution_invokes_thread(self):
+        from zorin_copilot.ui.app import CopilotWindow
+
+        mock_win = MagicMock()
+        mock_win._is_busy = False
+        mock_win.config = MagicMock()
+        mock_win.config.mcp_enabled = False
+        mock_win.config.agent_max_steps = 15
+        mock_win.config.agent_max_seconds = 300.0
+        mock_win.inspector = MagicMock()
+        mock_win.executor = MagicMock()
+        mock_win.fence = MagicMock()
+        mock_win.engine = MagicMock()
+        mock_win.prompt_bar = MagicMock()
+        mock_win.session = MagicMock()
+        mock_win.session.get_history_for_llm.return_value = []
+
+        prev_result = AgentResult(
+            objective="tarefa analítica",
+            success=False,
+            stop_reason=STOP_MAX_STEPS,
+            steps=[Step(index=0, tool="list_directory", ok=True)],
+        )
+        mock_widget = MagicMock()
+
+        with patch("threading.Thread") as mock_thread:
+            CopilotWindow.continue_agent_execution(mock_win, prev_result, mock_widget, additional_steps=10)
+            mock_win.prompt_bar.set_busy.assert_called_with(True)
+            mock_thread.assert_called_once()
+
+    def test_git_tools_labels_and_icons(self):
+        from zorin_copilot.ui.widgets.agent_card import TOOL_ICONS, TOOL_LABELS, _format_args_summary
+
+        self.assertIn("git_log", TOOL_LABELS)
+        self.assertIn("git_status", TOOL_LABELS)
+        self.assertEqual(TOOL_LABELS["git_log"], "Histórico Git (Commits)")
+        self.assertEqual(TOOL_LABELS["git_status"], "Status do Git")
+
+        self.assertEqual(TOOL_ICONS["git_log"], "vcs-branch-symbolic")
+        self.assertEqual(TOOL_ICONS["git_status"], "dialog-information-symbolic")
+
+        summary_log = _format_args_summary("git_log", {"max_count": 5, "path": "src"})
+        self.assertIn("5 commits", summary_log)
+        self.assertIn("src", summary_log)
+
+        summary_status = _format_args_summary("git_status", {"path": "/home/user/project"})
+        self.assertEqual(summary_status, "/home/user/project")
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
 

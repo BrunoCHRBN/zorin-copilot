@@ -46,8 +46,8 @@ STOP_MESSAGES = {
     STOP_NO_PROVIDER: "Nenhum provedor disponível para o modo solicitado.",
 }
 
-DEFAULT_MAX_STEPS = 12
-DEFAULT_MAX_SECONDS = 180.0
+DEFAULT_MAX_STEPS = 15
+DEFAULT_MAX_SECONDS = 300.0
 DEFAULT_MAX_REPEATS = 2
 
 
@@ -88,6 +88,7 @@ class AgentPlanner(Protocol):
         objective: str,
         tools: list[dict[str, Any]],
         history: list[dict[str, Any]],
+        session_context: Sequence[dict[str, str]] | None = None,
     ) -> AgentDecision:
         ...
 
@@ -112,7 +113,7 @@ class Step:
         return {
             "index": self.index,
             "tool": self.tool,
-            "args": self.args,
+            "args": dict(self.args),
             "rationale": self.rationale,
             "risk": self.risk,
             "requires_approval": self.requires_approval,
@@ -123,6 +124,22 @@ class Step:
             "elapsed": self.elapsed,
         }
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Step:
+        return cls(
+            index=int(data.get("index", 0)),
+            tool=str(data.get("tool", "")),
+            args=dict(data.get("args") or {}),
+            rationale=str(data.get("rationale", "")),
+            risk=str(data.get("risk", "safe")),
+            requires_approval=bool(data.get("requires_approval", False)),
+            approved=data.get("approved"),
+            ok=data.get("ok"),
+            observation=data.get("observation"),
+            error=str(data.get("error", "")),
+            elapsed=float(data.get("elapsed", 0.0)),
+        )
+
 
 @dataclass
 class AgentResult:
@@ -131,13 +148,13 @@ class AgentResult:
     objective: str
     success: bool
     stop_reason: str
-    steps: list[Step] = field(default_factory=list)
     final_answer: str = ""
     error: str = ""
     elapsed: float = 0.0
     provider: str = ""
     dry_run: bool = False
     run_id: str = ""
+    steps: list[Step] = field(default_factory=list)
 
     @property
     def stop_message(self) -> str:
@@ -158,6 +175,26 @@ class AgentResult:
             "steps": [step.to_dict() for step in self.steps],
         }
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> AgentResult:
+        steps = [
+            Step.from_dict(s)
+            for s in data.get("steps", [])
+            if isinstance(s, dict)
+        ]
+        return cls(
+            objective=str(data.get("objective", "")),
+            success=bool(data.get("success", False)),
+            stop_reason=str(data.get("stop_reason", "")),
+            final_answer=str(data.get("final_answer", "")),
+            error=str(data.get("error", "")),
+            elapsed=float(data.get("elapsed", 0.0)),
+            provider=str(data.get("provider", "")),
+            dry_run=bool(data.get("dry_run", False)),
+            run_id=str(data.get("run_id", "")),
+            steps=steps,
+        )
+
 
 class ScriptedPlanner:
     """Planejador de roteiro fixo — usado nos testes e em `--script` de depuração.
@@ -175,6 +212,7 @@ class ScriptedPlanner:
         objective: str,
         tools: list[dict[str, Any]],
         history: list[dict[str, Any]],
+        session_context: Sequence[dict[str, str]] | None = None,
     ) -> AgentDecision:
         self.calls.append(list(history))
         if not self._queue:
@@ -202,6 +240,7 @@ class AgentLoop:
         max_seconds: float = DEFAULT_MAX_SECONDS,
         max_repeats: int = DEFAULT_MAX_REPEATS,
         memory: Any | None = None,
+        session_context: Sequence[dict[str, str]] | None = None,
         run_id: str | None = None,
     ) -> None:
         self.planner = planner
@@ -210,6 +249,7 @@ class AgentLoop:
         self.max_seconds = float(max_seconds)
         self.max_repeats = max(1, int(max_repeats))
         self.memory = memory
+        self.session_context = list(session_context or [])
         self.run_id = run_id or uuid.uuid4().hex[:8]
         self._abort = threading.Event()
         self._running = False
@@ -249,17 +289,19 @@ class AgentLoop:
         objective: str,
         *,
         dry_run: bool = False,
+        session_context: Sequence[dict[str, str]] | None = None,
         on_step: Callable[[Step], None] | None = None,
         on_approval: Callable[[Step], bool] | None = None,
+        initial_steps: Sequence[Step] | None = None,
     ) -> AgentResult:
         """Executa o objetivo. Sempre devolve um `AgentResult` — nunca levanta."""
         if self.planner is None:
             return self._result(objective, STOP_NO_PROVIDER, dry_run=dry_run, error="Planejador ausente.")
 
+        ctx = list(session_context) if session_context is not None else self.session_context
         registry = self.registry.for_dry_run() if dry_run else self.registry
-        tools = registry.schema()
         started = time.monotonic()
-        steps: list[Step] = []
+        steps: list[Step] = list(initial_steps or [])
         self._running = True
 
         try:
@@ -267,13 +309,32 @@ class AgentLoop:
                 if self._abort.is_set():
                     return self._finish(steps, objective, STOP_ABORTED, started, dry_run)
 
+                # Ferramentas dinâmicas relevantes ao objetivo, contexto e passos ativos
+                active_tools = {s.tool for s in steps}
+                tools = registry.schema(
+                    objective=objective,
+                    session_context=ctx,
+                    active_tools=active_tools,
+                )
+
                 if len(steps) >= self.max_steps:
-                    return self._finish(steps, objective, STOP_MAX_STEPS, started, dry_run)
+                    final_answer = self._synthesize_on_max_steps(
+                        objective, tools, steps, started, dry_run, session_context=ctx
+                    )
+                    return self._finish(
+                        steps,
+                        objective,
+                        STOP_MAX_STEPS,
+                        started,
+                        dry_run,
+                        final_answer=final_answer,
+                    )
 
                 if time.monotonic() - started > self.max_seconds:
                     return self._finish(steps, objective, STOP_TIMEOUT, started, dry_run)
 
-                decision = self._ask_planner(objective, tools, steps, started, dry_run)
+                step_start_time = time.monotonic()
+                decision = self._ask_planner(objective, tools, steps, started, dry_run, session_context=ctx)
                 if decision is None:
                     return self._finish(steps, objective, STOP_ERROR, started, dry_run, error=self._last_error)
 
@@ -331,7 +392,8 @@ class AgentLoop:
                 step.observation = observation
                 if not step.ok:
                     step.error = str(observation.get("error") or observation.get("message") or "falha")
-                step.elapsed = round(time.monotonic() - started, 3)
+                # Tempo real gasto nesta etapa individual
+                step.elapsed = round(time.monotonic() - step_start_time, 3)
                 steps.append(step)
                 self._audit(objective, step)
 
@@ -358,14 +420,65 @@ class AgentLoop:
         steps: list[Step],
         started: float,
         dry_run: bool,
+        session_context: Sequence[dict[str, str]] | None = None,
     ) -> AgentDecision | None:
         self._last_error = ""
         try:
-            return self.planner.decide(objective, tools, [s.to_dict() for s in steps])
+            import inspect
+            sig = inspect.signature(self.planner.decide)
+            kwargs: dict[str, Any] = {}
+            if "session_context" in sig.parameters:
+                kwargs["session_context"] = session_context
+            if "max_steps" in sig.parameters:
+                kwargs["max_steps"] = self.max_steps
+            return self.planner.decide(
+                objective,
+                tools,
+                [s.to_dict() for s in steps],
+                **kwargs,
+            )
         except Exception as exc:
             logger.exception("Planejador '%s' falhou", getattr(self.planner, "name", "?"))
             self._last_error = f"{type(exc).__name__}: {exc}"
             return None
+
+    def _synthesize_on_max_steps(
+        self,
+        objective: str,
+        tools: list[dict[str, Any]],
+        steps: list[Step],
+        started: float,
+        dry_run: bool,
+        session_context: Sequence[dict[str, str]] | None = None,
+    ) -> str:
+        """Sintetiza os resultados obtidos quando o limite de passos é atingido."""
+        if not steps or self.planner is None:
+            return ""
+        # Não sintetiza em planejadores de script fixo (testes unitários determinísticos)
+        if not hasattr(self.planner, "provider") and getattr(self.planner, "name", "") == "scripted":
+            return ""
+        try:
+            synthesis_prompt = (
+                f"{objective}\n\n"
+                "[AVISO DE SISTEMA]: O limite de passos foi atingido antes da conclusão formal. "
+                "Com base exclusivamente nas etapas executadas e observações obtidas até aqui, "
+                "apresente uma resposta consolidada com o que foi descoberto e próximos passos recomendados."
+            )
+            decision = self._ask_planner(
+                synthesis_prompt,
+                tools,
+                steps,
+                started,
+                dry_run,
+                session_context=session_context,
+            )
+            if decision and decision.final_answer:
+                return decision.final_answer
+            if decision and decision.tool_call and decision.tool_call.name in FINISH_TOOLS:
+                return str(decision.tool_call.args.get("answer", "") or "")
+        except Exception:
+            logger.debug("Falha na síntese pós-limite de passos", exc_info=True)
+        return ""
 
     def _new_step(self, index: int, call: ToolCall, registry: ToolRegistry) -> Step | None:
         """Monta o passo. `None` = ferramenta de encerramento (`done`/`finish`)."""

@@ -19,9 +19,11 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import copy
 import logging
 import os
+import subprocess
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -41,6 +43,7 @@ FINISH_TOOLS = {"done", "finish"}
 MAX_TREE_CHARS = 6000
 MAX_LIST_ENTRIES = 50
 MAX_READ_CHARS = 4000
+DEFAULT_TOOL_TIMEOUT = 25.0
 
 #: Sentinel que marca "já tentamos construir e não deu" — evita repetir o import
 #: falho a cada passo do loop.
@@ -62,6 +65,8 @@ class ToolSpec:
     handler: Callable[[dict[str, Any]], dict[str, Any]]
     #: Ações que mexem no estado do desktop. Em dry-run viram observação sintética.
     mutating: bool = False
+    #: Tempo limite individual de execução em segundos (None usa default_timeout do registro).
+    timeout: float | None = None
 
 
 def _param(properties: dict[str, Any], required: list[str] | None = None) -> dict[str, Any]:
@@ -106,6 +111,7 @@ class ToolRegistry:
         dry_run: bool = False,
         max_tree_chars: int = MAX_TREE_CHARS,
         mcp_manager: Any | None = None,
+        default_timeout: float = DEFAULT_TOOL_TIMEOUT,
     ) -> None:
         self._inspector = inspector
         self._input_driver = input_driver
@@ -115,6 +121,8 @@ class ToolRegistry:
         self.dry_run = dry_run
         self.max_tree_chars = max_tree_chars
         self.mcp_manager = mcp_manager
+        self.default_timeout = float(default_timeout)
+        self._executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._specs: dict[str, ToolSpec] = {}
         self._register_builtins()
         if self.mcp_manager:
@@ -154,6 +162,19 @@ class ToolRegistry:
         clone = copy.copy(self)
         clone.dry_run = True
         return clone
+
+    def _get_executor(self) -> concurrent.futures.ThreadPoolExecutor:
+        if self._executor is None:
+            self._executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=4, thread_name_prefix="agent-tool"
+            )
+        return self._executor
+
+    def close(self) -> None:
+        """Libera a pool de threads do executor."""
+        if self._executor is not None:
+            self._executor.shutdown(wait=False, cancel_futures=True)
+            self._executor = None
 
     # -- resolução de componentes (lazy, sem gi em nível de módulo) --------- #
 
@@ -208,16 +229,74 @@ class ToolRegistry:
 
     # -- descrição para o modelo ------------------------------------------- #
 
-    def schema(self) -> list[dict[str, Any]]:
-        """Lista de ferramentas no formato esperado pelos provedores."""
+    def schema(
+        self,
+        objective: str | None = None,
+        session_context: Sequence[dict[str, str]] | None = None,
+        active_tools: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Lista de ferramentas no formato esperado pelos provedores, com filtro inteligente de relevância."""
+        specs = self._filter_relevant_specs(objective, session_context, active_tools)
         return [
             {
                 "name": spec.name,
                 "description": spec.description,
                 "parameters": spec.parameters,
             }
-            for spec in self._specs.values()
+            for spec in specs
         ]
+
+    def _filter_relevant_specs(
+        self,
+        objective: str | None = None,
+        session_context: Sequence[dict[str, str]] | None = None,
+        active_tools: set[str] | None = None,
+    ) -> list[ToolSpec]:
+        """Filtra ferramentas para reduzir a sobrecarga de tokens e acelerar o tempo de resposta."""
+        all_specs = list(self._specs.values())
+        if not objective:
+            return all_specs
+
+        query_text = objective.lower()
+        if session_context:
+            recent_turns = session_context[-3:]
+            context_text = " ".join(t.get("content", "") for t in recent_turns).lower()
+            query_text = f"{query_text} {context_text}"
+
+        mcp_triggers = {
+            "github": ("git", "commit", "repositór", "repositor", "branch", "pull request", "pr", "push", "diff", "sha", "github", "gh", "issue", "release", "clone"),
+            "git": ("git", "commit", "repositór", "repositor", "branch", "push", "diff", "sha", "log", "clone"),
+            "sqlite": ("sqlite", "sql", "banco", "tabela", "database", "comercial", "query", "select ", "insert "),
+            "duckduckgo": ("pesquis", "busca", "google", "web", "site", "internet", "notícia", "noticia", "artigo", "duckduckgo", "url", "http"),
+            "fetch": ("pesquis", "busca", "web", "site", "url", "http", "página", "pagina", "download", "ler site"),
+            "filesystem": ("arquivo", "pasta", "diretório", "diretorio", "ficheiro", "documento", "file", "folder", "path", "caminho", "ler", "salvar", "gravar", "projeto", "study-hub", "estudo"),
+        }
+
+        matched_servers = set()
+        for server, kws in mcp_triggers.items():
+            if any(kw in query_text for kw in kws):
+                matched_servers.add(server)
+
+        if active_tools:
+            for tool_name in active_tools:
+                if tool_name.startswith("mcp__"):
+                    parts = tool_name.split("__")
+                    if len(parts) >= 2:
+                        matched_servers.add(parts[1])
+
+        if not matched_servers:
+            matched_servers = {"filesystem", "duckduckgo"}
+
+        selected: list[ToolSpec] = []
+        for spec in all_specs:
+            if not spec.name.startswith("mcp__"):
+                selected.append(spec)
+            else:
+                parts = spec.name.split("__")
+                if len(parts) >= 2 and parts[1] in matched_servers:
+                    selected.append(spec)
+
+        return selected or all_specs
 
     def describe_for_prompt(self) -> str:
         """Descrição compacta para modelos locais sem suporte a function calling.
@@ -269,8 +348,26 @@ class ToolRegistry:
             }
 
         started = time.monotonic()
+        timeout = spec.timeout if spec.timeout is not None else self.default_timeout
+
         try:
-            result = spec.handler(args)
+            if timeout and timeout > 0:
+                future = self._get_executor().submit(spec.handler, args)
+                result = future.result(timeout=timeout)
+            else:
+                result = spec.handler(args)
+        except concurrent.futures.TimeoutError:
+            logger.warning("Ferramenta '%s' excedeu o timeout de %.1fs", name, timeout)
+            result = {
+                "ok": False,
+                "timeout": True,
+                "error": f"A ferramenta '{name}' excedeu o tempo limite individual de {timeout:.1f}s.",
+                "suggestion": (
+                    f"O recurso solicitado pela ferramenta '{name}' existe e o sistema está operacional, "
+                    "mas a operação demorou mais que o esperado. Não invente nem presuma o resultado; "
+                    "tente novamente com escopo reduzido ou parâmetros mais específicos."
+                ),
+            }
         except Exception as exc:  # nenhum tool pode derrubar o loop
             logger.exception("Ferramenta '%s' falhou", name)
             result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
@@ -694,6 +791,45 @@ class ToolRegistry:
                     required=["path"],
                 ),
                 handler=self._tool_open_document,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="git_log",
+                description=(
+                    "Consulta o histórico de commits do repositório Git local. "
+                    "Devolve hashes abreviados, autor, data relativa e mensagens de commit."
+                ),
+                parameters=_param(
+                    {
+                        "path": _str("Caminho do repositório ou pasta/arquivo específico (padrão '.')."),
+                        "max_count": _num("Número máximo de commits a listar (padrão 10, máximo 50)."),
+                        "revision_range": _str("Faixa de revisão ou branch (ex.: 'HEAD', 'main..feature')."),
+                        "file_path": _str("Filtrar apenas commits que alteraram este arquivo ou subdiretório."),
+                    },
+                    required=[],
+                ),
+                handler=self._tool_git_log,
+                timeout=12.0,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="git_status",
+                description=(
+                    "Inspeciona o estado atual do repositório Git local (branch atual, "
+                    "arquivos modificados, staged e untracked)."
+                ),
+                parameters=_param(
+                    {
+                        "path": _str("Caminho do repositório Git (padrão '.')."),
+                    },
+                    required=[],
+                ),
+                handler=self._tool_git_status,
+                timeout=8.0,
             )
         )
 
@@ -1251,6 +1387,138 @@ class ToolRegistry:
             return {"ok": bool(ok), "message": msg, "path": path}
         except Exception as exc:
             return {"ok": False, "error": f"Falha ao abrir documento: {exc}"}
+
+    def _tool_git_log(self, args: dict[str, Any]) -> dict[str, Any]:
+        raw_path = str(args.get("path") or ".").strip()
+        target_path = os.path.abspath(os.path.expanduser(raw_path))
+        if not os.path.exists(target_path):
+            return {
+                "ok": False,
+                "error": f"Caminho não encontrado: '{raw_path}'",
+                "suggestion": "Verifique o caminho do diretório ou arquivo do repositório.",
+            }
+
+        work_dir = target_path if os.path.isdir(target_path) else os.path.dirname(target_path)
+
+        try:
+            max_count = int(args.get("max_count") or 10)
+        except (ValueError, TypeError):
+            max_count = 10
+        max_count = max(1, min(max_count, 50))
+
+        cmd = ["git", "log", f"-n{max_count}", "--pretty=format:%h %ad | %s (%an)", "--date=short"]
+
+        rev_range = (args.get("revision_range") or "").strip()
+        if rev_range:
+            cmd.append(rev_range)
+
+        file_filter = (args.get("file_path") or "").strip()
+        if not file_filter and os.path.isfile(target_path):
+            file_filter = os.path.basename(target_path)
+
+        if file_filter:
+            cmd.extend(["--", file_filter])
+
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=work_dir,
+                capture_output=True,
+                text=True,
+                timeout=8.0,
+                check=False,
+            )
+        except FileNotFoundError:
+            return {
+                "ok": False,
+                "error": "O executável 'git' não está instalado ou disponível no PATH do sistema.",
+                "suggestion": "Instale o pacote git no sistema usando o gerenciador de pacotes.",
+            }
+        except subprocess.TimeoutExpired:
+            return {
+                "ok": False,
+                "timeout": True,
+                "error": f"A consulta de git log excedeu o limite de 8.0s em '{work_dir}'.",
+                "suggestion": (
+                    "O repositório Git existe e está acessível, mas a consulta ao histórico demorou muito. "
+                    "Tente reduzir 'max_count' para 5 ou especificar um arquivo em 'file_path'."
+                ),
+            }
+
+        if proc.returncode != 0:
+            err_msg = proc.stderr.strip() or f"git log encerrou com código {proc.returncode}"
+            return {
+                "ok": False,
+                "error": err_msg,
+                "suggestion": (
+                    "Verifique se o caminho especificado pertence a um repositório Git válido "
+                    "e se a branch ou revisão existe."
+                ),
+            }
+
+        output = proc.stdout.strip()
+        lines = [line.strip() for line in output.splitlines() if line.strip()]
+        return {
+            "ok": True,
+            "path": work_dir,
+            "count": len(lines),
+            "commits": lines,
+            "summary": output or "(Nenhum commit encontrado para os critérios fornecidos)",
+        }
+
+    def _tool_git_status(self, args: dict[str, Any]) -> dict[str, Any]:
+        raw_path = str(args.get("path") or ".").strip()
+        target_path = os.path.abspath(os.path.expanduser(raw_path))
+        if not os.path.exists(target_path):
+            return {
+                "ok": False,
+                "error": f"Caminho não encontrado: '{raw_path}'",
+                "suggestion": "Verifique o caminho do diretório do repositório.",
+            }
+
+        work_dir = target_path if os.path.isdir(target_path) else os.path.dirname(target_path)
+
+        cmd = ["git", "status", "--short", "--branch"]
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=work_dir,
+                capture_output=True,
+                text=True,
+                timeout=5.0,
+                check=False,
+            )
+        except FileNotFoundError:
+            return {
+                "ok": False,
+                "error": "O executável 'git' não está instalado ou disponível no PATH do sistema.",
+                "suggestion": "Instale o pacote git no sistema usando o gerenciador de pacotes.",
+            }
+        except subprocess.TimeoutExpired:
+            return {
+                "ok": False,
+                "timeout": True,
+                "error": f"A consulta de git status excedeu o limite de 5.0s em '{work_dir}'.",
+                "suggestion": (
+                    "O repositório Git é extenso ou há concorrência de I/O. "
+                    "Tente novamente em instantes."
+                ),
+            }
+
+        if proc.returncode != 0:
+            err_msg = proc.stderr.strip() or f"git status encerrou com código {proc.returncode}"
+            return {
+                "ok": False,
+                "error": err_msg,
+                "suggestion": "Verifique se o caminho pertence a um repositório Git válido.",
+            }
+
+        output = proc.stdout.strip()
+        return {
+            "ok": True,
+            "path": work_dir,
+            "status": output or "## (working tree clean, sem alterações pendentes)",
+        }
 
     def _tool_done(self, args: dict[str, Any]) -> dict[str, Any]:
         return {"ok": True, "answer": str(args.get("answer") or ""), "finished": True}

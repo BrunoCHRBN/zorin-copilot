@@ -312,6 +312,8 @@ class VoicePillWindow(Gtk.Window):
         self.timer_lbl = Gtk.Label(label="0:00", xalign=0)
         self.timer_lbl.add_css_class("caption")
         self.timer_lbl.add_css_class("dim-label")
+        self.timer_lbl.add_css_class("tabular-nums")
+        self.timer_lbl.add_css_class("timer-label")
         title_row.append(self.timer_lbl)
         self.timer_lbl.set_visible(False)
 

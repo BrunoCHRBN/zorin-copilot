@@ -100,6 +100,7 @@ class HeaderBarWidget:
 
         self.status_badge = Gtk.Label()
         self.status_badge.add_css_class("caption")
+        self.status_badge.add_css_class("tabular-nums")
         self.status_badge_btn.set_child(self.status_badge)
 
         self.fence_menu_btn = Gtk.MenuButton()
