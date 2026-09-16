@@ -20,7 +20,7 @@ gi.require_version("Pango", "1.0")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from .. import __app_id__
-from ..ai.actions import ActionPlan
+from ..ai.actions import ActionPlan, ActionType
 from ..ai.engine import IntentEngine
 from ..ai.live import GeminiLiveClient
 from ..core.a11y import DesktopInspector
