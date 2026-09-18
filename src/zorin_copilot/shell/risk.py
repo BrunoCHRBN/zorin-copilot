@@ -116,6 +116,19 @@ class RiskPolicy:
                     except Exception:
                         pass
 
+        if name == "run_command":
+            cmd = str(args.get("command", "")).strip().lower()
+            dangerous_tokens = (
+                "rm ", "rmdir", "shutdown", "reboot", "mkfs", "dd ", "chmod", "chown",
+                "> ", ">>", "sudo", "systemctl", "kill", "pkill", "git push", "git reset", "git clean",
+            )
+            if any(t in cmd for t in dangerous_tokens):
+                return RiskLevel.CONFIRM, f"execução de comando terminal sensível '{cmd[:60]}'"
+
+        if name in ("write_file", "edit_file"):
+            fpath = args.get("file_path") or args.get("path") or ""
+            return RiskLevel.CONFIRM, f"escrita ou modificação no arquivo '{fpath}'"
+
         return RiskLevel.SAFE, ""
 
 

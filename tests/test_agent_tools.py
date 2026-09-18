@@ -758,5 +758,47 @@ def test_vscode_workspace_patch_code_tool(tmp_path, monkeypatch):
     registry.close()
 
 
+def test_tool_registry_unified_tools():
+    registry = ToolRegistry()
+
+    # 1. run_command seguro
+    res_cmd = registry.call("run_command", {"command": "echo 'hello unified'"})
+    assert res_cmd["ok"] is True
+    assert "hello unified" in res_cmd["output"]
+
+    # 2. run_command com dry_run
+    dry_reg = registry.for_dry_run()
+    res_dry = dry_reg.call("run_command", {"command": "echo 'test'"})
+    assert res_dry["ok"] is True
+    assert res_dry.get("dry_run") is True
+
+    # 3. git_diff
+    res_diff = registry.call("git_diff", {"path": "."})
+    assert res_diff["ok"] is True
+    assert "diff" in res_diff
+
+    # 4. window_management
+    res_win = registry.call("window_management", {"action": "tile_right"})
+    assert res_win["ok"] is True
+
+    # 5. system_control
+    res_sys = registry.call("system_control", {"action": "dark_mode"})
+    assert "ok" in res_sys
+
+    # 6. memory_remember
+    res_mem = registry.call("memory_remember", {"fact": "usuário prefere tema escuro"})
+    assert res_mem["ok"] is True
+
+    # 7. contact_save & contact_lookup
+    res_save = registry.call("contact_save", {"name": "Carlos Dev", "email": "carlos@zorin.org"})
+    assert res_save["ok"] is True
+    res_find = registry.call("contact_lookup", {"query": "Carlos"})
+    assert res_find["ok"] is True
+    assert len(res_find["contacts"]) >= 1
+
+    registry.close()
+
+
+
 
 

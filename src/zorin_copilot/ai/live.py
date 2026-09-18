@@ -985,6 +985,102 @@ LIVE_TOOLS_DECLARATION = [
                     "required": ["confirmation_id", "approve"],
                 },
             },
+            {
+                "name": "git_log",
+                "description": "Consulta o histórico recente de commits em um repositório Git local, com autor, data e mensagem de commit.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "path": {
+                            "type": "STRING",
+                            "description": "Caminho do repositório Git (opcional, padrão '.' ou pasta atual).",
+                        },
+                        "max_count": {
+                            "type": "INTEGER",
+                            "description": "Quantidade máxima de commits a exibir (padrão 10).",
+                        },
+                        "file_path": {
+                            "type": "STRING",
+                            "description": "Filtrar commits de um arquivo específico.",
+                        },
+                    },
+                },
+            },
+            {
+                "name": "git_status",
+                "description": "Consulta o status do repositório Git local (branch atual, arquivos modificados, adicionados ou não rastreados).",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "path": {
+                            "type": "STRING",
+                            "description": "Caminho do repositório Git (opcional, padrão '.').",
+                        },
+                    },
+                },
+            },
+            {
+                "name": "git_diff",
+                "description": "Exibe as alterações e diferenças não commitadas (ou preparadas com staged=true) no repositório Git.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "path": {
+                            "type": "STRING",
+                            "description": "Caminho do repositório Git (opcional, padrão '.').",
+                        },
+                        "staged": {
+                            "type": "BOOLEAN",
+                            "description": "Se true, exibe diff de alterações no stage (--cached).",
+                        },
+                        "file_path": {
+                            "type": "STRING",
+                            "description": "Filtrar por arquivo específico.",
+                        },
+                    },
+                },
+            },
+            {
+                "name": "run_command",
+                "description": "Executa um comando no terminal Linux (Bash). Comandos de alto risco (ex: remoção, sudo, kill, git push) exigem confirmação verbal prévia.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "command": {
+                            "type": "STRING",
+                            "description": "Comando bash a ser executado no terminal.",
+                        },
+                        "cwd": {
+                            "type": "STRING",
+                            "description": "Diretório de trabalho opcional para execução.",
+                        },
+                        "timeout": {
+                            "type": "NUMBER",
+                            "description": "Tempo limite de execução em segundos (padrão 15s).",
+                        },
+                    },
+                    "required": ["command"],
+                },
+            },
+            {
+                "name": "window_management",
+                "description": "Gerencia janelas no desktop: alternar foco, minimizar, maximizar, restaurar, fechar ou posicionar lado a lado.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "action": {
+                            "type": "STRING",
+                            "enum": ["focus", "minimize", "maximize", "restore", "close", "tile_left", "tile_right"],
+                            "description": "Ação desejada na janela.",
+                        },
+                        "window": {
+                            "type": "STRING",
+                            "description": "Nome, classe ou título da janela alvo ('current' para a ativa).",
+                        },
+                    },
+                    "required": ["action"],
+                },
+            },
         ]
     }
 ]
@@ -998,6 +1094,7 @@ class GeminiLiveClient:
         config: CopilotConfig | None = None,
         executor: ActionExecutor | None = None,
         memory: MemoryManager | None = None,
+        mcp_manager: Any | None = None,
     ):
         self.config = config or CopilotConfig.load()
         self.executor = executor or ActionExecutor()
@@ -1021,6 +1118,17 @@ class GeminiLiveClient:
         self.cal_mgr = CalendarManager(memory=self.memory)
         self.rag = LocalDocumentRAG(memory=self.memory)
         self.inspector = getattr(self.executor, "inspector", None) or DesktopInspector()
+
+        from .agent_tools import ToolRegistry
+        active_mcp = mcp_manager or getattr(self.executor, "mcp_manager", None)
+        self.tool_registry = ToolRegistry(
+            inspector=self.inspector,
+            input_driver=self.input_driver,
+            fence=self.fence,
+            policy=self.risk_policy,
+            memory=self.memory,
+            mcp_manager=active_mcp,
+        )
         # Wrapper de reconexão lê este flag para suprimir a transição para
         # ERROR durante uma tentativa de reconexão (estado já é CONNECTING).
         self._reconnecting: bool = False
@@ -2883,6 +2991,24 @@ class GeminiLiveClient:
             if name == "end_session":
                 return self._tool_end_session(args)
 
+            if hasattr(self, "tool_registry") and self.tool_registry is not None:
+                if name in self.tool_registry.names():
+                    reg_res = self.tool_registry.call(name, args)
+                    is_ok = bool(reg_res.get("ok", reg_res.get("success", True)))
+                    reg_res["success"] = is_ok
+                    if "message" not in reg_res:
+                        if not is_ok:
+                            reg_res["message"] = reg_res.get("error", "Falha na execução da ferramenta.")
+                        elif "summary" in reg_res:
+                            reg_res["message"] = str(reg_res["summary"])
+                        elif "result" in reg_res:
+                            reg_res["message"] = str(reg_res["result"])
+                        elif "output" in reg_res:
+                            reg_res["message"] = str(reg_res["output"])
+                        else:
+                            reg_res["message"] = f"Ferramenta {name} executada com sucesso."
+                    return reg_res
+
             return {"success": False, "message": f"Ferramenta desconhecida: {name}"}
 
         except Exception as exc:
@@ -2939,18 +3065,25 @@ class GeminiLiveClient:
         Omite `end_session` quando o usuário desativou o encerramento autônomo
         nas preferências — assim o modelo nem chega a cogitar a ferramenta.
         A constante permanece intacta (testes a inspecionam diretamente).
+        Mescla dinamicamente ferramentas do ToolRegistry e servidores MCP ativos.
         """
         cfg = getattr(self, "config", None)
-        if cfg is None or bool(getattr(cfg, "end_session_enabled", True)):
-            return LIVE_TOOLS_DECLARATION
-        decls = LIVE_TOOLS_DECLARATION[0]["functionDeclarations"]
-        return [
-            {
-                "functionDeclarations": [
-                    f for f in decls if f.get("name") != "end_session"
-                ]
-            }
+        end_session_enabled = cfg is None or bool(getattr(cfg, "end_session_enabled", True))
+        decls = [
+            f for f in LIVE_TOOLS_DECLARATION[0]["functionDeclarations"]
+            if end_session_enabled or f.get("name") != "end_session"
         ]
+        declared_names = {f.get("name") for f in decls}
+
+        # Carrega dinamicamente ferramentas adicionais do ToolRegistry (MCP, etc)
+        if hasattr(self, "tool_registry") and self.tool_registry:
+            for spec_schema in self.tool_registry.schema():
+                s_name = spec_schema.get("name")
+                if s_name and s_name not in declared_names and s_name not in ("done", "finish"):
+                    decls.append(spec_schema)
+                    declared_names.add(s_name)
+
+        return [{"functionDeclarations": decls}]
 
     def _build_setup_payload(
         self,

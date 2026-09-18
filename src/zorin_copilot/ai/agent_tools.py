@@ -116,11 +116,13 @@ class ToolRegistry:
         max_tree_chars: int = MAX_TREE_CHARS,
         mcp_manager: Any | None = None,
         default_timeout: float = DEFAULT_TOOL_TIMEOUT,
+        memory: Any | None = None,
     ) -> None:
         self._inspector = inspector
         self._input_driver = input_driver
         self._undo_stack = undo_stack
         self._fence = fence
+        self._memory = memory
         self.policy = policy or RiskPolicy()
         self.dry_run = dry_run
         self.max_tree_chars = max_tree_chars
@@ -230,6 +232,17 @@ class ToolRegistry:
             return ScreenFenceManager()
 
         return self._component("_fence", build)
+
+    @property
+    def memory(self) -> Any | None:
+        """Gerenciador de memória persistente."""
+
+        def build() -> Any:
+            from ..core.memory import MemoryManager
+
+            return MemoryManager()
+
+        return self._component("_memory", build)
 
     # -- descrição para o modelo ------------------------------------------- #
 
@@ -1019,6 +1032,293 @@ class ToolRegistry:
                     }
                 ),
                 handler=self._tool_smart_home_status,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="system_control",
+                description="Controla configurações do sistema operacional (volume, modo escuro/claro, mudo, tela de bloqueio).",
+                parameters=_param(
+                    {
+                        "action": {
+                            "type": "STRING",
+                            "enum": ["volume_set", "volume_up", "volume_down", "mute", "dark_mode", "light_mode", "lock"],
+                            "description": "Ação de controle do sistema.",
+                        },
+                        "value": _str("Valor opcional (ex: '80' para volume_set)."),
+                    },
+                    required=["action"],
+                ),
+                mutating=True,
+                handler=self._tool_system_control,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="get_system_info",
+                description="Obtém métricas do computador em tempo real: uso de CPU, memória RAM, bateria e versão do Zorin OS.",
+                parameters=_param({}),
+                handler=self._tool_get_system_info,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="screen_fence_control",
+                description="Controla a cerca de segurança espacial e qual monitor físico está autorizado para receber cliques e automações.",
+                parameters=_param(
+                    {
+                        "monitor": _str("Identificador do monitor ou modo ('principal', 'secundaria', 'all')."),
+                    },
+                    required=["monitor"],
+                ),
+                handler=self._tool_screen_fence_control,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="move_window_to_monitor",
+                description="Move ou arrasta uma janela específica ou ativa de um monitor para outro.",
+                parameters=_param(
+                    {
+                        "target_monitor": _str("Monitor de destino ('principal', 'secundario', 'outro', '0', '1')."),
+                        "window": _str("Nome ou título da janela ('current' para a ativa)."),
+                    },
+                    required=["target_monitor"],
+                ),
+                mutating=True,
+                handler=self._tool_move_window_to_monitor,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="window_management",
+                description="Gerencia janelas abertas no desktop: alternar foco, minimizar, maximizar, restaurar, fechar ou posicionar lado a lado.",
+                parameters=_param(
+                    {
+                        "action": {
+                            "type": "STRING",
+                            "enum": ["focus", "minimize", "maximize", "restore", "close", "tile_left", "tile_right"],
+                            "description": "Ação desejada na janela.",
+                        },
+                        "window": _str("Nome, título ou identificador da janela alvo ('current' para a janela ativa)."),
+                    },
+                    required=["action"],
+                ),
+                mutating=True,
+                handler=self._tool_window_management,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="run_command",
+                description="Executa um comando no terminal Linux (Bash) e retorna saída, erros e código de retorno. Comandos destrutivos exigem confirmação.",
+                parameters=_param(
+                    {
+                        "command": _str("Comando de terminal bash a ser executado."),
+                        "cwd": _str("Diretório de trabalho opcional."),
+                        "timeout": _num("Tempo limite em segundos (padrão 15s)."),
+                    },
+                    required=["command"],
+                ),
+                mutating=True,
+                handler=self._tool_run_command,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="git_diff",
+                description="Exibe as diferenças não commitadas (ou preparadas com --staged) no repositório Git.",
+                parameters=_param(
+                    {
+                        "path": _str("Caminho do diretório do repositório (padrão '.')."),
+                        "staged": _bool("Se true, exibe o diff das alterações preparadas (--cached/staged)."),
+                        "file_path": _str("Filtrar por arquivo específico."),
+                    },
+                    required=[],
+                ),
+                handler=self._tool_git_diff,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="contact_lookup",
+                description="Consulta os contatos salvos pelo nome, apelido ou e-mail na memória permanente do usuário.",
+                parameters=_param(
+                    {"query": _str("Nome, apelido ou termo de busca do contato.")},
+                    required=["query"],
+                ),
+                handler=self._tool_contact_lookup,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="contact_save",
+                description="Salva um novo contato ou atualiza informações na memória permanente do usuário.",
+                parameters=_param(
+                    {
+                        "name": _str("Nome completo do contato."),
+                        "email": _str("Endereço de e-mail."),
+                        "aliases": {"type": "ARRAY", "items": {"type": "STRING"}, "description": "Apelidos ou funções."},
+                        "notes": _str("Anotações adicionais."),
+                    },
+                    required=["name", "email"],
+                ),
+                mutating=True,
+                handler=self._tool_contact_save,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="memory_remember",
+                description="Memoriza um fato ou preferência dita pelo usuário para disponibilização imediata e futura.",
+                parameters=_param(
+                    {
+                        "fact": _str("O fato ou preferência a memorizar."),
+                        "category": _str("Categoria opcional (ex: 'preferencia', 'projeto')."),
+                    },
+                    required=["fact"],
+                ),
+                mutating=True,
+                handler=self._tool_memory_remember,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="email_compose",
+                description="Prepara e abre o cliente de e-mail (Thunderbird ou Webmail) com destinatário, assunto e corpo prontos.",
+                parameters=_param(
+                    {
+                        "recipient": _str("Endereço de e-mail de destino."),
+                        "subject": _str("Assunto do e-mail."),
+                        "body": _str("Corpo da mensagem."),
+                        "client": _str("Cliente de e-mail ('auto', 'gmail', 'native')."),
+                    },
+                    required=["recipient"],
+                ),
+                mutating=True,
+                handler=self._tool_email_compose,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="calendar_event",
+                description="Gerencia compromissos e lembretes na agenda/calendário do Zorin OS (criar, listar e remover).",
+                parameters=_param(
+                    {
+                        "action": {
+                            "type": "STRING",
+                            "enum": ["create", "list", "delete"],
+                            "description": "Ação de calendário a realizar.",
+                        },
+                        "title": _str("Título do compromisso (para 'create')."),
+                        "datetime_str": _str("Data e hora (ex: 'amanhã às 10h')."),
+                        "duration_minutes": _int("Duração em minutos (padrão 60)."),
+                        "description": _str("Descrição do evento."),
+                        "location": _str("Local ou link."),
+                        "event_id": _str("ID do evento (para 'delete')."),
+                    },
+                    required=["action"],
+                ),
+                mutating=True,
+                handler=self._tool_calendar_event,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="browser_search",
+                description="Abre o navegador padrão com uma pesquisa direcionada no Google, YouTube, GitHub, Maps ou Wikipedia.",
+                parameters=_param(
+                    {
+                        "query": _str("Termo de pesquisa."),
+                        "engine": _str("Motor de busca ('google', 'youtube', 'github', 'wikipedia')."),
+                    },
+                    required=["query"],
+                ),
+                mutating=True,
+                handler=self._tool_browser_search,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="search_documents",
+                description="Pesquisa na base local de documentos do usuário (PDFs, anotações, contratos) usando busca semântica.",
+                parameters=_param(
+                    {
+                        "query": _str("Termo de busca ou pergunta sobre os documentos."),
+                        "limit": _int("Máximo de trechos a retornar (padrão 4)."),
+                    },
+                    required=["query"],
+                ),
+                handler=self._tool_search_documents,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="read_document_page",
+                description="Lê o conteúdo textual de uma página específica de um documento local.",
+                parameters=_param(
+                    {
+                        "file_path": _str("Caminho absoluto do arquivo."),
+                        "page_number": _int("Número da página (padrão 1)."),
+                    },
+                    required=["file_path"],
+                ),
+                handler=self._tool_read_document_page,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="open_document_file",
+                description="Abre um documento local no visualizador nativo do desktop (Evince na página exata se PDF).",
+                parameters=_param(
+                    {
+                        "file_path": _str("Caminho do arquivo local a ser aberto."),
+                        "page_number": _int("Página específica para abrir (padrão 1)."),
+                    },
+                    required=["file_path"],
+                ),
+                mutating=True,
+                handler=self._tool_open_document_file,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="read_open_webpage",
+                description="Lê o conteúdo da página ou artigo atualmente aberto no navegador ou de uma URL informada.",
+                parameters=_param(
+                    {"url": _str("URL específica opcional para leitura.")},
+                    required=[],
+                ),
+                handler=self._tool_read_open_webpage,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="deep_web_search",
+                description="Realiza pesquisa aprofundada na web, navegando e consolidando múltiplos artigos com fontes.",
+                parameters=_param(
+                    {"query": _str("Tema ou pergunta a ser pesquisada profundamente.")},
+                    required=["query"],
+                ),
+                handler=self._tool_deep_web_search,
             )
         )
 
@@ -1833,7 +2133,9 @@ class ToolRegistry:
             err_msg = proc.stderr.strip() or f"git log encerrou com código {proc.returncode}"
             return {
                 "ok": False,
+                "success": False,
                 "error": err_msg,
+                "message": f"Erro no Git: {err_msg}",
                 "suggestion": (
                     "Verifique se o caminho especificado pertence a um repositório Git válido "
                     "e se a branch ou revisão existe."
@@ -1842,12 +2144,16 @@ class ToolRegistry:
 
         output = proc.stdout.strip()
         lines = [line.strip() for line in output.splitlines() if line.strip()]
+        repo_name = os.path.basename(work_dir)
+        msg = f"Encontrados {len(lines)} commits em '{repo_name}':\n{output}" if lines else f"Nenhum commit encontrado em '{repo_name}'."
         return {
             "ok": True,
+            "success": True,
             "path": work_dir,
             "count": len(lines),
             "commits": lines,
             "summary": output or "(Nenhum commit encontrado para os critérios fornecidos)",
+            "message": msg,
         }
 
     def _tool_git_status(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -1856,7 +2162,9 @@ class ToolRegistry:
         if not os.path.exists(target_path):
             return {
                 "ok": False,
+                "success": False,
                 "error": f"Caminho não encontrado: '{raw_path}'",
+                "message": f"Caminho não encontrado: '{raw_path}'",
                 "suggestion": "Verifique o caminho do diretório do repositório.",
             }
 
@@ -1875,14 +2183,18 @@ class ToolRegistry:
         except FileNotFoundError:
             return {
                 "ok": False,
+                "success": False,
                 "error": "O executável 'git' não está instalado ou disponível no PATH do sistema.",
+                "message": "Git não está instalado no sistema.",
                 "suggestion": "Instale o pacote git no sistema usando o gerenciador de pacotes.",
             }
         except subprocess.TimeoutExpired:
             return {
                 "ok": False,
+                "success": False,
                 "timeout": True,
                 "error": f"A consulta de git status excedeu o limite de 5.0s em '{work_dir}'.",
+                "message": "Tempo limite de 5s excedido no git status.",
                 "suggestion": (
                     "O repositório Git é extenso ou há concorrência de I/O. "
                     "Tente novamente em instantes."
@@ -1893,15 +2205,22 @@ class ToolRegistry:
             err_msg = proc.stderr.strip() or f"git status encerrou com código {proc.returncode}"
             return {
                 "ok": False,
+                "success": False,
                 "error": err_msg,
+                "message": f"Erro no Git: {err_msg}",
                 "suggestion": "Verifique se o caminho pertence a um repositório Git válido.",
             }
 
         output = proc.stdout.strip()
+        clean_status = output or "## (working tree clean, sem alterações pendentes)"
+        repo_name = os.path.basename(work_dir)
+        msg = f"Status Git em '{repo_name}':\n{clean_status}"
         return {
             "ok": True,
+            "success": True,
             "path": work_dir,
-            "status": output or "## (working tree clean, sem alterações pendentes)",
+            "status": clean_status,
+            "message": msg,
         }
 
     def _tool_media_control(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -2076,6 +2395,427 @@ class ToolRegistry:
         except Exception as exc:
             logger.exception("Falha ao consultar estado da casa inteligente: %s", exc)
             return {"ok": False, "error": f"Falha ao consultar Home Assistant: {exc}"}
+
+    def _tool_system_control(self, args: dict[str, Any]) -> dict[str, Any]:
+        action = str(args.get("action") or "").strip().lower()
+        value = str(args.get("value") or "").strip()
+        from ..shell.system import SystemController
+
+        if action in ("dark_mode", "modo_escuro"):
+            ok, msg = SystemController.set_color_scheme(True)
+            return {"ok": ok, "success": ok, "message": msg}
+        elif action in ("light_mode", "modo_claro"):
+            ok, msg = SystemController.set_color_scheme(False)
+            return {"ok": ok, "success": ok, "message": msg}
+        elif action in ("mute", "mudo"):
+            ok, msg = SystemController.adjust_volume("mute")
+            return {"ok": ok, "success": ok, "message": msg}
+        elif action in ("volume_up", "aumentar_volume"):
+            ok, msg = SystemController.adjust_volume("up")
+            return {"ok": ok, "success": ok, "message": msg}
+        elif action in ("volume_down", "diminuir_volume"):
+            ok, msg = SystemController.adjust_volume("down")
+            return {"ok": ok, "success": ok, "message": msg}
+        elif action in ("volume_set", "definir_volume"):
+            import shutil
+            wpctl = shutil.which("wpctl")
+            val_num = "".join(c for c in value if c.isdigit())
+            if wpctl and val_num:
+                target_fraction = f"{float(val_num) / 100.0:.2f}"
+                subprocess.run([wpctl, "set-volume", "@DEFAULT_AUDIO_SINK@", target_fraction], check=False)
+                return {"ok": True, "success": True, "message": f"Volume definido para {val_num}%."}
+            ok, msg = SystemController.adjust_volume("up")
+            return {"ok": ok, "success": ok, "message": f"Volume ajustado para {value or 'padrão'}."}
+        elif action in ("lock", "bloquear"):
+            ok, msg = SystemController.lock_session()
+            return {"ok": ok, "success": ok, "message": msg}
+        return {"ok": False, "success": False, "error": f"Ação de controle do sistema desconhecida: '{action}'"}
+
+    def _tool_get_system_info(self, args: dict[str, Any]) -> dict[str, Any]:
+        profile = self.memory.get_system_profile() if self.memory else {}
+        import psutil
+        vm = psutil.virtual_memory()
+        cpu = psutil.cpu_percent(interval=0.05)
+        os_name = profile.get("os_name", "Zorin OS")
+        ram_used = round((vm.total - vm.available) / (1024 ** 3), 1)
+        ram_total = round(vm.total / (1024 ** 3), 1)
+        battery = profile.get("battery_status", "AC Conectado")
+        msg = f"Sistema: {os_name} | CPU: {cpu}% | RAM: {ram_used}GB de {ram_total}GB | Bateria: {battery}"
+        return {
+            "ok": True,
+            "success": True,
+            "os": os_name,
+            "cpu_usage_percent": cpu,
+            "ram_used_gb": ram_used,
+            "ram_total_gb": ram_total,
+            "battery": battery,
+            "message": msg,
+        }
+
+    def _tool_screen_fence_control(self, args: dict[str, Any]) -> dict[str, Any]:
+        monitor = str(args.get("monitor") or "principal").strip()
+        fence = self.fence
+        if fence is None:
+            return {"ok": False, "success": False, "error": "Cerca de tela indisponível no ambiente."}
+        ok = fence.set_active_monitor(monitor)
+        m = fence.get_active_monitor()
+        name_str = m.name if m else monitor
+        msg = f"Cerca de tela definida para o monitor '{name_str}'." if ok else f"Monitor '{monitor}' não localizado."
+        return {"ok": ok, "success": ok, "monitor": name_str, "message": msg}
+
+    def _tool_move_window_to_monitor(self, args: dict[str, Any]) -> dict[str, Any]:
+        target_mon = str(args.get("target_monitor") or "outro").strip()
+        window_query = str(args.get("window") or "current").strip()
+        from ..core.window_manager import WindowManager
+        res = WindowManager.move_windows(window_query, target_mon, drag_visual=True)
+        if isinstance(res, dict):
+            res.setdefault("ok", res.get("success", True))
+        return res
+
+    def _tool_window_management(self, args: dict[str, Any]) -> dict[str, Any]:
+        action = str(args.get("action") or "focus").strip().lower()
+        win_query = str(args.get("window") or "current").strip()
+        from ..core.window_manager import WindowManager
+
+        target_win = None
+        if win_query in ("current", "active", "ativa", "atual", ""):
+            target_win = WindowManager.get_active_or_last_window()
+        else:
+            target_win = WindowManager.find_window(win_query)
+
+        if action == "focus":
+            if not target_win:
+                return {"ok": False, "success": False, "error": f"Janela '{win_query}' não encontrada para focar."}
+            ok = WindowManager.focus_window(target_win.id)
+            msg = f"Foco alterado para '{target_win.display_name()}'." if ok else f"Falha ao focar janela '{win_query}'."
+            return {"ok": ok, "success": ok, "message": msg, "window": target_win.display_name()}
+
+        import shutil
+        if action == "close":
+            if shutil.which("hyprctl") and target_win:
+                proc = subprocess.run(["hyprctl", "dispatch", "closewindow", f"address:{target_win.id}"], capture_output=True, check=False)
+                ok = proc.returncode == 0
+                return {"ok": ok, "success": ok, "message": f"Janela '{target_win.display_name()}' fechada." if ok else "Falha ao fechar janela."}
+            elif shutil.which("wmctrl") and target_win:
+                subprocess.run(["wmctrl", "-c", target_win.title or target_win.app], capture_output=True, check=False)
+                return {"ok": True, "success": True, "message": f"Comando de fechar enviado para '{target_win.display_name()}'."}
+            elif shutil.which("xdotool") and target_win:
+                subprocess.run(["xdotool", "windowclose", target_win.id], capture_output=True, check=False)
+                return {"ok": True, "success": True, "message": f"Janela '{target_win.display_name()}' fechada via xdotool."}
+            return {"ok": False, "success": False, "error": "Compositor sem suporte para fechar janela programaticamente."}
+
+        if action in ("maximize", "restore", "minimize"):
+            if shutil.which("hyprctl"):
+                if action == "maximize":
+                    subprocess.run(["hyprctl", "dispatch", "fullscreen", "1"], capture_output=True, check=False)
+                elif action == "restore":
+                    subprocess.run(["hyprctl", "dispatch", "fullscreen", "0"], capture_output=True, check=False)
+                elif action == "minimize" and target_win:
+                    subprocess.run(["hyprctl", "dispatch", "movetoworkspacesilent", f"special:minimized,address:{target_win.id}"], capture_output=True, check=False)
+                return {"ok": True, "success": True, "message": f"Ação '{action}' aplicada na janela."}
+            elif shutil.which("wmctrl") and target_win:
+                flag = "add" if action == "maximize" else "remove"
+                subprocess.run(["wmctrl", "-r", target_win.title or target_win.app, "-b", f"{flag},maximized_vert,maximized_horz"], capture_output=True, check=False)
+                return {"ok": True, "success": True, "message": f"Ação '{action}' aplicada via wmctrl."}
+            return {"ok": True, "success": True, "message": f"Ação '{action}' solicitada."}
+
+        if action in ("tile_left", "tile_right"):
+            if shutil.which("hyprctl"):
+                dir_key = "l" if action == "tile_left" else "r"
+                subprocess.run(["hyprctl", "dispatch", "movewindow", dir_key], capture_output=True, check=False)
+                return {"ok": True, "success": True, "message": f"Janela posicionada para {'esquerda' if dir_key == 'l' else 'direita'}."}
+            return {"ok": True, "success": True, "message": f"Ação '{action}' solicitada."}
+
+        return {"ok": False, "success": False, "error": f"Ação '{action}' não suportada para gerenciamento de janelas."}
+
+    def _tool_run_command(self, args: dict[str, Any]) -> dict[str, Any]:
+        command = str(args.get("command") or "").strip()
+        if not command:
+            return {"ok": False, "success": False, "error": "Nenhum comando fornecido."}
+
+        raw_cwd = args.get("cwd")
+        work_dir = os.path.abspath(os.path.expanduser(raw_cwd)) if raw_cwd else None
+        if work_dir and not os.path.isdir(work_dir):
+            return {
+                "ok": False,
+                "success": False,
+                "error": f"Diretório de trabalho não encontrado: '{raw_cwd}'",
+            }
+
+        try:
+            timeout = float(args.get("timeout") or 15.0)
+        except (ValueError, TypeError):
+            timeout = 15.0
+        timeout = max(1.0, min(timeout, 60.0))
+
+        try:
+            proc = subprocess.run(
+                command,
+                shell=True,
+                cwd=work_dir,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+            output = proc.stdout.strip()
+            err = proc.stderr.strip()
+            is_ok = proc.returncode == 0
+            msg = output if is_ok else (err or f"Comando encerrou com código {proc.returncode}")
+            return {
+                "ok": is_ok,
+                "success": is_ok,
+                "exit_code": proc.returncode,
+                "stdout": proc.stdout,
+                "stderr": proc.stderr,
+                "output": output or err,
+                "message": msg or f"Comando executado (código {proc.returncode}).",
+            }
+        except subprocess.TimeoutExpired:
+            return {
+                "ok": False,
+                "success": False,
+                "timeout": True,
+                "error": f"O comando excedeu o limite de {timeout:.1f}s.",
+                "message": f"Tempo limite de {timeout:.1f}s excedido.",
+            }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "success": False,
+                "error": f"Falha ao executar comando: {exc}",
+                "message": f"Erro de execução: {exc}",
+            }
+
+    def _tool_git_diff(self, args: dict[str, Any]) -> dict[str, Any]:
+        raw_path = str(args.get("path") or ".").strip()
+        target_path = os.path.abspath(os.path.expanduser(raw_path))
+        if not os.path.exists(target_path):
+            return {
+                "ok": False,
+                "success": False,
+                "error": f"Caminho não encontrado: '{raw_path}'",
+                "message": f"Caminho não encontrado: '{raw_path}'",
+            }
+        work_dir = target_path if os.path.isdir(target_path) else os.path.dirname(target_path)
+        cmd = ["git", "diff"]
+        if args.get("staged"):
+            cmd.append("--cached")
+        fpath = (args.get("file_path") or "").strip()
+        if fpath:
+            cmd.extend(["--", fpath])
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=work_dir,
+                capture_output=True,
+                text=True,
+                timeout=8.0,
+                check=False,
+            )
+        except Exception as exc:
+            return {"ok": False, "success": False, "error": str(exc), "message": f"Erro: {exc}"}
+        if proc.returncode != 0:
+            err = proc.stderr.strip() or f"git diff retornou {proc.returncode}"
+            return {"ok": False, "success": False, "error": err, "message": err}
+        out = proc.stdout.strip()
+        return {
+            "ok": True,
+            "success": True,
+            "path": work_dir,
+            "diff": out or "(Nenhuma diferença detectada)",
+            "message": out[:1000] if out else "Nenhuma alteração detectada.",
+        }
+
+    def _tool_contact_lookup(self, args: dict[str, Any]) -> dict[str, Any]:
+        q = str(args.get("query") or "").strip()
+        if not self.memory:
+            return {"ok": False, "success": False, "error": "Gerenciador de memória indisponível."}
+        contacts = self.memory.find_contact(q)
+        formatted = [
+            {"name": c["name"], "email": c["email"], "aliases": c.get("aliases", []), "notes": c.get("notes", "")}
+            for c in contacts
+        ]
+        if formatted:
+            return {
+                "ok": True,
+                "success": True,
+                "contacts": formatted,
+                "message": f"{len(formatted)} contato(s) localizado(s).",
+            }
+        return {
+            "ok": False,
+            "success": False,
+            "contacts": [],
+            "message": f"Nenhum contato encontrado para '{q}'.",
+        }
+
+    def _tool_contact_save(self, args: dict[str, Any]) -> dict[str, Any]:
+        c_name = str(args.get("name") or "").strip()
+        c_email = str(args.get("email") or "").strip()
+        c_aliases = args.get("aliases") or []
+        c_notes = str(args.get("notes") or "").strip()
+        if not self.memory:
+            return {"ok": False, "success": False, "error": "Gerenciador de memória indisponível."}
+        saved = self.memory.save_contact(name=c_name, email=c_email, aliases=c_aliases, notes=c_notes)
+        return {
+            "ok": True,
+            "success": True,
+            "contact": saved,
+            "message": f"Contato '{c_name}' <{c_email}> salvo com sucesso.",
+        }
+
+    def _tool_memory_remember(self, args: dict[str, Any]) -> dict[str, Any]:
+        fact = str(args.get("fact") or "").strip()
+        if not fact:
+            return {"ok": False, "success": False, "error": "Nenhum fato informado para memorizar."}
+        category = str(args.get("category") or "").strip() or "preferencia"
+        if not self.memory:
+            return {"ok": False, "success": False, "error": "Gerenciador de memória indisponível."}
+        key = " ".join(fact.lower().split())[:48]
+        self.memory.save_fact(key, fact, category=category, source="tool_registry")
+        return {
+            "ok": True,
+            "success": True,
+            "message": f"Fato memorizado com sucesso: '{fact}'.",
+        }
+
+    def _tool_email_compose(self, args: dict[str, Any]) -> dict[str, Any]:
+        from ..core.email import EmailManager
+        recip = str(args.get("recipient") or "").strip()
+        subj = str(args.get("subject") or "").strip()
+        body = str(args.get("body") or "").strip()
+        client = str(args.get("client") or "auto").strip()
+        mgr = EmailManager(memory=self.memory)
+        ok, msg, data = mgr.compose(recip, subject=subj, body=body, client=client)
+        return {"ok": ok, "success": ok, "message": msg, "details": data}
+
+    def _tool_calendar_event(self, args: dict[str, Any]) -> dict[str, Any]:
+        from ..core.calendar import CalendarManager
+        act = str(args.get("action") or "create").strip()
+        mgr = CalendarManager(memory=self.memory)
+        if act == "create":
+            t = str(args.get("title") or "").strip()
+            dt_str = str(args.get("datetime_str") or "amanhã às 10h").strip()
+            try:
+                dur = int(args.get("duration_minutes") or 60)
+            except (ValueError, TypeError):
+                dur = 60
+            desc = str(args.get("description") or "").strip()
+            loc = str(args.get("location") or "").strip()
+            ok, msg, data = mgr.create_event(t, dt_str, duration_minutes=dur, description=desc, location=loc)
+            return {"ok": ok, "success": ok, "message": msg, "event": data}
+        elif act == "list":
+            day = str(args.get("datetime_str") or "today").strip()
+            events = mgr.list_events(day)
+            return {"ok": True, "success": True, "events": events, "count": len(events), "message": f"{len(events)} compromisso(s) encontrado(s)."}
+        elif act == "delete":
+            eid = str(args.get("event_id") or "").strip()
+            ok = mgr.delete_event(eid)
+            msg = f"Compromisso {eid} removido." if ok else "Evento não encontrado."
+            return {"ok": ok, "success": ok, "message": msg}
+        return {"ok": False, "success": False, "error": f"Ação de calendário desconhecida: '{act}'"}
+
+    def _tool_browser_search(self, args: dict[str, Any]) -> dict[str, Any]:
+        from ..core.browser import BrowserManager
+        q = str(args.get("query") or "").strip()
+        eng = str(args.get("engine") or "google").strip()
+        ok, msg, url = BrowserManager.search(q, engine=eng)
+        return {"ok": ok, "success": ok, "message": msg, "url": url}
+
+    def _tool_search_documents(self, args: dict[str, Any]) -> dict[str, Any]:
+        from ..core.rag import LocalDocumentRAG
+        q = str(args.get("query") or "").strip()
+        try:
+            lim = int(args.get("limit") or 4)
+        except (ValueError, TypeError):
+            lim = 4
+        rag = LocalDocumentRAG(memory=self.memory)
+        results = rag.search(q, limit=lim)
+        formatted = [r.to_dict() for r in results]
+        if formatted:
+            citations = "\n".join([r.format_citation() for r in results])
+            return {
+                "ok": True,
+                "success": True,
+                "count": len(formatted),
+                "results": formatted,
+                "citations": citations,
+                "message": f"{len(formatted)} trecho(s) relevante(s) encontrado(s) nos seus documentos.",
+            }
+        return {
+            "ok": False,
+            "success": False,
+            "count": 0,
+            "results": [],
+            "message": f"Nenhum documento encontrado para a busca '{q}'.",
+        }
+
+    def _tool_read_document_page(self, args: dict[str, Any]) -> dict[str, Any]:
+        from ..core.rag import LocalDocumentRAG
+        fpath = str(args.get("file_path") or "").strip()
+        try:
+            pnum = int(args.get("page_number") or 1)
+        except (ValueError, TypeError):
+            pnum = 1
+        rag = LocalDocumentRAG(memory=self.memory)
+        page_text = rag.read_document_page(fpath, page_number=pnum)
+        if page_text:
+            return {
+                "ok": True,
+                "success": True,
+                "page_number": pnum,
+                "file_path": fpath,
+                "content": page_text,
+                "message": f"Página {pnum} lida com sucesso ({len(page_text)} caracteres).",
+            }
+        return {
+            "ok": False,
+            "success": False,
+            "error": f"Não foi possível ler a página {pnum} do arquivo '{fpath}'.",
+            "message": f"Não foi possível ler a página {pnum} do arquivo '{fpath}'.",
+        }
+
+    def _tool_open_document_file(self, args: dict[str, Any]) -> dict[str, Any]:
+        from ..core.rag import LocalDocumentRAG
+        fpath = str(args.get("file_path") or "").strip()
+        try:
+            pnum = int(args.get("page_number") or 1)
+        except (ValueError, TypeError):
+            pnum = 1
+        rag = LocalDocumentRAG(memory=self.memory)
+        ok, msg = rag.open_document(fpath, page_number=pnum)
+        return {"ok": ok, "success": ok, "message": msg}
+
+    def _tool_read_open_webpage(self, args: dict[str, Any]) -> dict[str, Any]:
+        from ..core.browser import BrowserManager
+        url_param = str(args.get("url") or "").strip() or None
+        res = BrowserManager.read_page(url_param)
+        is_ok = bool(res.get("success"))
+        return {
+            "ok": is_ok,
+            "success": is_ok,
+            "title": res.get("title", ""),
+            "url": res.get("url", ""),
+            "content": res.get("text", "")[:4000],
+            "message": f"Conteúdo da página '{res.get('title', '')}' lido com sucesso." if is_ok else res.get("text", "Falha ao ler página web."),
+        }
+
+    def _tool_deep_web_search(self, args: dict[str, Any]) -> dict[str, Any]:
+        from ..core.web_search import DeepWebResearcher, WebSearchClient
+        q = str(args.get("query") or "").strip()
+        researcher = DeepWebResearcher(WebSearchClient())
+        res = researcher.deep_search(q)
+        is_ok = bool(res.get("success"))
+        return {
+            "ok": is_ok,
+            "success": is_ok,
+            "query": q,
+            "summary": res.get("summary", ""),
+            "sources": res.get("sources", []),
+            "report": res.get("report", ""),
+            "message": f"Pesquisa profunda sobre '{q}' concluída." if is_ok else res.get("summary", "Falha na pesquisa profunda."),
+        }
 
     def _tool_done(self, args: dict[str, Any]) -> dict[str, Any]:
         return {"ok": True, "answer": str(args.get("answer") or ""), "finished": True}

@@ -1800,9 +1800,15 @@ class CopilotWindow(Adw.ApplicationWindow):
                     config=self.config,
                     executor=self.executor,
                     memory=self.engine.memory,
+                    mcp_manager=getattr(self, "mcp_manager", None),
                 )
             toast_msg = "Conversa ao vivo iniciada. Pode falar..."
 
+        if hasattr(self.live_client, "tool_registry") and self.live_client.tool_registry:
+            mcp_mgr = getattr(self, "mcp_manager", None)
+            if mcp_mgr:
+                self.live_client.tool_registry.mcp_manager = mcp_mgr
+                self.live_client.tool_registry.load_mcp_tools(mcp_mgr)
         if hasattr(self.live_client, "rag"):
             self.live_client.rag = self.rag
         if hasattr(self.live_client, "fence"):

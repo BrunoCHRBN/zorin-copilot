@@ -654,6 +654,83 @@ class LiveSetupAndVoiceTest(unittest.TestCase):
         self.assertEqual(client.config.gemini_live_model, "models/gemini-3.8-live-extended-thinking")
 
 
+class LiveUnifiedToolsTest(unittest.TestCase):
+    """Testes para a unificação de ferramentas, Git nativo, terminal e MCP no Gemini Live."""
+
+    def setUp(self):
+        self.config = CopilotConfig(gemini_api_key="fake-key-live")
+        self.client = GeminiLiveClient(config=self.config)
+
+    def test_dispatch_tool_git_log_and_status(self):
+        """Testa o despacho de git_log e git_status pelo cliente Live via ToolRegistry unificado."""
+        res_status = self.client._dispatch_tool("git_status", {"path": "."})
+        self.assertTrue(res_status["success"])
+        self.assertIn("message", res_status)
+        self.assertIn("Status Git", res_status["message"])
+
+        res_log = self.client._dispatch_tool("git_log", {"path": ".", "max_count": 3})
+        self.assertTrue(res_log["success"])
+        self.assertIn("message", res_log)
+        self.assertGreaterEqual(res_log.get("count", 0), 1)
+
+    def test_dispatch_tool_run_command_safe(self):
+        """Testa a execução de comando terminal seguro via voz."""
+        res = self.client._dispatch_tool("run_command", {"command": "echo 'zorin voice live'"})
+        self.assertTrue(res["success"])
+        self.assertIn("zorin voice live", res["message"])
+
+    def test_dispatch_tool_run_command_dangerous_requires_confirmation(self):
+        """Testa comando destrutivo acionando o portão de risco com confirmation_id."""
+        res = self.client._dispatch_tool("run_command", {"command": "rm -rf /tmp/test_voice"})
+        self.assertFalse(res["success"])
+        self.assertTrue(res.get("requires_confirmation"))
+        self.assertIn("confirmation_id", res)
+        self.assertIn("terminal sensível", res.get("risk", ""))
+
+    def test_dispatch_tool_window_management(self):
+        """Testa o despacho da ferramenta de gerenciamento de janelas."""
+        res = self.client._dispatch_tool("window_management", {"action": "tile_left"})
+        self.assertTrue(res["success"])
+        self.assertIn("message", res)
+
+    def test_dispatch_tool_mcp_delegation(self):
+        """Testa delegação transparente para ferramenta MCP registrada dinamicamente."""
+        from zorin_copilot.ai.agent_tools import ToolSpec
+
+        dummy_spec = ToolSpec(
+            name="mcp__testserver__query_database",
+            description="Query database test",
+            parameters={"type": "OBJECT", "properties": {"sql": {"type": "STRING"}}},
+            handler=lambda args: {"ok": True, "output": f"Resultado de: {args.get('sql')}"},
+        )
+        self.client.tool_registry.register(dummy_spec)
+
+        res = self.client._dispatch_tool("mcp__testserver__query_database", {"sql": "SELECT 1"})
+        self.assertTrue(res["success"])
+        self.assertEqual(res["output"], "Resultado de: SELECT 1")
+        self.assertIn("Resultado de: SELECT 1", res["message"])
+
+    def test_live_tools_payload_includes_dynamic_mcp_tools(self):
+        """Testa se ferramentas MCP registradas são incluídas no payload da sessão Live."""
+        from zorin_copilot.ai.agent_tools import ToolSpec
+
+        dummy_spec = ToolSpec(
+            name="mcp__sqlite__run_query",
+            description="Executa consulta SQLite",
+            parameters={"type": "OBJECT", "properties": {"query": {"type": "STRING"}}},
+            handler=lambda args: {"ok": True},
+        )
+        self.client.tool_registry.register(dummy_spec)
+
+        payload = self.client._live_tools_payload()
+        func_names = [f["name"] for f in payload[0]["functionDeclarations"]]
+        self.assertIn("mcp__sqlite__run_query", func_names)
+        self.assertIn("git_log", func_names)
+        self.assertIn("git_status", func_names)
+        self.assertIn("run_command", func_names)
+        self.assertNotIn("done", func_names)
+
+
 if __name__ == "__main__":
     unittest.main()
 

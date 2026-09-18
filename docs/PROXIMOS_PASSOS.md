@@ -25,6 +25,11 @@ Nesta etapa, resolvemos o gargalo de interrupção prematura ("Limite de passos 
    - **Academic Hub (`core/academic_hub.py`):** Pesquisa e citação científica unificada (arXiv, OpenAlex, PubMed, Semantic Scholar).
    - **Gerenciador de Janelas (`core/window_manager.py`):** Manipulação de janelas no Hyprland/Wayland/X11.
    - **Seletor de Modelos em Tempo Real & Preview de Voz (`ui/widgets/model_selector.py` & `ai/voice_preview.py`).**
+5. **Unificação Total do Gemini Live & ToolRegistry (Opção B - Concluída):**
+   - **ToolRegistry como Fonte da Verdade:** `ToolRegistry` agora encapsula 53 ferramentas completas (sistema, janelas, terminal bash, git status/log/diff, contatos, memória, rag, web e casa inteligente).
+   - **Despacho Dinâmico por Voz:** `GeminiLiveClient` instancia `ToolRegistry` e delega automaticamente qualquer ferramenta solicitada por voz.
+   - **Exposição em Tempo Real de MCPs e Git:** Servidores MCP ativos (`mcp__*`) e ferramentas locais Git/terminal entram dinamicamente no `_live_tools_payload()`.
+   - **Barreira de Risco Unificada (`RiskPolicy`):** Comandos perigosos (ex.: `run_command` com `rm`, `sudo`, `kill`) geram `confirmation_id` para aprovação verbal antes de executar.
 
 ---
 
@@ -34,14 +39,14 @@ Nesta etapa, resolvemos o gargalo de interrupção prematura ("Limite de passos 
                                   MAPA DE PRIORIDADES
                                   
   ┌─────────────────────────────────┐        ┌──────────────────────────────────┐
-  │  1. GROUNDING VISUAL VLM        │   ──►  │  2. UNIFICAÇÃO DO LIVE VOICE     │
-  │  (MiniCPM-V / Qwen2-VL local)   │        │  (ToolRegistry único no Live)    │
+  │  1. GROUNDING VISUAL VLM        │   ──►  │  2. BUSCA DE CÓDIGO NATIVA       │
+  │  (MiniCPM-V / Qwen2-VL local)   │        │  (ripgrep / code_search / ps)    │
   └─────────────────────────────────┘        └──────────────────────────────────┘
                    │                                          │
                    ▼                                          ▼
   ┌─────────────────────────────────┐        ┌──────────────────────────────────┐
-  │  3. FERRAMENTAS LOCAIS DE CÓDIGO│   ──►  │  4. AUTOMAÇÃO AVA / ANKI         │
-  │  (ripgrep / code_search / ps)   │        │  (Extração SCORM + Decks Anki)   │
+  │  3. AUTOMAÇÃO AVA / ANKI        │   ──►  │  4. MCP REMOTO (SSE / HTTP)      │
+  │  (Extração SCORM + Decks Anki)  │        │  (Servidores Cloud / Tokens)     │
   └─────────────────────────────────┘        └──────────────────────────────────┘
 ```
 
@@ -52,14 +57,7 @@ Nesta etapa, resolvemos o gargalo de interrupção prematura ("Limite de passos 
   2. Implementar a ferramenta `locate_element_visual(query, region)` que recebe descrição semântica (ex.: *"botão avançar módulo"*) e devolve a bounding box em coordenadas normalizadas (x, y) para o `VirtualInputDriver`.
   3. Criar estratégia de fallback em cascata: tentar AT-SPI2 primeiro (0ms, sem uso de GPU); caso falhe ou a árvore seja opaca, invocar o VLM.
 
-### Passo 2: Unificação do `ToolRegistry` no Cliente de Voz ao Vivo (`ai/live.py`)
-- **Problema:** O cliente bidirecional de voz WebSocket (`GeminiLiveClient`) mantém suas próprias 28 ferramentas e despachos duplicados em relação ao `ToolRegistry` usado pelo Modo Agente.
-- **Ações:**
-  1. Fazer o `GeminiLiveClient` consumir diretamente o `ToolRegistry`.
-  2. Disponibilizar dinamicamente ferramentas de servidores MCP e comandos Git durante a conversa por voz (ex.: *"Copilot, quais foram os últimos 3 commits do projeto?"*).
-  3. Unificar a auditoria de ações e a barreira de aprovação inline de risco (`RiskPolicy`).
-
-### Passo 3: Ferramentas Nativas de Busca de Código e Processos Locais
+### Passo 2: Ferramentas Nativas de Busca de Código e Processos Locais
 - **Problema:** Quando o agente precisa encontrar definições ou inspecionar processos travados no sistema, ler arquivos um a um pelo sistema de arquivos consome muitos passos do orçamento.
 - **Ações:**
   1. Implementar ferramenta nativa `search_code(pattern, path, file_glob)` com subprocesso isolado chamando `ripgrep` (ou busca pura em Python), retornando snippets com número de linha e contexto.
