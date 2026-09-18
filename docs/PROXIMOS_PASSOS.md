@@ -29,7 +29,13 @@ Nesta etapa, resolvemos o gargalo de interrupção prematura ("Limite de passos 
    - **ToolRegistry como Fonte da Verdade:** `ToolRegistry` agora encapsula 53 ferramentas completas (sistema, janelas, terminal bash, git status/log/diff, contatos, memória, rag, web e casa inteligente).
    - **Despacho Dinâmico por Voz:** `GeminiLiveClient` instancia `ToolRegistry` e delega automaticamente qualquer ferramenta solicitada por voz.
    - **Exposição em Tempo Real de MCPs e Git:** Servidores MCP ativos (`mcp__*`) e ferramentas locais Git/terminal entram dinamicamente no `_live_tools_payload()`.
-   - **Barreira de Risco Unificada (`RiskPolicy`):** Comandos perigosos (ex.: `run_command` com `rm`, `sudo`, `kill`) geram `confirmation_id` para aprovação verbal antes de executar.
+    - **Barreira de Risco Unificada (`RiskPolicy`):** Comandos perigosos (ex.: `run_command` com `rm`, `sudo`, `kill`) geram `confirmation_id` para aprovação verbal antes de executar.
+6. **Grounding Visual por VLM Local & Cascata Inteligente (Opção C - Concluída):**
+   - **Módulo `core/vlm_grounding.py`:** Integração nativa com Ollama local (`qwen2.5vl:7b`, `qwen2.5vl:3b`, `minicpm-v`, `llava`) e fallback em nuvem para `gemini-2.5-flash`.
+   - **Auto-Discovery de Modelos:** Detecção automática de capacidades de visão via endpoint `/api/tags` do Ollama.
+   - **Cascata Tripla de Baixa Latência:** AT-SPI (0ms) $\rightarrow$ Tesseract OCR Espacial (120ms) $\rightarrow$ VLM Grounding.
+   - **Novas Ferramentas Registradas:** `locate_element_visual` e `click_visual_element` integradas ao `ToolRegistry`, ao Agente ReAct e ao cliente Gemini Live.
+   - **Documentação Dedicada:** Criado `docs/VLM_GROUNDING_VISUAL.md`.
 
 ---
 
@@ -40,7 +46,7 @@ Nesta etapa, resolvemos o gargalo de interrupção prematura ("Limite de passos 
                                   
   ┌─────────────────────────────────┐        ┌──────────────────────────────────┐
   │  1. GROUNDING VISUAL VLM        │   ──►  │  2. BUSCA DE CÓDIGO NATIVA       │
-  │  (MiniCPM-V / Qwen2-VL local)   │        │  (ripgrep / code_search / ps)    │
+  │  (CONCLUÍDO - Qwen2.5-VL/Ollama)│        │  (ripgrep / code_search / ps)    │
   └─────────────────────────────────┘        └──────────────────────────────────┘
                    │                                          │
                    ▼                                          ▼
@@ -50,12 +56,8 @@ Nesta etapa, resolvemos o gargalo de interrupção prematura ("Limite de passos 
   └─────────────────────────────────┘        └──────────────────────────────────┘
 ```
 
-### Passo 1: Grounding Visual com VLM Local (MiniCPM-V / Qwen2-VL)
-- **Problema:** Portais de estudo em SPA (como SCORM/iFrames do AVA SENAC), jogos, visualizadores remotos e aplicações em Canvas HTML5 não expõem nós na árvore de acessibilidade AT-SPI2 (`get_ui_tree` retorna nós genéricos sem geometria).
-- **Ações:**
-  1. Integrar suporte a **MiniCPM-V** ou **Qwen2-VL** rodando no Ollama local para localização espacial de botões.
-  2. Implementar a ferramenta `locate_element_visual(query, region)` que recebe descrição semântica (ex.: *"botão avançar módulo"*) e devolve a bounding box em coordenadas normalizadas (x, y) para o `VirtualInputDriver`.
-  3. Criar estratégia de fallback em cascata: tentar AT-SPI2 primeiro (0ms, sem uso de GPU); caso falhe ou a árvore seja opaca, invocar o VLM.
+### Passo 1: Grounding Visual com VLM Local (Concluído ✅)
+- Suporte a modelos de visão no Ollama (`qwen2.5vl`, `minicpm-v`) implementado com desambiguação geométrica, projeção pixel-perfect em monitores Wayland e fallback em nuvem. Ferramentas `locate_element_visual` e `click_visual_element` operacionais.
 
 ### Passo 2: Ferramentas Nativas de Busca de Código e Processos Locais
 - **Problema:** Quando o agente precisa encontrar definições ou inspecionar processos travados no sistema, ler arquivos um a um pelo sistema de arquivos consome muitos passos do orçamento.

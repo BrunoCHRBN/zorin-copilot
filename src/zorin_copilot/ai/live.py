@@ -2560,28 +2560,35 @@ class GeminiLiveClient:
                 if not q:
                     return {"success": False, "message": "Parâmetro 'query' é obrigatório."}
                 from ..core.ui_grounding import UIGroundingService
-                candidates = UIGroundingService.find_elements(q, fence=self.fence)
-                if not candidates:
-                    return {"success": False, "message": f"Elemento '{q}' não encontrado visualmente na tela."}
-                best, score = candidates[0]
+                best, score, source = UIGroundingService.locate_element(q, fence=self.fence)
+                if not best:
+                    return {"success": False, "message": f"Elemento '{q}' não encontrado na tela nem por OCR nem por visão VLM."}
+                src_desc = "OCR" if source == "ocr" else "Visão VLM"
                 return {
                     "success": True,
                     "best_match": best.to_dict(),
                     "score": round(score, 2),
+                    "source": source,
                     "x": best.x,
                     "y": best.y,
-                    "message": f"Elemento '{best.text}' localizado em ({best.x}, {best.y}) com score {score:.2f}.",
+                    "message": f"Elemento '{best.text}' localizado via {src_desc} em ({best.x}, {best.y}) com score {score:.2f}.",
                 }
 
             elif name == "click_on_screen":
                 q = args.get("query", "").strip()
                 btn = args.get("button", "left")
                 double = bool(args.get("double", False))
+                prefer_vlm = bool(args.get("prefer_vlm", False))
                 if not q:
                     return {"success": False, "message": "Parâmetro 'query' é obrigatório."}
                 from ..core.ui_grounding import UIGroundingService
                 ok, msg, coords = UIGroundingService.click_visual_element(
-                    q, button=btn, double=double, driver=self.input_driver, fence=self.fence
+                    q,
+                    button=btn,
+                    double=double,
+                    driver=self.input_driver,
+                    fence=self.fence,
+                    prefer_vlm=prefer_vlm,
                 )
                 return {
                     "success": ok,

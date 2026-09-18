@@ -358,37 +358,109 @@ class UIGroundingService:
         query: str,
         image_bytes: bytes,
         fence: ScreenFenceManager | None = None,
+        crop_rect: tuple[int, int, int, int] | None = None,
     ) -> tuple[int, int] | None:
-        """Fallback: solicita ao modelo de visão as coordenadas [0..1000] de um elemento não textual ou ícone."""
+        """Fallback: solicita ao modelo VLM local (ou nuvem) as coordenadas de um elemento visual ou ícone."""
         try:
-            from ..ai.providers import ProviderFactory
-            from ..core.config import CopilotConfig
+            from .vlm_grounding import LocalVLMGroundingClient
 
-            cfg = CopilotConfig.load()
-            provider = ProviderFactory.create(cfg)
-
-            prompt = (
-                f"Você é um operador de computador no Linux. Localize o seguinte elemento visual na tela: '{query}'. "
-                "Responda ESTRITAMENTE em formato JSON com as coordenadas normalizadas do centro do elemento "
-                "na escala de 0 a 1000: {\"point\": [y, x], \"confidence\": 0.95}"
+            client = LocalVLMGroundingClient()
+            res = client.ground(
+                query=query,
+                image_bytes=image_bytes,
+                fence=fence,
+                crop_rect=crop_rect,
             )
-
-            # Usa o método de visão do provider
-            res = provider.analyze_image(prompt, image_bytes)
-            # Extrai coordenadas JSON
-            match = re.search(r"\{\s*\"point\"\s*:\s*\[\s*(\d+)\s*,\s*(\d+)\s*\]", res)
-            if match:
-                y_norm = int(match.group(1))
-                x_norm = int(match.group(2))
-                f = fence or ScreenFenceManager()
-                abs_x, abs_y = f.convert_relative_point(x_norm / 1000.0, y_norm / 1000.0)
-                logger.info("Elemento '%s' localizado via Visão Multimodal em (%d, %d)", query, abs_x, abs_y)
-                return abs_x, abs_y
-
+            if res.found:
+                logger.info("Elemento '%s' localizado via VLM (%s) em (%d, %d)", query, res.source, res.x, res.y)
+                return res.x, res.y
+            else:
+                logger.debug("VLM não encontrou o elemento '%s': %s", query, res.error or res.description)
         except Exception as exc:
-            logger.debug("Falha no Grounding Multimodal via modelo de visão: %s", exc)
+            logger.warning("Falha no Grounding Multimodal via modelo de visão: %s", exc)
 
         return None
+
+    @classmethod
+    def ground_visual_element(
+        cls,
+        query: str,
+        fence: ScreenFenceManager | None = None,
+        crop_rect: tuple[int, int, int, int] | None = None,
+        image_bytes: bytes | None = None,
+    ) -> VisualElement | None:
+        """Localiza um elemento visual na tela via VLM e retorna como VisualElement."""
+        f = fence or ScreenFenceManager()
+        img_data = image_bytes
+        target_crop = crop_rect
+
+        if img_data is None:
+            if not target_crop:
+                if f.mode in (FenceMode.ACTIVE_WINDOW, FenceMode.CHOSEN_WINDOW) and f.get_target_window():
+                    win = f.get_target_window()
+                    assert win is not None
+                    target_crop = (win.x, win.y, win.width, win.height)
+                else:
+                    active_m = f.get_active_monitor()
+                    if active_m:
+                        target_crop = (active_m.x, active_m.y, active_m.width, active_m.height)
+
+            ok, shot_bytes, _mode = ScreenCaptureService.capture(
+                interactive=False, max_size=1280, crop_rect=target_crop
+            )
+            if not ok or not shot_bytes:
+                logger.warning("Falha na captura de tela para Grounding VLM.")
+                return None
+            img_data = shot_bytes
+
+        from .vlm_grounding import LocalVLMGroundingClient
+
+        client = LocalVLMGroundingClient()
+        res = client.ground(
+            query=query,
+            image_bytes=img_data,
+            fence=f,
+            crop_rect=target_crop,
+        )
+        if res.found:
+            return res.to_visual_element()
+        return None
+
+    @classmethod
+    def locate_element(
+        cls,
+        query: str,
+        fence: ScreenFenceManager | None = None,
+        mode: str = "auto",
+        threshold: float = 0.65,
+    ) -> tuple[VisualElement | None, float, str]:
+        """Localiza elemento através de cascata inteligente: OCR Espacial -> VLM Grounding.
+
+        Args:
+            query: Descrição do botão, texto ou ícone procurado.
+            fence: Gerenciador de limites espaciais.
+            mode: 'auto' (OCR seguido de VLM), 'ocr' (apenas OCR), 'vlm' (apenas VLM).
+            threshold: Limiar mínimo para casamento textual OCR.
+
+        Returns:
+            tuple[VisualElement | None, score, source]
+        """
+        f = fence or ScreenFenceManager()
+
+        # 1. Tenta OCR se permitido
+        if mode in ("auto", "ocr"):
+            candidates = cls.find_elements(query, fence=f, threshold=threshold)
+            if candidates:
+                best_el, score = candidates[0]
+                return best_el, score, "ocr"
+
+        # 2. Se OCR falhou e modo permite VLM, executa Grounding Visual
+        if mode in ("auto", "vlm"):
+            vlm_el = cls.ground_visual_element(query, fence=f)
+            if vlm_el:
+                return vlm_el, vlm_el.confidence / 100.0, "vision_model"
+
+        return None, 0.0, "none"
 
     @classmethod
     def click_visual_element(
@@ -398,54 +470,62 @@ class UIGroundingService:
         double: bool = False,
         driver: Any | None = None,
         fence: ScreenFenceManager | None = None,
+        prefer_vlm: bool = False,
     ) -> tuple[bool, str, tuple[int, int] | None]:
         """Localiza um elemento visualmente e executa o clique com animação do Ghost Cursor."""
         f = fence or ScreenFenceManager()
         if f.is_emergency_stopped:
             return False, "Operação cancelada: Parada de emergência (Kill Switch) ativa.", None
 
-        # 1. Varredura rápida local por OCR (baixa latência ~150-250ms)
-        candidates = cls.find_elements(query, fence=f)
-        if candidates:
-            best_el, score = candidates[0]
-            cx, cy = best_el.x, best_el.y
-            logger.info("Elemento '%s' encontrado via OCR: '%s' (score %.2f) em (%d, %d)", query, best_el.text, score, cx, cy)
+        # 1. Se prefer_vlm=False, tenta varredura rápida local por OCR (baixa latência ~150-250ms)
+        if not prefer_vlm:
+            candidates = cls.find_elements(query, fence=f)
+            if candidates:
+                best_el, score = candidates[0]
+                cx, cy = best_el.x, best_el.y
+                logger.info(
+                    "Elemento '%s' encontrado via OCR: '%s' (score %.2f) em (%d, %d)",
+                    query,
+                    best_el.text,
+                    score,
+                    cx,
+                    cy,
+                )
 
-            allowed, reason = f.is_coordinate_allowed(cx, cy)
-            if not allowed:
-                return False, f"Clique bloqueado pela cerca digital: {reason}", (cx, cy)
-
-            # Executa com feedback do Ghost Cursor
-            from ..shell.input_driver import VirtualInputDriver
-            input_drv = driver or VirtualInputDriver(fence=f)
-            ok, msg = input_drv.click(
-                cx,
-                cy,
-                button=button,
-                double=double,
-                label=f"Clicando em '{best_el.text}'",
-            )
-            return ok, msg, (cx, cy)
-
-        # 2. Fallback: Grounding Multimodal via Modelo de Visão
-        ok_shot, img_bytes, _mode = ScreenCaptureService.capture(interactive=False, max_size=1280)
-        if ok_shot and img_bytes:
-            coords = cls.ground_with_vision_model(query, img_bytes, fence=f)
-            if coords:
-                cx, cy = coords
                 allowed, reason = f.is_coordinate_allowed(cx, cy)
                 if not allowed:
                     return False, f"Clique bloqueado pela cerca digital: {reason}", (cx, cy)
 
                 from ..shell.input_driver import VirtualInputDriver
+
                 input_drv = driver or VirtualInputDriver(fence=f)
                 ok, msg = input_drv.click(
                     cx,
                     cy,
                     button=button,
                     double=double,
-                    label=f"Clicando em '{query}'",
+                    label=f"Clicando em '{best_el.text}'",
                 )
                 return ok, msg, (cx, cy)
+
+        # 2. Fallback (ou direto se prefer_vlm=True): Grounding Multimodal via VLM Local
+        vlm_el = cls.ground_visual_element(query, fence=f)
+        if vlm_el:
+            cx, cy = vlm_el.x, vlm_el.y
+            allowed, reason = f.is_coordinate_allowed(cx, cy)
+            if not allowed:
+                return False, f"Clique bloqueado pela cerca digital: {reason}", (cx, cy)
+
+            from ..shell.input_driver import VirtualInputDriver
+
+            input_drv = driver or VirtualInputDriver(fence=f)
+            ok, msg = input_drv.click(
+                cx,
+                cy,
+                button=button,
+                double=double,
+                label=f"Clicando em '{query}' (VLM)",
+            )
+            return ok, msg, (cx, cy)
 
         return False, f"Elemento visual com rótulo '{query}' não localizado na tela.", None

@@ -589,11 +589,32 @@ class ToolRegistry:
             ToolSpec(
                 name="find_on_screen",
                 description=(
-                    "Localiza visualmente textos, botões ou controles na tela via OCR e visão computacional. "
-                    "Devolve coordenadas absolutas (x, y), caixa delimitadora (bbox) e o texto encontrado."
+                    "Localiza visualmente textos, botões ou controles na tela via OCR espacial e VLM multimodal. "
+                    "Devolve coordenadas absolutas (x, y), caixa delimitadora (bbox) e fonte ('ocr' ou 'vision_model')."
                 ),
                 parameters=_param(
-                    {"query": _str("Texto, rótulo ou botão procurado na tela.")},
+                    {
+                        "query": _str("Texto, rótulo ou botão procurado na tela."),
+                        "mode": _str("Modo de busca: 'auto' (OCR + fallback VLM), 'ocr' (apenas OCR) ou 'vlm' (apenas VLM)."),
+                    },
+                    required=["query"],
+                ),
+                handler=self._tool_find_on_screen,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="locate_element_visual",
+                description=(
+                    "Localiza visualmente qualquer elemento, botão, ícone, controle de canvas, vídeo player ou área gráfica "
+                    "na tela via modelo VLM local (Vision-Language Model). Essencial para interfaces sem acessibilidade AT-SPI."
+                ),
+                parameters=_param(
+                    {
+                        "query": _str("Descrição visual em linguagem natural do elemento (ex: 'botão de play', 'ícone de engrenagem', 'fechar banner')."),
+                        "mode": _str("Modo de busca: 'auto' (padrão), 'vlm' (forçar VLM) ou 'ocr'."),
+                    },
                     required=["query"],
                 ),
                 handler=self._tool_find_on_screen,
@@ -613,10 +634,30 @@ class ToolRegistry:
                         "query": _str("Texto ou rótulo do botão a clicar."),
                         "button": _str("Botão do mouse: left (padrão), right ou middle."),
                         "double": _bool("Clique duplo (padrão false)."),
+                        "prefer_vlm": _bool("Se true, prioriza localização por VLM visual direto (padrão false)."),
                     },
                     required=["query"],
                 ),
                 handler=self._tool_click_on_screen,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="click_visual_element",
+                description=(
+                    "Localiza visualmente um controle gráfico, ícone, botão em canvas ou interface opaca via VLM local e executa o clique com o Cursor Fantasma."
+                ),
+                parameters=_param(
+                    {
+                        "query": _str("Descrição visual do elemento a ser clicado (ex: 'ícone de play', 'botão avançar')."),
+                        "button": _str("Botão do mouse: left (padrão), right ou middle."),
+                        "double": _bool("Clique duplo (padrão false)."),
+                        "prefer_vlm": _bool("Priorizar modelo VLM sobre OCR (padrão true para elementos visuais)."),
+                    },
+                    required=["query"],
+                ),
+                handler=self._tool_click_visual_element,
             )
         )
 
@@ -1629,18 +1670,39 @@ class ToolRegistry:
         query = str(args.get("query") or "").strip()
         if not query:
             return {"ok": False, "error": "`query` é obrigatório."}
+        mode = str(args.get("mode") or "auto").lower()
+        threshold = float(args.get("confidence_threshold", 0.65))
         try:
             from ..core.ui_grounding import UIGroundingService
-            candidates = UIGroundingService.find_elements(query, fence=self._fence)
-            if not candidates:
-                return {"ok": False, "error": f"Nenhum elemento correspondente a '{query}' na tela."}
-            return {
-                "ok": True,
-                "count": len(candidates),
-                "best_match": candidates[0][0].to_dict(),
-                "score": round(candidates[0][1], 2),
-                "all_matches": [c[0].to_dict() for c in candidates[:5]],
-            }
+
+            # 1. Se modo permitir OCR, busca texto/rótulos rápidos
+            candidates = []
+            if mode != "vlm":
+                candidates = UIGroundingService.find_elements(query, fence=self._fence, threshold=threshold)
+                if candidates:
+                    return {
+                        "ok": True,
+                        "count": len(candidates),
+                        "source": "ocr",
+                        "best_match": candidates[0][0].to_dict(),
+                        "score": round(candidates[0][1], 2),
+                        "all_matches": [c[0].to_dict() for c in candidates[:5]],
+                    }
+
+            # 2. Se OCR não localizou ou modo é 'vlm', aciona Grounding VLM
+            if mode in ("auto", "vlm"):
+                vlm_el = UIGroundingService.ground_visual_element(query, fence=self._fence)
+                if vlm_el:
+                    return {
+                        "ok": True,
+                        "count": 1,
+                        "source": "vision_model",
+                        "best_match": vlm_el.to_dict(),
+                        "score": round(vlm_el.confidence / 100.0, 2),
+                        "all_matches": [vlm_el.to_dict()],
+                    }
+
+            return {"ok": False, "error": f"Nenhum elemento correspondente a '{query}' na tela."}
         except Exception as exc:
             return {"ok": False, "error": f"Falha na localização visual: {exc}"}
 
@@ -1650,13 +1712,19 @@ class ToolRegistry:
             return {"ok": False, "error": "`query` é obrigatório."}
         button = str(args.get("button") or "left")
         double = bool(args.get("double", False))
+        prefer_vlm = bool(args.get("prefer_vlm", False))
         driver = self.input_driver
         if driver is None:
             return {"ok": False, "error": "Driver de entrada indisponível."}
         try:
             from ..core.ui_grounding import UIGroundingService
             ok, msg, coords = UIGroundingService.click_visual_element(
-                query, button=button, double=double, driver=driver, fence=self._fence
+                query,
+                button=button,
+                double=double,
+                driver=driver,
+                fence=self._fence,
+                prefer_vlm=prefer_vlm,
             )
             return {
                 "ok": ok,
@@ -1666,6 +1734,13 @@ class ToolRegistry:
             }
         except Exception as exc:
             return {"ok": False, "error": f"Falha ao clicar visualmente: {exc}"}
+
+    def _tool_click_visual_element(self, args: dict[str, Any]) -> dict[str, Any]:
+        # Para elementos descritos visualmente, prioriza VLM por padrão se não especificado o contrário
+        if "prefer_vlm" not in args:
+            args = dict(args)
+            args["prefer_vlm"] = True
+        return self._tool_click_on_screen(args)
 
     def _tool_scroll_page(self, args: dict[str, Any]) -> dict[str, Any]:
         direction = str(args.get("direction") or "down").lower().strip()

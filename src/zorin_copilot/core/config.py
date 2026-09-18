@@ -33,6 +33,13 @@ class CopilotConfig:
     ollama_url: str = "http://127.0.0.1:11434"
     ollama_model: str = "qwen2.5:7b"
     ollama_vision_model: str = "minicpm-v"
+
+    # Grounding Visual Multimodal (VLM Local / Telas sem AT-SPI)
+    vlm_grounding_enabled: bool = True
+    vlm_grounding_model: str = ""  # vazio = auto-detecta (qwen2.5vl:7b, qwen2.5vl:3b, minicpm-v, etc.)
+    vlm_grounding_fallback_to_gemini: bool = True
+    vlm_grounding_timeout_sec: float = 18.0
+    vlm_confidence_threshold: float = 0.40
     
     # Configurações de API compatível com OpenAI (OpenAI, Groq, DeepSeek, OpenRouter)
     openai_url: str = "https://api.openai.com/v1"
