@@ -88,10 +88,17 @@ O Zorin Copilot é um assistente de inteligência artificial nativo para Linux (
   - Pré-escuta de vozes do Gemini Live diretamente na interface de preferências com reprodução local.
 - **Gemini Live 3.8 Extended Thinking & Enquadramento Inteligente (`ai/live.py`):**
   - Suporte ao raciocínio contínuo assíncrono (`thinkingBudget: 2048`).
-  - Streaming de vídeo com recorte automático da janela em foco ou monitor ativo delimitado pelo `ScreenFence`.
+- **Grounding Visual por VLM Local & Telas Opacas (`core/vlm_grounding.py`):**
+  - Módulo nativo integrando Ollama local (`qwen2.5vl`, `minicpm-v`) e fallback em nuvem para o Gemini 2.5 Flash.
+  - Cascata inteligente tripla: AT-SPI (0ms) -> OCR Tesseract -> VLM Grounding.
+  - Ferramentas `locate_element_visual` e `click_visual_element` operacionais.
+- **Busca de Código Nativa & Processos do Sistema (`core/system_inspect.py`):**
+  - `search_code`: Busca ultrarrápida em arquivos de código com ripgrep (`rg`) e fallback em Python puro, com suporte a regex, context lines e globs.
+  - `system_processes`: Inspeção segura de consumo de CPU/RAM, PIDs e comandos via `ps` e `/proc`.
+  - Exibição de ícones simbólicos e rótulos nativos Adwaita no `AgentExecutionWidget`.
 
 ### 2.5 Qualidade, Testes e Estabilidade
-- **1.563 testes unitários e de integração aprovados (100% pass, 5 skipped)** cobrindo todos os módulos do sistema: ações, segurança, OCR, memória, RAG, rollback, MCP, UI GTK4, Gemini Live, Home Assistant e drivers de janela.
+- **1.595 testes unitários e de integração aprovados (100% pass, 5 skipped)** cobrindo todos os módulos do sistema: ações, segurança, OCR, VLM grounding, busca de código, processos, memória, RAG, rollback, MCP, UI GTK4, Gemini Live, Home Assistant e drivers de janela.
 
 ---
 
@@ -102,7 +109,7 @@ O Zorin Copilot é um assistente de inteligência artificial nativo para Linux (
                                   
   ┌─────────────────────────────────┐        ┌──────────────────────────────────┐
   │  FASE 5: UNIFICAÇÃO DO LIVE     │   ──►  │  FASE 6: GROUNDING VISUAL VLM    │
-  │  (ToolRegistry + MCP no Voz)    │        │  (MiniCPM-V / Qwen2-VL local)    │
+  │  (CONCLUÍDA ✅)                 │        │  (CONCLUÍDA ✅)                  │
   └─────────────────────────────────┘        └──────────────────────────────────┘
                    │                                          │
                    ▼                                          ▼
@@ -111,20 +118,6 @@ O Zorin Copilot é um assistente de inteligência artificial nativo para Linux (
   │  (SSE/WebSockets + Prompts API) │        │  (Automação SPA/SCORM + Anki)    │
   └─────────────────────────────────┘        └──────────────────────────────────┘
 ```
-
-### Fase 5: Unificação de Ferramentas no Cliente de Voz ao Vivo (`ai/live.py`)
-- **Problema Atual:** O cliente de voz bidirecional WebSocket (`GeminiLiveClient`) mantém suas próprias 28 declarações de ferramentas e despacho interno duplicado em relação ao `ToolRegistry`.
-- **Objetivo:**
-  1. Fazer o `GeminiLiveClient` consumir diretamente o `ToolRegistry` (`agent_tools.py`).
-  2. Disponibilizar dinamicamente todas as ferramentas de servidores MCP para o assistente de voz em tempo real (ex.: *"Copilot, qual o status do git atual?"* ou *"Copilot, reinicie o container docker da aplicação"*).
-  3. Reutilizar os mesmos interceptadores de risco e aprovação inline durante a conversa por voz.
-
-### Fase 6: Grounding Visual com Modelos de Visão Locais (VLM)
-- **Problema Atual:** Quando o aplicativo em foco não exporta árvore de acessibilidade AT-SPI2 completa (como aplicações em canvas HTML5, jogos, SCORM de portais AVA ou desktops remotos VNC), o assistente não consegue localizar botões por ID/texto puro.
-- **Objetivo:**
-  1. Integração com **MiniCPM-V** ou **Qwen2-VL** rodando no Ollama local para visão computacional de tela.
-  2. Implementação da ferramenta `locate_element_visual(description, screen_bbox)`: captura a região da tela e retorna coordenadas (x, y) normalizadas para o `VirtualInputDriver`.
-  3. Fallback inteligente: tentar AT-SPI2 primeiro (instantâneo, sem custo de GPU); se não encontrar ou for elemento de canvas, recorrer ao VLM.
 
 ### Fase 7: Extensões MCP Avançadas (SSE / WebSockets & MCP Prompts)
 - **Transporte Remoto (SSE / HTTP Streaming):**
@@ -135,10 +128,10 @@ O Zorin Copilot é um assistente de inteligência artificial nativo para Linux (
   - Servidores MCP poderão registrar templates de comandos e personas customizadas diretamente na Paleta de Comandos (`Ctrl+K`) do Copilot.
 
 ### Fase 8: Módulo de Estudo & Captura de Conteúdo AVA (Plano de Estudos SENAC)
-- **Objetivo:** Automatizar a captura de materiais didáticos e geração de recursos de estudo com o Modo Agente.
+- **Objetivo:** Automatizar a captura de materiais didáticos e geração de recursos de estudo com o Modo Agente, agora potencializado pelo Grounding Visual VLM e Busca Nativa de Código.
 - **Etapas:**
   1. Sequência automatizada de navegação no portal do estudante (autenticação supervisionada, listagem de unidades curriculares).
-  2. Extração de conteúdo embutido em players SCORM/SPA utilizando o leitor de árvore AT-SPI2 e Smart OCR.
+  2. Extração de conteúdo embutido em players SCORM/SPA utilizando o leitor de árvore AT-SPI2, Smart OCR e VLM Grounding.
   3. Pipeline de geração automática de cartões Anki (`.apkg`) e sumários executivos estruturados em Markdown via RAG local.
 
 ---

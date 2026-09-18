@@ -960,6 +960,48 @@ class ToolRegistry:
 
         self.register(
             ToolSpec(
+                name="search_code",
+                description=(
+                    "Busca de alta performance por padrões de texto ou expressões regulares em arquivos de código ou diretórios usando ripgrep (ou fallback nativo), retornando arquivos, linhas e contexto sem estourar o orçamento de passos."
+                ),
+                parameters=_param(
+                    {
+                        "pattern": _str("Texto ou expressão regular a ser pesquisada."),
+                        "path": _str("Caminho do diretório ou arquivo base para a busca (padrão '.')."),
+                        "file_glob": _str("Filtro opcional de arquivos por extensão/glob (ex: '*.py', '*.ts', '*.json')."),
+                        "case_sensitive": _bool("Se True, diferencia maiúsculas de minúsculas (padrão False)."),
+                        "is_regex": _bool("Se True, interpreta o padrão como expressão regular; se False, busca literal (padrão True)."),
+                        "max_results": _num("Máximo de ocorrências retornadas (padrão 30, máx 100)."),
+                        "context_lines": _num("Número de linhas de contexto antes e depois da ocorrência (padrão 1, máx 5)."),
+                    },
+                    required=["pattern"],
+                ),
+                handler=self._tool_search_code,
+                timeout=10.0,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="system_processes",
+                description=(
+                    "Inspeciona processos em execução no sistema, consumo de CPU e memória (%CPU, %MEM), PIDs e comandos ativos (útil para verificar servidores, bancos de dados e serviços em segundo plano)."
+                ),
+                parameters=_param(
+                    {
+                        "filter": _str("Filtro opcional por nome do processo, comando, argumentos ou PID (ex: 'python', 'node', 'ollama', 'docker')."),
+                        "sort_by": _str("Critério de ordenação dos processos: 'cpu', 'memory' ou 'pid' (padrão 'cpu')."),
+                        "limit": _num("Número máximo de processos a retornar (padrão 20, máx 50)."),
+                    },
+                    required=[],
+                ),
+                handler=self._tool_system_processes,
+                timeout=8.0,
+            )
+        )
+
+        self.register(
+            ToolSpec(
                 name="media_control",
                 description=(
                     "Controla tocadores de música e reprodutores de mídia como Spotify, VLC e navegadores. "
@@ -2297,6 +2339,106 @@ class ToolRegistry:
             "status": clean_status,
             "message": msg,
         }
+
+    def _tool_search_code(self, args: dict[str, Any]) -> dict[str, Any]:
+        pattern = str(args.get("pattern") or "").strip()
+        if not pattern:
+            return {
+                "ok": False,
+                "success": False,
+                "error": "O parâmetro 'pattern' é obrigatório para a busca de código.",
+                "message": "Parâmetro 'pattern' não fornecido.",
+                "suggestion": "Especifique o termo ou expressão regular que deseja buscar.",
+            }
+
+        path = str(args.get("path") or ".").strip()
+        file_glob = str(args.get("file_glob") or "").strip()
+        case_sensitive = bool(args.get("case_sensitive", False))
+        is_regex = bool(args.get("is_regex", True))
+        max_results = int(args.get("max_results") or 30)
+        context_lines = int(args.get("context_lines") or 1)
+
+        try:
+            from ..core.system_inspect import CodeSearchEngine
+            engine = CodeSearchEngine.get_default()
+            res = engine.search(
+                pattern=pattern,
+                path=path,
+                file_glob=file_glob,
+                case_sensitive=case_sensitive,
+                is_regex=is_regex,
+                max_results=max_results,
+                context_lines=context_lines,
+            )
+            return res.to_dict()
+        except FileNotFoundError as fnf:
+            return {
+                "ok": False,
+                "success": False,
+                "error": str(fnf),
+                "message": str(fnf),
+                "suggestion": "Verifique se o caminho do diretório ou arquivo existe.",
+            }
+        except subprocess.TimeoutExpired:
+            return {
+                "ok": False,
+                "success": False,
+                "timeout": True,
+                "error": f"A busca de código por '{pattern}' excedeu o limite de tempo em '{path}'.",
+                "message": f"Timeout na busca por '{pattern}'.",
+                "suggestion": "Especifique um subdiretório mais restrito ou use 'file_glob' (ex: '*.py').",
+            }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "success": False,
+                "error": f"Falha na busca de código: {exc}",
+                "message": f"Erro na busca de código: {exc}",
+                "suggestion": "Revise os parâmetros da busca e a sintaxe da expressão regular.",
+            }
+
+    def _tool_system_processes(self, args: dict[str, Any]) -> dict[str, Any]:
+        filter_query = str(args.get("filter") or "").strip()
+        sort_by = str(args.get("sort_by") or "cpu").strip().lower()
+        if sort_by not in ("cpu", "memory", "pid"):
+            sort_by = "cpu"
+        limit = int(args.get("limit") or 20)
+
+        try:
+            from ..core.system_inspect import ProcessInspector
+            inspector = ProcessInspector.get_default()
+            procs = inspector.list_processes(
+                filter_query=filter_query,
+                sort_by=sort_by,
+                limit=limit,
+            )
+            table_summary = inspector.format_table(procs)
+            return {
+                "ok": True,
+                "success": True,
+                "count": len(procs),
+                "filter": filter_query,
+                "sort_by": sort_by,
+                "processes": [p.to_dict() for p in procs],
+                "summary": table_summary,
+                "message": f"Listados {len(procs)} processos no sistema.",
+            }
+        except subprocess.TimeoutExpired:
+            return {
+                "ok": False,
+                "success": False,
+                "timeout": True,
+                "error": "A listagem de processos excedeu o limite de tempo.",
+                "message": "Timeout ao inspecionar processos.",
+                "suggestion": "Tente novamente ou aplique um filtro específico.",
+            }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "success": False,
+                "error": f"Falha ao listar processos: {exc}",
+                "message": f"Erro ao listar processos: {exc}",
+            }
 
     def _tool_media_control(self, args: dict[str, Any]) -> dict[str, Any]:
         from ..core.media import MediaPlayerManager

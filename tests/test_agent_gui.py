@@ -637,6 +637,23 @@ class TestAgentIntegration(unittest.TestCase):
         summary_status = _format_args_summary("git_status", {"path": "/home/user/project"})
         self.assertEqual(summary_status, "/home/user/project")
 
+        # search_code & system_processes
+        self.assertIn("search_code", TOOL_LABELS)
+        self.assertIn("system_processes", TOOL_LABELS)
+        self.assertEqual(TOOL_LABELS["search_code"], "Buscar no Código")
+        self.assertEqual(TOOL_LABELS["system_processes"], "Processos do Sistema")
+        self.assertEqual(TOOL_ICONS["search_code"], "system-search-symbolic")
+        self.assertEqual(TOOL_ICONS["system_processes"], "utilities-system-monitor-symbolic")
+
+        summary_search = _format_args_summary("search_code", {"pattern": "calculate", "path": "src", "file_glob": "*.py"})
+        self.assertIn('"calculate"', summary_search)
+        self.assertIn("em src", summary_search)
+        self.assertIn("(*.py)", summary_search)
+
+        summary_procs = _format_args_summary("system_processes", {"filter": "python", "limit": 10})
+        self.assertIn('filtro "python"', summary_procs)
+        self.assertIn("top 10", summary_procs)
+
 
 if __name__ == "__main__":
     unittest.main()

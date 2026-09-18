@@ -52,6 +52,8 @@ TOOL_LABELS: dict[str, str] = {
     "list_directory": "Listar arquivos",
     "git_log": "Histórico Git (Commits)",
     "git_status": "Status do Git",
+    "search_code": "Buscar no Código",
+    "system_processes": "Processos do Sistema",
     "get_ui_tree": "Inspecionar acessibilidade (AT-SPI)",
     "screen_fence_control": "Controle de cerca de tela",
     "undo_last": "Desfazer última ação",
@@ -80,6 +82,8 @@ TOOL_ICONS: dict[str, str] = {
     "list_directory": "system-file-manager-symbolic",
     "git_log": "vcs-branch-symbolic",
     "git_status": "dialog-information-symbolic",
+    "search_code": "system-search-symbolic",
+    "system_processes": "utilities-system-monitor-symbolic",
     "get_ui_tree": "preferences-desktop-accessibility-symbolic",
     "screen_fence_control": "security-high-symbolic",
     "undo_last": "edit-undo-symbolic",
@@ -124,6 +128,23 @@ def _format_args_summary(tool: str, args: dict[str, Any]) -> str:
         return f"{path} ({count} commits)" if path else f"({count} commits)"
     if tool == "git_status":
         return str(args.get("path") or "")
+    if tool == "search_code":
+        pattern = str(args.get("pattern") or "")
+        path = str(args.get("path") or "")
+        file_glob = str(args.get("file_glob") or "")
+        parts = [f'"{pattern}"']
+        if path and path != ".":
+            parts.append(f"em {path}")
+        if file_glob:
+            parts.append(f"({file_glob})")
+        return " ".join(parts)
+    if tool == "system_processes":
+        filter_q = str(args.get("filter") or "")
+        limit = args.get("limit", 20)
+        sort_by = args.get("sort_by", "cpu")
+        if filter_q:
+            return f'filtro "{filter_q}" (top {limit})'
+        return f"top {limit} ordenados por {sort_by}"
 
     # Fallback genérico: primeiro argumento não nulo
     for k, v in args.items():

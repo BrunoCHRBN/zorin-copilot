@@ -1041,6 +1041,58 @@ LIVE_TOOLS_DECLARATION = [
                 },
             },
             {
+                "name": "search_code",
+                "description": "Busca de alta performance por termos, classes, funções ou padrões em arquivos de código ou diretórios usando ripgrep.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "pattern": {
+                            "type": "STRING",
+                            "description": "Termo, identificador ou regex a ser pesquisado.",
+                        },
+                        "path": {
+                            "type": "STRING",
+                            "description": "Diretório ou arquivo para buscar (opcional, padrão '.').",
+                        },
+                        "file_glob": {
+                            "type": "STRING",
+                            "description": "Filtro opcional de arquivos (ex: '*.py', '*.ts').",
+                        },
+                        "case_sensitive": {
+                            "type": "BOOLEAN",
+                            "description": "Diferenciar maiúsculas/minúsculas (padrão false).",
+                        },
+                        "max_results": {
+                            "type": "INTEGER",
+                            "description": "Limite máximo de ocorrências (padrão 30).",
+                        },
+                    },
+                    "required": ["pattern"],
+                },
+            },
+            {
+                "name": "system_processes",
+                "description": "Inspeciona processos ativos no sistema operacional, consumo de CPU/memória (%CPU, %MEM), PIDs e comandos em execução.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "filter": {
+                            "type": "STRING",
+                            "description": "Filtro opcional por nome do processo, comando ou PID (ex: 'python', 'node', 'ollama').",
+                        },
+                        "sort_by": {
+                            "type": "STRING",
+                            "enum": ["cpu", "memory", "pid"],
+                            "description": "Critério de ordenação (padrão 'cpu').",
+                        },
+                        "limit": {
+                            "type": "INTEGER",
+                            "description": "Quantidade máxima de processos (padrão 20).",
+                        },
+                    },
+                },
+            },
+            {
                 "name": "run_command",
                 "description": "Executa um comando no terminal Linux (Bash). Comandos de alto risco (ex: remoção, sudo, kill, git push) exigem confirmação verbal prévia.",
                 "parameters": {
@@ -2994,6 +3046,45 @@ class GeminiLiveClient:
                 dev_type = args.get("device_type")
                 domain = None if dev_type in (None, "all", "") else dev_type
                 return ha.get_status(entity_or_query=query, domain=domain)
+
+            elif name == "search_code":
+                from ..core.system_inspect import CodeSearchEngine
+                engine = CodeSearchEngine.get_default()
+                pattern = str(args.get("pattern") or "").strip()
+                if not pattern:
+                    return {"success": False, "message": "Parâmetro 'pattern' obrigatório para busca de código."}
+                res = engine.search(
+                    pattern=pattern,
+                    path=str(args.get("path") or ".").strip(),
+                    file_glob=str(args.get("file_glob") or "").strip(),
+                    case_sensitive=bool(args.get("case_sensitive", False)),
+                    is_regex=bool(args.get("is_regex", True)),
+                    max_results=int(args.get("max_results") or 30),
+                    context_lines=int(args.get("context_lines") or 1),
+                )
+                r_dict = res.to_dict()
+                r_dict["success"] = True
+                return r_dict
+
+            elif name == "system_processes":
+                from ..core.system_inspect import ProcessInspector
+                inspector = ProcessInspector.get_default()
+                filter_q = str(args.get("filter") or "").strip()
+                sort_b = str(args.get("sort_by") or "cpu").strip().lower()
+                limit_n = int(args.get("limit") or 20)
+                procs = inspector.list_processes(
+                    filter_query=filter_q,
+                    sort_by=sort_b,
+                    limit=limit_n,
+                )
+                tbl = inspector.format_table(procs)
+                return {
+                    "success": True,
+                    "count": len(procs),
+                    "processes": [p.to_dict() for p in procs],
+                    "summary": tbl,
+                    "message": f"Listados {len(procs)} processos no sistema.",
+                }
 
             if name == "end_session":
                 return self._tool_end_session(args)

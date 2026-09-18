@@ -36,6 +36,12 @@ Nesta etapa, resolvemos o gargalo de interrupção prematura ("Limite de passos 
    - **Cascata Tripla de Baixa Latência:** AT-SPI (0ms) $\rightarrow$ Tesseract OCR Espacial (120ms) $\rightarrow$ VLM Grounding.
    - **Novas Ferramentas Registradas:** `locate_element_visual` e `click_visual_element` integradas ao `ToolRegistry`, ao Agente ReAct e ao cliente Gemini Live.
    - **Documentação Dedicada:** Criado `docs/VLM_GROUNDING_VISUAL.md`.
+7. **Ferramentas Nativas de Busca de Código & Inspeção de Processos (Concluída ✅):**
+   - **Módulo `core/system_inspect.py`:** Implementa `CodeSearchEngine` (com ripgrep nativo e fallback determinístico em Python) e `ProcessInspector` (com `ps` tabular e fallback direto via `/proc`).
+   - **Ferramentas Nativas Integradas:** `search_code` e `system_processes` expostas no `ToolRegistry` (`RiskLevel.SAFE`) e no `GeminiLiveClient`.
+   - **Design Nativo Libadwaita:** Ícones simbólicos (`system-search-symbolic`, `utilities-system-monitor-symbolic`) e sumários claros no `AgentExecutionWidget`.
+   - **Regra 13 no Prompt:** Agente explicitamente orientado a usar `search_code` em vez de inspecionar arquivos sequencialmente.
+   - **Documentação e Testes:** `docs/BUSCA_CODIGO_E_PROCESSOS.md` e `tests/test_system_inspect.py`.
 
 ---
 
@@ -45,27 +51,25 @@ Nesta etapa, resolvemos o gargalo de interrupção prematura ("Limite de passos 
                                   MAPA DE PRIORIDADES
                                   
   ┌─────────────────────────────────┐        ┌──────────────────────────────────┐
-  │  1. GROUNDING VISUAL VLM        │   ──►  │  2. BUSCA DE CÓDIGO NATIVA       │
-  │  (CONCLUÍDO - Qwen2.5-VL/Ollama)│        │  (ripgrep / code_search / ps)    │
+  │  1. BUSCA CÓDIGO & PROCESSOS    │   ──►  │  2. AUTOMAÇÃO AVA / ANKI         │
+  │  (CONCLUÍDO - ripgrep / ps)     │        │  (Extração SCORM + Decks Anki)   │
   └─────────────────────────────────┘        └──────────────────────────────────┘
                    │                                          │
                    ▼                                          ▼
   ┌─────────────────────────────────┐        ┌──────────────────────────────────┐
-  │  3. AUTOMAÇÃO AVA / ANKI        │   ──►  │  4. MCP REMOTO (SSE / HTTP)      │
-  │  (Extração SCORM + Decks Anki)  │        │  (Servidores Cloud / Tokens)     │
+  │  3. MCP REMOTO (SSE / HTTP)     │   ──►  │  4. MCP PROMPTS NA PALETA        │
+  │  (Servidores Cloud / Tokens)    │        │  (Atalhos dinâmicos via Ctrl+K)  │
   └─────────────────────────────────┘        └──────────────────────────────────┘
 ```
 
 ### Passo 1: Grounding Visual com VLM Local (Concluído ✅)
 - Suporte a modelos de visão no Ollama (`qwen2.5vl`, `minicpm-v`) implementado com desambiguação geométrica, projeção pixel-perfect em monitores Wayland e fallback em nuvem. Ferramentas `locate_element_visual` e `click_visual_element` operacionais.
 
-### Passo 2: Ferramentas Nativas de Busca de Código e Processos Locais
-- **Problema:** Quando o agente precisa encontrar definições ou inspecionar processos travados no sistema, ler arquivos um a um pelo sistema de arquivos consome muitos passos do orçamento.
-- **Ações:**
-  1. Implementar ferramenta nativa `search_code(pattern, path, file_glob)` com subprocesso isolado chamando `ripgrep` (ou busca pura em Python), retornando snippets com número de linha e contexto.
-  2. Implementar ferramenta `system_processes(filter)` para inspecionar consumo de RAM/CPU e verificar se servidores ou serviços de desenvolvimento estão ativos.
+### Passo 2: Ferramentas Nativas de Busca de Código e Processos Locais (Concluído ✅)
+- Implementada a ferramenta `search_code` com ripgrep e fallback em Python, permitindo buscas instantâneas por definições e padrões sem queimar passos de leitura de arquivos.
+- Implementada a ferramenta `system_processes` com `ps` e fallback `/proc`, permitindo monitorar consumo de RAM/CPU e verificar serviços e servidores ativos.
 
-### Passo 4: Pipeline de Automação de Estudo AVA / SENAC (Fase A)
+### Passo 3: Pipeline de Automação de Estudo AVA / SENAC (Fase A)
 - **Problema:** A captura de materiais didáticos do portal EAD exige interação manual repetitiva através de múltiplos módulos e subunidades.
 - **Ações:**
   1. Sequência automatizada de navegação supervisionada para listagem e leitura de unidades curriculares.

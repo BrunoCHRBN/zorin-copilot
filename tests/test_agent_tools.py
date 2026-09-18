@@ -799,6 +799,30 @@ def test_tool_registry_unified_tools():
     registry.close()
 
 
+def test_search_code_and_system_processes_tools():
+    registry = ToolRegistry()
+    assert registry.classify("search_code", {})[0] == RiskLevel.SAFE
+    assert registry.classify("system_processes", {})[0] == RiskLevel.SAFE
+    assert registry.requires_approval("search_code", {}) is False
+    assert registry.requires_approval("system_processes", {}) is False
 
+    # Busca de código
+    res_search = registry.call(
+        "search_code",
+        {"pattern": "class ToolRegistry", "path": "src", "max_results": 2},
+    )
+    assert res_search["ok"] is True
+    assert res_search["total_matches"] >= 1
+    assert "summary" in res_search
 
+    # Inspeção de processos
+    res_proc = registry.call(
+        "system_processes",
+        {"limit": 5, "sort_by": "cpu"},
+    )
+    assert res_proc["ok"] is True
+    assert isinstance(res_proc["processes"], list)
+    assert len(res_proc["processes"]) <= 5
+    assert "summary" in res_proc
 
+    registry.close()

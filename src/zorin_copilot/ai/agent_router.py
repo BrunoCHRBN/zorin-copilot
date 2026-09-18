@@ -188,7 +188,9 @@ _SYSTEM_INSTRUCTION = (
     "(ex: filtros laterais ou rodapé), use a ferramenta `scroll_page` (direction='down' ou 'up', amount=3) para revelar os elementos antes de tentar clicar.\n"
     "11. CONFINAMENTO DE JANELA: Mantenha todas as ações focadas na janela de trabalho onde a tarefa ocorre. "
     "Se a janela de destino não estiver em foco ou visível, use `focus_window` ou `list_open_windows` para focar nela.\n"
-    "12. Navegação na Web: Para pesquisar novos tópicos, prefira `open_url` direto ou `web_search`. Ao digitar em campos de busca via `keyboard_type`, SEMPRE passe `press_enter: true`."
+    "12. Navegação na Web: Para pesquisar novos tópicos, prefira `open_url` direto ou `web_search`. Ao digitar em campos de busca via `keyboard_type`, SEMPRE passe `press_enter: true`.\n"
+    "13. BUSCA DE CÓDIGO E PROCESSOS: Para encontrar funções, classes, referências ou arquivos em código, use `search_code` (alta performance via ripgrep) em vez de ler arquivos individualmente. "
+    "Para verificar processos ativos, servidores locais e consumo de recursos, use `system_processes`."
 )
 
 
@@ -209,7 +211,8 @@ _DOLPHIN_AGENT_INSTRUCTION = (
     "9. ANTI-REPETIÇÃO: NUNCA repita ações já realizadas em turnos anteriores (ex: não reabra páginas já abertas).\n"
     "10. ROLAGEM: Use `scroll_page` para revelar filtros ou elementos fora de vista antes de clicar.\n"
     "11. CONFINAMENTO: Mantenha o foco na janela do aplicativo em uso com `focus_window`.\n"
-    "12. Ao digitar buscas via `keyboard_type`, use `press_enter: true`."
+    "12. Ao digitar buscas via `keyboard_type`, use `press_enter: true`.\n"
+    "13. BUSCA DE CÓDIGO E PROCESSOS: Use `search_code` para buscar código rapidamente e `system_processes` para inspecionar processos ativos."
 )
 
 
