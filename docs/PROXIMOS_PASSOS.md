@@ -19,6 +19,12 @@ Nesta etapa, resolvemos o gargalo de interrupção prematura ("Limite de passos 
    - **Regra 8 Rígida no Prompt:** Inclusão explícita no `_SYSTEM_INSTRUCTION` proibindo a presunção ou invenção de conteúdos quando ferramentas falharem ou expirarem.
    - **Janela de Observação Expandida:** Fim do afunilamento de 300 caracteres; os últimos 4 passos agora contam com até 3.500 caracteres, permitindo ler cabeçalhos, commits e logs completos.
    - **Ferramentas Nativas Locais de Alta Densidade (`git_log` e `git_status`):** Evita chamadas remotas lentas via MCP GitHub quando o repositório local está acessível, rodando em subprocessos isolados com timeouts estritos.
+4. **Módulos Operacionais de Produtividade & Automação Concluídos:**
+   - **Casa Inteligente & IoT (`core/home_assistant.py`):** Suporte completo a lâmpadas inteligentes (Avant Neo / Tuya), ar-condicionado e tomadas via Home Assistant, com ferramentas acionáveis no Gemini Live e no Agente.
+   - **VS Code Workspace & Dev (`core/vscode.py`):** Gestão de projetos ativos, templates, leitura, escrita e patch atômico de código.
+   - **Academic Hub (`core/academic_hub.py`):** Pesquisa e citação científica unificada (arXiv, OpenAlex, PubMed, Semantic Scholar).
+   - **Gerenciador de Janelas (`core/window_manager.py`):** Manipulação de janelas no Hyprland/Wayland/X11.
+   - **Seletor de Modelos em Tempo Real & Preview de Voz (`ui/widgets/model_selector.py` & `ai/voice_preview.py`).**
 
 ---
 

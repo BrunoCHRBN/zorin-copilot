@@ -372,11 +372,12 @@ def test_academic_search_executa_pesquisa(monkeypatch):
         def academic_search(self, query, source="all", max_results=5):
             return [FakeSearchResult()]
 
-    from zorin_copilot.core import web_search
+    from zorin_copilot.core import web_search, academic_hub
     monkeypatch.setattr(web_search, "WebSearchClient", FakeClient)
+    monkeypatch.setattr(academic_hub, "WebSearchClient", FakeClient)
 
     registry = make_registry()
-    res = registry.call("academic_search", {"query": "gestao comercial varejo", "source": "scielo"})
+    res = registry.call("academic_search", {"query": "gestao comercial varejo", "source": "scielo", "scope": "web"})
     assert res["ok"] is True
     assert res["count"] == 1
     assert res["results"][0]["title"] == "Gestão de Canais e Distribuição no Varejo"
@@ -620,4 +621,142 @@ def test_git_tools_sao_classificadas_como_safe():
     assert registry.requires_approval("git_log", {}) is False
     assert registry.requires_approval("git_status", {}) is False
     registry.close()
+
+
+def test_list_open_windows_tool(monkeypatch):
+    registry = ToolRegistry()
+    from zorin_copilot.core.window_manager import WindowInfo, WindowManager
+
+    fake_windows = [
+        WindowInfo(id="0x1", app="chrome", title="Browser", x=0, y=0, width=1920, height=1080, is_active=True),
+        WindowInfo(id="0x2", app="kitty", title="Shell", x=100, y=100, width=800, height=600, is_active=False),
+    ]
+    monkeypatch.setattr(WindowManager, "list_windows", lambda **kwargs: fake_windows)
+
+    res = registry.call("list_open_windows", {})
+    assert res["ok"] is True
+    assert res["count"] == 2
+    assert res["windows"][0]["app"] == "chrome"
+    registry.close()
+
+
+def test_focus_window_tool(monkeypatch):
+    from zorin_copilot.core.fence import ScreenFenceManager
+    from zorin_copilot.core.window_manager import WindowInfo, WindowManager
+
+    fence = ScreenFenceManager()
+    registry = ToolRegistry(fence=fence)
+
+    target_win = WindowInfo(id="0x123", app="firefox", title="Browser", x=50, y=50, width=1200, height=900)
+    focused = []
+
+    monkeypatch.setattr(WindowManager, "find_window", lambda q: target_win if "firefox" in q else None)
+    monkeypatch.setattr(WindowManager, "focus_window", lambda target: focused.append(target) or True)
+
+    res = registry.call("focus_window", {"query": "firefox"})
+    assert res["ok"] is True
+    assert "focada com sucesso" in res["message"]
+    assert "0x123" in focused
+    assert fence.get_target_window() == target_win
+
+    # Teste query vazia
+    res_err = registry.call("focus_window", {"query": ""})
+    assert res_err["ok"] is False
+
+    registry.close()
+
+
+def test_scroll_page_tool(monkeypatch):
+    from zorin_copilot.shell.input_driver import VirtualInputDriver
+    driver = VirtualInputDriver(simulation=True)
+    registry = ToolRegistry(input_driver=driver)
+
+    res = registry.call("scroll_page", {"direction": "down", "amount": 4})
+    assert res["ok"] is True
+    assert res["direction"] == "down"
+    assert res["amount"] == 4
+
+    res_up = registry.call("scroll_page", {"direction": "up", "amount": 2})
+    assert res_up["ok"] is True
+    assert res_up["direction"] == "up"
+    assert res_up["amount"] == 2
+
+    registry.close()
+
+
+def test_click_and_type_tool():
+    driver = FakeDriver()
+    fence = FakeFence()
+    registry = ToolRegistry(input_driver=driver, fence=fence)
+
+    # 1. Clique e digitação válidos dentro da cerca
+    res = registry.call("click_and_type", {"x": 200, "y": 150, "text": "pesquisa rápida", "press_enter": True})
+    assert res["ok"] is True
+    assert driver.clicks == [(200, 150)]
+    assert "pesquisa rápida" in driver.texts
+
+    # 2. Com clear_first
+    driver.clicks.clear()
+    driver.hotkeys.clear()
+    res_clear = registry.call(
+        "click_and_type",
+        {"x": 100, "y": 80, "text": "novo termo", "clear_first": True, "press_enter": False},
+    )
+    assert res_clear["ok"] is True
+    assert driver.clicks == [(100, 80)]
+    assert ["ctrl", "a"] in driver.hotkeys
+    assert ["backspace"] in driver.hotkeys
+
+    # 3. Fora da cerca espacial -> bloqueio seguro
+    driver.clicks.clear()
+    res_blocked = registry.call("click_and_type", {"x": 800, "y": 900, "text": "inseguro"})
+    assert res_blocked["ok"] is False
+    assert res_blocked["blocked_by"] == "fence"
+    assert driver.clicks == []
+
+    registry.close()
+
+
+def test_vscode_workspace_patch_code_tool(tmp_path, monkeypatch):
+    from zorin_copilot.core.vscode import VSCodeManager
+
+    demo_file = tmp_path / "app.py"
+    demo_file.write_text("def hello():\n    return 'old'\n", encoding="utf-8")
+
+    registry = ToolRegistry()
+    monkeypatch.setattr(VSCodeManager, "open_file", lambda *a, **kw: {"success": True})
+
+    # 1. Execução de patch_code
+    res = registry.call(
+        "vscode_workspace",
+        {
+            "action": "patch_code",
+            "file_path": str(demo_file),
+            "target_code": "return 'old'",
+            "replacement_code": "return 'updated'",
+        },
+    )
+    assert res["ok"] is True
+    assert res["success"] is True
+    assert "return 'updated'" in demo_file.read_text(encoding="utf-8")
+
+    # 2. Dry-run de patch_code não modifica arquivo
+    dry_registry = registry.for_dry_run()
+    dry_res = dry_registry.call(
+        "vscode_workspace",
+        {
+            "action": "patch_code",
+            "file_path": str(demo_file),
+            "target_code": "return 'updated'",
+            "replacement_code": "return 'dry'",
+        },
+    )
+    assert dry_res["ok"] is True
+    assert dry_res.get("dry_run") is True
+    assert "return 'updated'" in demo_file.read_text(encoding="utf-8")
+
+    registry.close()
+
+
+
 

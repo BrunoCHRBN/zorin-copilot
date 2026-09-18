@@ -128,10 +128,27 @@ class HyprlandEffects:
         self._remove(f"layer-blur:{namespace}", "keyword", "layerrule", f"noblur,{namespace}")
         self._remove(f"layer-round:{namespace}", "keyword", "layerrule", f"norounding,{namespace}")
 
+    def ensure_hyprbars_rule(self, class_: str = "io.github.bruno.ZorinCopilot") -> None:
+        """Desativa a barra do plugin hyprbars para as janelas do Zorin Copilot."""
+        pattern = f"^({class_}|zorin-copilot)$"
+        self._ensure(f"hyprbars-nobar:{class_}", "keyword", "windowrule", f"hyprbars:no_bar 1, match:class {pattern}")
+
+    def ensure_pill_window_rules(self, class_: str = "io.github.bruno.ZorinCopilot") -> None:
+        """Garante que a pílula de voz flutue sem borda/sombra no Hyprland quando layer-shell não está ativo."""
+        pattern = f"^({class_}|zorin-copilot)$"
+        self._ensure(f"pill-float:{class_}", "keyword", "windowrule", f"float 1, match:class {pattern}, match:title ^(Zorin Copilot Live)$")
+        self._ensure(f"pill-pin:{class_}", "keyword", "windowrule", f"pin 1, match:class {pattern}, match:title ^(Zorin Copilot Live)$")
+        self._ensure(f"pill-noborder:{class_}", "keyword", "windowrule", f"border_size 0, match:class {pattern}, match:title ^(Zorin Copilot Live)$")
+        self._ensure(f"pill-noshadow:{class_}", "keyword", "windowrule", f"no_shadow 1, match:class {pattern}, match:title ^(Zorin Copilot Live)$")
+        self._ensure(f"pill-move:{class_}", "keyword", "windowrule", f"move 50% 3%, match:class {pattern}, match:title ^(Zorin Copilot Live)$")
+        self.ensure_hyprbars_rule(class_)
+
     def apply_for_app(self, class_: str = "io.github.bruno.ZorinCopilot") -> None:
         """Aplica blur+rounding para a janela principal e a pílula (chamado no realize)."""
         self.ensure_window_blur(class_)
         self.ensure_layer_blur(current_environment().blur_namespace())
+        self.ensure_hyprbars_rule(class_)
+        self.ensure_pill_window_rules(class_)
 
     def remove_all(self, class_: str = "io.github.bruno.ZorinCopilot") -> None:
         """Remove todas as regras deste app (chamado no encerramento)."""

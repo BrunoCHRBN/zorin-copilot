@@ -726,7 +726,7 @@ class LocalDocumentRAG:
                     f.file_name,
                     f.title,
                     f.page_number,
-                    snippet(rag_fts, 4, '<b>', '</b>', '...', 22) as highlighted_snippet,
+                    snippet(rag_fts, 4, '', '', '...', 22) as highlighted_snippet,
                     f.rank,
                     COALESCE(d.trust_level, 'trusted') as trust_level
                 FROM rag_fts f
@@ -743,13 +743,14 @@ class LocalDocumentRAG:
                     if key not in seen_paths_pages:
                         seen_paths_pages.add(key)
                         t_level = r["trust_level"] if "trust_level" in r.keys() else "trusted"
+                        snip = re.sub(r"</?[a-zA-Z0-9]+[^>]*>", "", r["highlighted_snippet"] or "").strip()
                         results.append(
                             DocumentSearchResult(
                                 file_path=r["file_path"],
                                 file_name=r["file_name"],
                                 title=r["title"],
                                 page_number=p_num,
-                                snippet=r["highlighted_snippet"],
+                                snippet=snip,
                                 rank_score=float(r["rank"]),
                                 trust_level=t_level,
                             )
@@ -768,13 +769,14 @@ class LocalDocumentRAG:
                         if key not in seen_paths_pages:
                             seen_paths_pages.add(key)
                             t_level = r["trust_level"] if "trust_level" in r.keys() else "trusted"
+                            snip = re.sub(r"</?[a-zA-Z0-9]+[^>]*>", "", r["highlighted_snippet"] or "").strip()
                             results.append(
                                 DocumentSearchResult(
                                     file_path=r["file_path"],
                                     file_name=r["file_name"],
                                     title=r["title"],
                                     page_number=p_num,
-                                    snippet=r["highlighted_snippet"],
+                                    snippet=snip,
                                     rank_score=float(r["rank"]),
                                     trust_level=t_level,
                                 )

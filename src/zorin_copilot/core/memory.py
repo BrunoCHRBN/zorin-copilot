@@ -110,6 +110,29 @@ class MemoryManager:
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_user_contacts_email ON user_contacts (email COLLATE NOCASE)
             """)
+
+            # 6. Tabela de acervo e biblioteca acadêmica (Fichamentos, Artigos, Trabalhos)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS academic_library (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    authors TEXT NOT NULL DEFAULT '',
+                    year TEXT NOT NULL DEFAULT '',
+                    source TEXT NOT NULL DEFAULT '',
+                    abstract TEXT NOT NULL DEFAULT '',
+                    abnt_citation TEXT NOT NULL DEFAULT '',
+                    file_path_or_url TEXT NOT NULL DEFAULT '',
+                    discipline TEXT NOT NULL DEFAULT 'Gestão Comercial',
+                    tags_json TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL
+                )
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_academic_library_title ON academic_library (title COLLATE NOCASE)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_academic_library_discipline ON academic_library (discipline COLLATE NOCASE)
+            """)
             conn.commit()
 
     # =========================================================================
@@ -619,3 +642,130 @@ class MemoryManager:
             cursor.execute("DELETE FROM knowledge_facts")
             cursor.execute("DELETE FROM chat_topics")
             conn.commit()
+
+    # =========================================================================
+    # Acervo e Fichamento Acadêmico (Artigos, Trabalhos e PIs)
+    # =========================================================================
+
+    def save_academic_entry(
+        self,
+        title: str,
+        authors: str = "",
+        year: str = "",
+        source: str = "",
+        abstract: str = "",
+        abnt_citation: str = "",
+        file_path_or_url: str = "",
+        discipline: str = "Gestão Comercial",
+        tags: list[str] | None = None,
+    ) -> int:
+        """Salva ou atualiza um artigo/trabalho no acervo acadêmico local."""
+        now = datetime.now().isoformat()
+        tags_str = json.dumps(tags or [], ensure_ascii=False)
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO academic_library (
+                    title, authors, year, source, abstract, abnt_citation,
+                    file_path_or_url, discipline, tags_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    title.strip(),
+                    authors.strip(),
+                    str(year).strip(),
+                    source.strip(),
+                    abstract.strip(),
+                    abnt_citation.strip(),
+                    file_path_or_url.strip(),
+                    discipline.strip(),
+                    tags_str,
+                    now,
+                ),
+            )
+            conn.commit()
+            return cursor.lastrowid or 0
+
+    def list_academic_entries(
+        self,
+        discipline: str | None = None,
+        query: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Lista materiais salvos na biblioteca acadêmica local com filtros opcionais."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            conditions: list[str] = []
+            params: list[Any] = []
+
+            if discipline:
+                conditions.append("discipline = ?")
+                params.append(discipline)
+
+            if query:
+                conditions.append("(title LIKE ? OR abstract LIKE ? OR authors LIKE ? OR source LIKE ?)")
+                q_like = f"%{query.strip()}%"
+                params.extend([q_like, q_like, q_like, q_like])
+
+            where_clause = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+            sql = f"SELECT * FROM academic_library{where_clause} ORDER BY id DESC LIMIT ?"
+            params.append(limit)
+
+            cursor.execute(sql, tuple(params))
+            results = []
+            for row in cursor.fetchall():
+                try:
+                    tags = json.loads(row["tags_json"])
+                except Exception:
+                    tags = []
+                results.append(
+                    {
+                        "id": row["id"],
+                        "title": row["title"],
+                        "authors": row["authors"],
+                        "year": row["year"],
+                        "source": row["source"],
+                        "abstract": row["abstract"],
+                        "abnt_citation": row["abnt_citation"],
+                        "file_path_or_url": row["file_path_or_url"],
+                        "discipline": row["discipline"],
+                        "tags": tags,
+                        "created_at": row["created_at"],
+                    }
+                )
+            return results
+
+    def get_academic_entry(self, entry_id: int) -> dict[str, Any] | None:
+        """Obtém um item do acervo acadêmico pelo ID."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM academic_library WHERE id = ?", (entry_id,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            try:
+                tags = json.loads(row["tags_json"])
+            except Exception:
+                tags = []
+            return {
+                "id": row["id"],
+                "title": row["title"],
+                "authors": row["authors"],
+                "year": row["year"],
+                "source": row["source"],
+                "abstract": row["abstract"],
+                "abnt_citation": row["abnt_citation"],
+                "file_path_or_url": row["file_path_or_url"],
+                "discipline": row["discipline"],
+                "tags": tags,
+                "created_at": row["created_at"],
+            }
+
+    def delete_academic_entry(self, entry_id: int) -> bool:
+        """Exclui um item do acervo acadêmico pelo ID."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM academic_library WHERE id = ?", (entry_id,))
+            conn.commit()
+            return cursor.rowcount > 0

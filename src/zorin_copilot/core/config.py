@@ -22,15 +22,12 @@ class CopilotConfig:
     gemini_model: str = "gemini-3.6-flash"
     # Importante: a BidiGenerateContent (Live API) rejeita aliases como
     # "-latest" para modelos de áudio — precisa ser um model code válido.
-    # Modelo de voz atual do Google (lançado em 26/03/2026, última
-    # atualização em março/2026): gemini-3.1-flash-live-preview.
-    # (https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-live-preview)
-    #
-    # Atenção na migração 2.5 -> 3.1: no 3.1, `clientContent` só serve para
-    # semear histórico inicial (exige initial_history_in_client_content).
-    # Texto durante a conversa vai por `realtimeInput` (ver ai/live.py).
-    gemini_live_model: str = "models/gemini-3.1-flash-live-preview"
-    gemini_live_voice: str = "Puck"  # "Puck", "Aoede", "Charon", "Fenrir", "Kore"
+    # Modelos de voz oficiais Gemini 3.8 (lançados em setembro/2026):
+    # - models/gemini-3.8-live (Baixa latência, conversação contínua fluida)
+    # - models/gemini-3.8-live-extended-thinking (Raciocínio profundo e narração de progresso)
+    # (https://ai.google.dev/gemini-api/docs/live-api)
+    gemini_live_model: str = "models/gemini-3.8-live"
+    gemini_live_voice: str = "Puck"  # "Puck", "Aoede", "Charon", "Kore", "Fenrir", "Zephyr", "Callirrhoe", "Sulafat"
     
     # Configurações do Ollama (Local)
     ollama_url: str = "http://127.0.0.1:11434"
@@ -80,6 +77,9 @@ class CopilotConfig:
     # Atalho Global de Voz ao Vivo (Fase 3, parte B)
     live_voice_hotkey_enabled: bool = True
     live_voice_hotkey: str = "<Super>v"
+    live_voice_jitter_buffer_ms: int = 240  # buffer de pré-carregamento (ms) para absorver jitter
+    live_voice_ducking_enabled: bool = True  # atenua envio do mic enquanto a IA fala para evitar corte por eco
+    live_voice_interrupt_threshold_rms: float = 2800.0  # volume mínimo (RMS) para interrupção voluntária (barge-in)
 
     # Wake word ("palavra de ativação") — detecção offline e hands-free
     wake_word_enabled: bool = False
@@ -141,6 +141,12 @@ class CopilotConfig:
     agent_max_steps: int = 15
     agent_max_seconds: float = 300.0
     agent_adaptive_budget: bool = True
+
+    # Casa Inteligente e IoT (Home Assistant)
+    ha_enabled: bool = True
+    ha_url: str = "http://localhost:8123"
+    ha_token: str = ""
+    ha_default_light: str = ""  # ID opcional da lâmpada principal (ex: light.lampada_quarto)
 
     # Configurações de Confiança, Privacidade e RAG
 
@@ -212,6 +218,12 @@ class CopilotConfig:
             except Exception:
                 pass
 
+        # Migração de limiares acústicos legados (evita auto-interrupção / engasgos por eco)
+        if config.live_voice_interrupt_threshold_rms < 2000.0:
+            config.live_voice_interrupt_threshold_rms = 2800.0
+        if config.live_voice_jitter_buffer_ms < 240:
+            config.live_voice_jitter_buffer_ms = 240
+
         # Fallback para variáveis de ambiente se campos estiverem vazios
         if not config.gemini_api_key:
             config.gemini_api_key = os.environ.get("GEMINI_API_KEY", "")
@@ -219,6 +231,10 @@ class CopilotConfig:
             config.openai_api_key = os.environ.get("OPENAI_API_KEY", "")
         if not config.workbuddy_api_key:
             config.workbuddy_api_key = os.environ.get("WORKBUDDY_API_KEY", "")
+        if not config.ha_url:
+            config.ha_url = os.environ.get("HOME_ASSISTANT_URL", "http://localhost:8123")
+        if not config.ha_token:
+            config.ha_token = os.environ.get("HOME_ASSISTANT_TOKEN", "")
 
         # Prompt de sistema: se o usuário não customizou, usa a descrição da
         # plataforma real (evita dizer "Zorin OS 18" num EndeavourOS/Hyprland).

@@ -15,6 +15,7 @@ from zorin_copilot.ai.agent import (
     STOP_ABORTED,
     STOP_DONE,
     STOP_ERROR,
+    STOP_LOOP,
     STOP_MAX_STEPS,
     STOP_REJECTED,
     STOP_REPEATED,
@@ -166,6 +167,41 @@ def test_falha_seguida_de_sucesso_nao_dispara_repeticao():
     planner = ScriptedPlanner([ToolCall("get_ui_tree")] * 6)
     result = loop_for(planner, registry, max_repeats=2, max_steps=6).run("x")
     assert result.stop_reason == STOP_MAX_STEPS
+
+
+def test_loop_repetitivo_identico_interrompe_com_stop_loop():
+    class RepetitiveLLMPlanner:
+        name = "llm"
+        def decide(self, *args, **kwargs):
+            return AgentDecision(tool_call=ToolCall("find_on_screen", {"query": "Máximo"}))
+
+    registry = StubRegistry(default={"ok": True, "result": "encontrado"})
+    loop = loop_for(RepetitiveLLMPlanner(), registry, max_steps=10)
+    result = loop.run("testar loop")
+
+    assert result.stop_reason == STOP_LOOP
+    assert len(result.steps) == 4
+    assert "Loop detectado" in result.error
+
+
+def test_loop_ciclico_alternante_interrompe_com_stop_loop():
+    class CyclicLLMPlanner:
+        name = "llm"
+        def __init__(self):
+            self.count = 0
+        def decide(self, *args, **kwargs):
+            self.count += 1
+            if self.count % 2 == 1:
+                return AgentDecision(tool_call=ToolCall("find_on_screen", {"query": "Preço"}))
+            return AgentDecision(tool_call=ToolCall("mouse_click", {"x": 200, "y": 300}))
+
+    registry = StubRegistry(default={"ok": True, "result": "ok"})
+    loop = loop_for(CyclicLLMPlanner(), registry, max_steps=10)
+    result = loop.run("testar loop ciclico")
+
+    assert result.stop_reason == STOP_LOOP
+    assert len(result.steps) == 6
+    assert "Loop cíclico detectado" in result.error
 
 
 # --------------------------------------------------------------------------- #

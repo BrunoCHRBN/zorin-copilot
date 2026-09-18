@@ -42,15 +42,31 @@ class FileManager:
 
         Existe para que o executor possa fotografar o arquivo **antes** de
         sobrescrevê-lo — sem duplicar aqui a regra de higienização do nome.
+        Normaliza caminhos fictícios como /home/usuario para a home real do usuário.
         """
-        clean_name = os.path.basename((filename or "").strip())
+        raw_fn = (filename or "").strip().strip("'\"")
+        fn_dir = os.path.dirname(raw_fn)
+        clean_name = os.path.basename(raw_fn)
         if not clean_name:
             clean_name = "relatorio.md"
         if "." not in clean_name:
             clean_name = f"{clean_name}.md"
 
-        if directory:
-            target_dir = os.path.expanduser(directory.strip())
+        actual_dir = directory.strip() if directory else (fn_dir if fn_dir else None)
+
+        if actual_dir:
+            # Expande ~ primeiro
+            target_dir = os.path.expanduser(actual_dir)
+            home_str = str(Path.home())
+            home_pattern = re.compile(r"^/home/([^/]+)(/.*)?$")
+            m = home_pattern.match(target_dir)
+            if m:
+                found_user = m.group(1)
+                rest = m.group(2) or ""
+                if found_user != Path.home().name:
+                    target_dir = home_str + rest
+            elif not os.path.isabs(target_dir):
+                target_dir = os.path.join(home_str, target_dir)
         else:
             is_academic = any(
                 k in clean_name.lower()
@@ -72,7 +88,12 @@ class FileManager:
                     "relatório_gerencial",
                 )
             )
-            if is_academic:
+            is_script = clean_name.lower().endswith(
+                (".py", ".sh", ".bash", ".js", ".ts", ".c", ".cpp", ".rs", ".go")
+            )
+            if is_script:
+                target_dir = os.path.expanduser("~/scripts")
+            elif is_academic:
                 target_dir = os.path.expanduser("~/Documentos/Gestao_Comercial/TCC_Artigos")
             else:
                 target_dir = os.path.expanduser("~/Documentos/Relatorios")

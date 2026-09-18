@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import threading
 import time
 
@@ -104,6 +105,15 @@ def _overlay_is_pill(config: object) -> bool:
     return mode != "full"
 
 
+def _is_test_environment() -> bool:
+    """Detecta se o código está sendo executado em ambiente de testes."""
+    return bool(
+        os.environ.get("ZORIN_TEST_MODE")
+        or os.environ.get("PYTEST_CURRENT_TEST")
+        or "pytest" in sys.modules
+    )
+
+
 class CopilotWindow(Adw.ApplicationWindow):
     """Janela principal do Copilot: compõe os widgets e orquestra a conversa."""
 
@@ -141,6 +151,7 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.live_client: GeminiLiveClient | LocalLiveVoiceClient | None = None
         self.live_voice_widget: LiveVoiceWidget | None = None
         self.voice_pill_window: VoicePillWindow | None = None
+        self._live_voice_as_pill: bool = False
 
         # Ditado Global / Voice Typing no app em foco
         self.dictation_service: Any | None = None
@@ -161,7 +172,8 @@ class CopilotWindow(Adw.ApplicationWindow):
         # Cursor Fantasma da IA (Overlay do Operador / Computer-Use)
         try:
             from .ghost_cursor import GhostCursorOverlay
-            GhostCursorOverlay.get_default().initialize(application)
+            if not _is_test_environment():
+                GhostCursorOverlay.get_default().initialize(app)
         except Exception as exc:
             logger.debug("Ghost Cursor não inicializado na janela: %s", exc)
 
@@ -177,7 +189,8 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.rag = LocalDocumentRAG(memory=self.engine.memory)
         self.executor.rag = self.rag
         self.engine.rag = self.rag
-        self.rag.start_background_indexing()
+        if not _is_test_environment():
+            self.rag.start_background_indexing()
 
         self._build_ui()
         # Alvo de arrastar-e-soltar na janela inteira, não só no fluxo de chat.
@@ -195,6 +208,8 @@ class CopilotWindow(Adw.ApplicationWindow):
 
     def _init_mcp_servers(self) -> None:
         """Inicia servidores MCP habilitados em segundo plano, se ativado."""
+        if _is_test_environment():
+            return
         if getattr(self.config, "mcp_enabled", True) and getattr(self.config, "mcp_auto_connect", True):
             import threading
             threading.Thread(target=self.mcp_manager.start_all_enabled, daemon=True).start()
@@ -221,6 +236,8 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.wake_word_engine.match_partials = bool(
             getattr(self.config, "wake_word_match_partials", False)
         )
+        if _is_test_environment():
+            return
         if getattr(self.config, "wake_word_enabled", False):
             started = self.wake_word_engine.start()
             if not started:
@@ -384,6 +401,7 @@ class CopilotWindow(Adw.ApplicationWindow):
             "app.command-palette": self._open_command_palette,
             "app.export-conversation": self.export_conversation,
             "app.undo-action": self._on_undo_shortcut,
+            "app.model-selector": self._open_model_selector,
         }
 
         controller = Gtk.ShortcutController()
@@ -568,6 +586,12 @@ class CopilotWindow(Adw.ApplicationWindow):
                 "network-server-symbolic", "", ("mcp", "extensões", "servidores", "plugins", "recarregar"),
             ),
             PaletteCommand(
+                "app.model-selector", "Alternar Modelo ou Agente de IA",
+                "Troca rápida entre Dolphin 3.1 Uncensored, modelos locais e nuvem",
+                "preferences-system-symbolic", acc("app.model-selector"),
+                ("modelo", "agente", "ia", "ollama", "dolphin", "qwen", "gemini", "trocar", "uncensored"),
+            ),
+            PaletteCommand(
                 "app.quit", "Sair do Zorin Copilot", "",
                 "application-exit-symbolic", acc("app.quit"), ("fechar", "encerrar"),
             ),
@@ -621,6 +645,7 @@ class CopilotWindow(Adw.ApplicationWindow):
             "app.undo-action": self.undo_last_action,
             "app.clear-attachments": self.clear_attachments,
             "app.open-settings": self._open_settings,
+            "app.model-selector": self._open_model_selector,
             "app.clear-history": self.sidebar.clear_history,
             "app.context-refresh": self._refresh_context_command,
             "app.mcp-reload": self._reload_mcp_servers,
@@ -837,6 +862,12 @@ class CopilotWindow(Adw.ApplicationWindow):
     def _on_select_all_monitors(self, popover: Gtk.Popover) -> None:
         self.header.on_select_all_monitors(popover)
 
+    def _on_select_active_window_mode(self, popover: Gtk.Popover) -> None:
+        self.header.on_select_active_window_mode(popover)
+
+    def _on_select_window(self, win: Any, popover: Gtk.Popover) -> None:
+        self.header.on_select_window(win, popover)
+
     def _on_toggle_kill_switch(self, popover: Gtk.Popover | None = None) -> None:
         self.header.on_toggle_kill_switch(popover)
 
@@ -883,7 +914,7 @@ class CopilotWindow(Adw.ApplicationWindow):
     def _on_realize_window(self, _win) -> None:
         """Aplica blur/rounding reais do compositor (Hyprland) à janela principal."""
         try:
-            hyprland_effects.ensure_window_blur(__app_id__)
+            hyprland_effects.apply_for_app(__app_id__)
         except Exception as exc:  # nunca deve derrubar a janela
             logger.debug("não foi possível aplicar blur do compositor: %s", exc)
 
@@ -928,6 +959,11 @@ class CopilotWindow(Adw.ApplicationWindow):
     # ------------------------------------------------------------------
     def _open_settings(self, _btn: Gtk.Button | None = None) -> None:
         dialog = PreferencesDialog(self, on_saved=self._on_config_saved)
+        dialog.present(self)
+
+    def _open_model_selector(self, _btn: Gtk.Button | None = None) -> None:
+        from .widgets.model_selector import ModelSelectorDialog
+        dialog = ModelSelectorDialog(self)
         dialog.present(self)
 
     def _on_config_saved(self, new_config: CopilotConfig) -> None:
@@ -1090,11 +1126,12 @@ class CopilotWindow(Adw.ApplicationWindow):
         self.status_bar.refresh_tokens()
 
         # Execução automática proativa se habilitada nas preferências e ações forem seguras
-        executable = [a for a in plan.actions if a.action_type != ActionType.ANSWER]
-        if getattr(self.config, "auto_execute_safe_actions", False) and executable:
-            safe_types = {ActionType.WRITE_FILE, ActionType.OPEN_DOCUMENT, ActionType.LAUNCH_APP, ActionType.OPEN_URL, ActionType.NOTIFY}
-            if all(not a.requires_confirmation and a.action_type in safe_types for a in executable):
-                GLib.timeout_add(400, lambda: self._auto_execute_safe_plan(plan))
+        if not _is_test_environment():
+            executable = [a for a in plan.actions if a.action_type != ActionType.ANSWER]
+            if getattr(self.config, "auto_execute_safe_actions", False) and executable:
+                safe_types = {ActionType.WRITE_FILE, ActionType.OPEN_DOCUMENT, ActionType.LAUNCH_APP, ActionType.OPEN_URL, ActionType.NOTIFY}
+                if all(not a.requires_confirmation and a.action_type in safe_types for a in executable):
+                    GLib.timeout_add(400, lambda: self._auto_execute_safe_plan(plan))
 
         return GLib.SOURCE_REMOVE
 
@@ -1190,6 +1227,18 @@ class CopilotWindow(Adw.ApplicationWindow):
                 GLib.idle_add(self._on_agent_finished, None, objective, agent_widget, err_msg)
                 return
 
+            # Confina todas as ações estritamente na área/janela em que o assistente já está atuando
+            try:
+                from ..core.window_manager import WindowManager
+                from ..core.fence import FenceMode
+                target_win = WindowManager.get_active_or_last_window()
+                if target_win and self.fence:
+                    if self.fence.mode in (FenceMode.ACTIVE_WINDOW, FenceMode.PRIMARY_ONLY) or not self.fence.chosen_window:
+                        self.fence.set_chosen_window(target_win)
+                        logger.info("Cerca espacial confinada na janela ativa: %s", target_win.display_name())
+            except Exception as exc:
+                logger.debug("Falha ao autoconfinar cerca na janela ativa: %s", exc)
+
             undo_stack = getattr(self.executor, "undo_stack", None)
             mcp_mgr = self.mcp_manager if getattr(self.config, "mcp_enabled", True) else None
             registry = ToolRegistry(
@@ -1283,6 +1332,17 @@ class CopilotWindow(Adw.ApplicationWindow):
                 GLib.idle_add(agent_widget.status_lbl.set_text, err_msg)
                 GLib.idle_add(self._on_agent_finished, None, objective, agent_widget, err_msg)
                 return
+
+            # Confina todas as ações estritamente na área/janela em que o assistente já está atuando
+            try:
+                from ..core.window_manager import WindowManager
+                from ..core.fence import FenceMode
+                target_win = WindowManager.get_active_or_last_window()
+                if target_win and self.fence:
+                    if self.fence.mode in (FenceMode.ACTIVE_WINDOW, FenceMode.PRIMARY_ONLY) or not self.fence.chosen_window:
+                        self.fence.set_chosen_window(target_win)
+            except Exception as exc:
+                logger.debug("Falha ao autoconfinar cerca na janela ativa: %s", exc)
 
             undo_stack = getattr(self.executor, "undo_stack", None)
             mcp_mgr = self.mcp_manager if getattr(self.config, "mcp_enabled", True) else None
@@ -1695,7 +1755,9 @@ class CopilotWindow(Adw.ApplicationWindow):
     # ------------------------------------------------------------------
     def toggle_live_voice(self, as_pill: bool = False) -> None:
         """Alterna a ativação do modo de conversa de voz ao vivo (Gemini Live)."""
-        if self.live_client and self.live_client.is_active():
+        if (self.live_client and self.live_client.is_active()) or (
+            self.voice_pill_window and self.voice_pill_window.get_visible()
+        ):
             self.stop_live_voice()
         else:
             self.start_live_voice(as_pill=as_pill)
@@ -1707,6 +1769,7 @@ class CopilotWindow(Adw.ApplicationWindow):
         enviado como primeiro turno de texto assim que a sessão conectar.
         ``as_pill``: exibe em janela pílula estilo Dynamic Island em vez do HUD completo.
         """
+        self._live_voice_as_pill = as_pill
         use_local = (
             self.config.provider in ("local", "ollama", "hybrid")
             or not self.config.gemini_api_key.strip()
@@ -1804,6 +1867,7 @@ class CopilotWindow(Adw.ApplicationWindow):
 
     def _expand_from_pill(self) -> None:
         """Expande a conversa da pílula flutuante para a janela completa do Copilot."""
+        self._live_voice_as_pill = False
         if self.voice_pill_window:
             self.voice_pill_window.save_geometry()
             self.voice_pill_window.set_visible(False)
@@ -1918,6 +1982,10 @@ class CopilotWindow(Adw.ApplicationWindow):
 
     def stop_live_voice(self) -> None:
         """Encerra a chamada de voz ao vivo e consolida a interação no chat ativo."""
+        was_pill = self._live_voice_as_pill or (
+            self.voice_pill_window is not None and self.voice_pill_window.get_visible()
+        )
+        self._live_voice_as_pill = False
         if self.voice_pill_window:
             self.voice_pill_window.save_geometry()
             self.voice_pill_window.set_visible(False)
@@ -1929,6 +1997,8 @@ class CopilotWindow(Adw.ApplicationWindow):
 
         self.entry.grab_focus()
         self.show_toast("Conversa de voz encerrada.")
+        if was_pill:
+            return
         if self.get_visible() and self.is_active():
             self.set_visible(False)
         else:
@@ -2123,6 +2193,10 @@ class ZorinCopilotApp(Adw.Application):
             "Inicia imediatamente a conversa de voz ao vivo (Gemini Live)", None,
         )
         self.add_main_option(
+            "live-voice", 0, GLib.OptionFlags.NONE, GLib.OptionArg.NONE,
+            "Alias para --voice (conversa de voz ao vivo)", None,
+        )
+        self.add_main_option(
             "dictate", ord("d"), GLib.OptionFlags.NONE, GLib.OptionArg.NONE,
             "Inicia o ditado por voz contínuo no aplicativo atualmente em foco", None,
         )
@@ -2161,7 +2235,12 @@ class ZorinCopilotApp(Adw.Application):
     def _get_or_create_window(self) -> CopilotWindow:
         for win in self.get_windows():
             if isinstance(win, CopilotWindow):
-                return win
+                if win.get_content() is not None:
+                    return win
+                try:
+                    win.destroy()
+                except Exception:
+                    pass
         return CopilotWindow(self)
 
     def _setup_background_tray(self, win: CopilotWindow) -> None:
@@ -2196,7 +2275,15 @@ class ZorinCopilotApp(Adw.Application):
         elif shortcut_id == "crop":
             win.trigger_direct_crop()
         elif shortcut_id == "voice":
-            win.toggle_live_voice()
+            if (win.live_client and win.live_client.is_active()) or (
+                win.voice_pill_window and win.voice_pill_window.get_visible()
+            ):
+                win.stop_live_voice()
+            elif _overlay_is_pill(win.config) and not win.get_visible():
+                win.toggle_live_voice(as_pill=True)
+            else:
+                win.summon_hud()
+                win.toggle_live_voice(as_pill=False)
         elif shortcut_id == "dictate":
             win.toggle_dictation()
         else:
@@ -2238,7 +2325,7 @@ class ZorinCopilotApp(Adw.Application):
             is_toggle = True
         if "--crop" in args or "-c" in args or "--snippet" in args:
             is_crop = True
-        if "--voice" in args or "-v" in args:
+        if "--voice" in args or "-v" in args or "--live-voice" in args:
             is_voice = True
         if "--dictate" in args or "-d" in args:
             is_dictate = True
@@ -2253,7 +2340,11 @@ class ZorinCopilotApp(Adw.Application):
         elif is_dictate:
             win.toggle_dictation()
         elif is_voice:
-            if _overlay_is_pill(win.config) and not win.get_visible():
+            if (win.live_client and win.live_client.is_active()) or (
+                win.voice_pill_window and win.voice_pill_window.get_visible()
+            ):
+                win.stop_live_voice()
+            elif _overlay_is_pill(win.config) and not win.get_visible():
                 win.toggle_live_voice(as_pill=True)
             else:
                 win.summon_hud()

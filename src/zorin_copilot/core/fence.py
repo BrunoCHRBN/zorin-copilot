@@ -6,10 +6,16 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import os
+import shutil
+import subprocess
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
+
+from .window_manager import WindowInfo, WindowManager
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +30,8 @@ class FenceMode(str, Enum):
     MONITOR_NAME = "monitor_name"
     ALL_MONITORS = "all_monitors"
     CUSTOM_BOUNDS = "custom_bounds"
+    ACTIVE_WINDOW = "active_window"
+    CHOSEN_WINDOW = "chosen_window"
 
 
 @dataclass
@@ -136,7 +144,9 @@ class ScreenFenceManager:
         self.mode: FenceMode = FenceMode.PRIMARY_ONLY
         self.active_monitor_index: int = 0
         self.custom_bounds: tuple[int, int, int, int] | None = None  # (min_x, min_y, max_x, max_y)
+        self.chosen_window: WindowInfo | None = None
         self.red_zones: list[RedZone] = []
+        self.excluded_rects: list[tuple[int, int, int, int]] = []
         self._emergency_stopped: bool = False
         # Sobrescrito por set_insets(); None = usar config + detecção.
         self._inset_override: tuple[int, int] | None = None
@@ -356,6 +366,162 @@ class ScreenFenceManager:
         self.custom_bounds = (min_x, min_y, max_x, max_y)
         self.mode = FenceMode.CUSTOM_BOUNDS
 
+    def set_active_window_mode(self) -> None:
+        """Configura a cerca espacial para seguir dinamicamente a janela ativa/mais recente."""
+        self.mode = FenceMode.ACTIVE_WINDOW
+        self.chosen_window = None
+        logger.info("Cerca espacial configurada para modo dinâmico: ACTIVE_WINDOW.")
+
+    def set_chosen_window(self, window_or_query: WindowInfo | str) -> bool:
+        """Fixa a cerca espacial em uma janela específica escolhida pelo usuário."""
+        if isinstance(window_or_query, WindowInfo):
+            self.chosen_window = window_or_query
+            self.mode = FenceMode.CHOSEN_WINDOW
+            logger.info("Cerca espacial fixada na janela: %s", window_or_query.display_name())
+            return True
+
+        # Se for string (app, título ou id)
+        win = WindowManager.find_window(str(window_or_query))
+        if win:
+            self.chosen_window = win
+            self.mode = FenceMode.CHOSEN_WINDOW
+            logger.info("Cerca espacial fixada na janela encontrada: %s", win.display_name())
+            return True
+
+        logger.warning("Janela '%s' não encontrada para fixação da cerca.", window_or_query)
+        return False
+
+    def get_target_window(self) -> WindowInfo | None:
+        """Retorna os dados da janela alvo da cerca quando em modo ACTIVE_WINDOW ou CHOSEN_WINDOW."""
+        if self.mode == FenceMode.CHOSEN_WINDOW:
+            return self.chosen_window
+
+        if self.mode == FenceMode.ACTIVE_WINDOW:
+            return WindowManager.get_active_or_last_window()
+
+        return None
+
+    def get_effective_bounds(self) -> tuple[int, int, int, int] | None:
+        """Retorna (x, y, largura, altura) da região efetivamente autorizada pela cerca."""
+        if self.mode in (FenceMode.ACTIVE_WINDOW, FenceMode.CHOSEN_WINDOW):
+            win = self.get_target_window()
+            if win:
+                return win.bounds
+            active_m = self.get_active_monitor()
+            return (active_m.x, active_m.y, active_m.width, active_m.height) if active_m else None
+
+        if self.mode == FenceMode.CUSTOM_BOUNDS and self.custom_bounds:
+            bx1, by1, bx2, by2 = self.custom_bounds
+            return bx1, by1, max(0, bx2 - bx1), max(0, by2 - by1)
+
+        active_m = self.get_active_monitor()
+        if active_m:
+            return active_m.x, active_m.y, active_m.width, active_m.height
+
+        return None
+
+    def add_excluded_rect(self, x: int, y: int, width: int, height: int) -> None:
+        """Adiciona um retângulo explicitamente proibido (ex: janela do Zorin Copilot)."""
+        self.excluded_rects.append((int(x), int(y), int(width), int(height)))
+
+    def clear_excluded_rects(self) -> None:
+        self.excluded_rects.clear()
+
+    @classmethod
+    def detect_self_window_bounds(cls) -> list[tuple[int, int, int, int]]:
+        """Detecta as caixas delimitadoras (x, y, w, h) da própria janela do Zorin Copilot.
+
+        Permite que o OCR e o Fence isolem e excluam a interface do Copilot, impedindo que o
+        agente tente clicar, ler ou digitar dentro de sua própria janela de chat/histórico.
+        """
+        bounds: list[tuple[int, int, int, int]] = []
+        my_pid = os.getpid()
+
+        # 1. Detecção via Hyprland (hyprctl clients -j)
+        if shutil.which("hyprctl"):
+            try:
+                proc = subprocess.run(
+                    ["hyprctl", "clients", "-j"],
+                    capture_output=True,
+                    text=True,
+                    timeout=0.6,
+                    check=False,
+                )
+                if proc.returncode == 0 and proc.stdout.strip():
+                    clients = json.loads(proc.stdout)
+                    for c in clients:
+                        cls_name = str(c.get("class") or c.get("initialClass") or "").lower()
+                        title = str(c.get("title") or "").lower()
+                        c_pid = c.get("pid")
+                        is_copilot = (
+                            "zorin" in cls_name
+                            or "copilot" in cls_name
+                            or "zorin copilot" in title
+                            or (c_pid is not None and c_pid == my_pid)
+                        )
+                        if is_copilot:
+                            at = c.get("at", [0, 0])
+                            size = c.get("size", [0, 0])
+                            if len(at) == 2 and len(size) == 2 and size[0] > 0 and size[1] > 0:
+                                bounds.append((int(at[0]), int(at[1]), int(size[0]), int(size[1])))
+            except Exception as exc:
+                logger.debug("Falha ao detectar janelas do Copilot via hyprctl: %s", exc)
+
+        # 2. Detecção via Sway (swaymsg -t get_tree)
+        if not bounds and shutil.which("swaymsg"):
+            try:
+                proc = subprocess.run(
+                    ["swaymsg", "-t", "get_tree"],
+                    capture_output=True,
+                    text=True,
+                    timeout=0.6,
+                    check=False,
+                )
+                if proc.returncode == 0 and proc.stdout.strip():
+                    tree = json.loads(proc.stdout)
+
+                    def _search_node(node: dict[str, Any]) -> None:
+                        app = str(
+                            node.get("app_id")
+                            or node.get("window_properties", {}).get("class")
+                            or ""
+                        ).lower()
+                        name = str(node.get("name") or "").lower()
+                        node_pid = node.get("pid")
+                        if (
+                            "zorin" in app
+                            or "copilot" in app
+                            or "zorin copilot" in name
+                            or (node_pid is not None and node_pid == my_pid)
+                        ):
+                            rect = node.get("rect", {})
+                            w = rect.get("width", 0)
+                            h = rect.get("height", 0)
+                            if w > 0 and h > 0:
+                                bounds.append(
+                                    (int(rect.get("x", 0)), int(rect.get("y", 0)), int(w), int(h))
+                                )
+                        for child in node.get("nodes", []) + node.get("floating_nodes", []):
+                            _search_node(child)
+
+                    _search_node(tree)
+            except Exception as exc:
+                logger.debug("Falha ao detectar janelas do Copilot via swaymsg: %s", exc)
+
+        return bounds
+
+    def refresh_excluded_windows(self) -> list[tuple[int, int, int, int]]:
+        """Atualiza os retângulos da janela do Copilot auto-detectados no ambiente."""
+        detected = self.detect_self_window_bounds()
+        for r in detected:
+            if r not in self.excluded_rects:
+                self.excluded_rects.append(r)
+        return list(self.excluded_rects)
+
+    def get_all_excluded_rects(self) -> list[tuple[int, int, int, int]]:
+        """Retorna todos os retângulos excluídos (registrados manualmente + auto-detectados)."""
+        return self.refresh_excluded_windows()
+
     def trigger_emergency_stop(self) -> None:
         """Ativa o Kill Switch imediato, impedindo qualquer automação."""
         self._emergency_stopped = True
@@ -378,6 +544,11 @@ class ScreenFenceManager:
             if rz.contains(x, y):
                 return False, f"Bloqueado: Coordenada ({x}, {y}) atinge área restrita do sistema ({rz.name} - {rz.description})."
 
+        # 1.5. Verifica se está dentro da própria janela do Zorin Copilot (auto-interação proibida)
+        for rx, ry, rw, rh in self.excluded_rects:
+            if rx <= x < rx + rw and ry <= y < ry + rh:
+                return False, f"Bloqueado: Coordenada ({x}, {y}) atinge a própria janela do Zorin Copilot (auto-interação proibida)."
+
         # 2. Valida pelo modo da cerca
         if self.mode == FenceMode.ALL_MONITORS:
             for m in self._monitors:
@@ -392,6 +563,24 @@ class ScreenFenceManager:
             if bx1 <= x < bx2 and by1 <= y < by2:
                 return True, "Permitido dentro dos limites da janela autorizada."
             return False, f"Bloqueado: Coordenada ({x}, {y}) fora dos limites da janela autorizada."
+
+        # Modos de Janela (ACTIVE_WINDOW ou CHOSEN_WINDOW)
+        if self.mode in (FenceMode.ACTIVE_WINDOW, FenceMode.CHOSEN_WINDOW):
+            win = self.get_target_window()
+            if not win:
+                active_m = self.get_active_monitor()
+                if active_m and active_m.contains(x, y):
+                    return True, f"Permitido no monitor ativo '{active_m.name}' (fallback sem janela ativa)."
+                return False, "Bloqueado: Nenhuma janela ativa encontrada para a cerca."
+
+            if win.contains(x, y):
+                return True, f"Permitido dentro da janela '{win.display_name(25)}' (X={win.x}..{win.max_x}, Y={win.y}..{win.max_y})."
+
+            return (
+                False,
+                f"Bloqueado: Coordenada ({x}, {y}) fora da janela autorizada '{win.display_name(25)}' "
+                f"(Limites: X={win.x}..{win.max_x}, Y={win.y}..{win.max_y}).",
+            )
 
         # Modos baseados no monitor ativo (PRIMARY_ONLY, MONITOR_INDEX, MONITOR_NAME)
         active_m = self.get_active_monitor()
@@ -408,7 +597,22 @@ class ScreenFenceManager:
         )
 
     def convert_relative_point(self, rel_x: float, rel_y: float) -> tuple[int, int]:
-        """Converte coordenadas relativas [0.0, 1.0] para coordenadas absolutas no monitor ativo."""
+        """Converte coordenadas relativas [0.0, 1.0] para coordenadas absolutas no alvo ativo (janela ou monitor)."""
+        if self.mode in (FenceMode.ACTIVE_WINDOW, FenceMode.CHOSEN_WINDOW):
+            win = self.get_target_window()
+            if win:
+                if rel_x > 1.0:
+                    rel_x /= 1000.0
+                if rel_y > 1.0:
+                    rel_y /= 1000.0
+                rel_x = max(0.0, min(1.0, rel_x))
+                rel_y = max(0.0, min(1.0, rel_y))
+                abs_x = win.x + int(rel_x * win.width)
+                abs_y = win.y + int(rel_y * win.height)
+                cx = max(win.x, min(abs_x, win.max_x - 1))
+                cy = max(win.y, min(abs_y, win.max_y - 1))
+                return cx, cy
+
         active_m = self.get_active_monitor()
         if not active_m:
             return int(rel_x * 1920), int(rel_y * 1080)
@@ -417,8 +621,10 @@ class ScreenFenceManager:
     def get_status_summary(self) -> dict[str, Any]:
         """Resumo estruturado para o HUD e configurações."""
         active_m = self.get_active_monitor()
+        win = self.get_target_window()
         return {
             "mode": self.mode.value,
+            "target_window": win.display_name() if win else None,
             "active_monitor": active_m.name if active_m else "Nenhum",
             "active_monitor_index": self.active_monitor_index,
             "total_monitors": len(self._monitors),

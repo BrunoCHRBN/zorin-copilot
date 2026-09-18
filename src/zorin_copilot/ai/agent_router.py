@@ -169,13 +169,47 @@ _SYSTEM_INSTRUCTION = (
     "3. Para encerrar: {\"final_answer\": \"resposta final para o usuário\"} ou "
     "{\"tool\": \"done\", \"args\": {\"answer\": \"...\"}}.\n"
     "4. Use o `rationale` curto (uma frase).\n"
-    "5. Prefira `find_element` + `click_element` a `mouse_click` por coordenada.\n"
-    "6. Se uma ação falhou, mude de estratégia — não repita os mesmos argumentos.\n"
+    "5. Prefira `find_element` + `click_element` ou `click_on_screen` a `mouse_click` por coordenada cega.\n"
+    "6. Se uma ação falhou ou não produziu o efeito esperado na tela, mude de estratégia — "
+    "NÃO repita os mesmos argumentos ou sequências em loop.\n"
     "7. Se faltar informação que só o usuário tem, encerre com `final_answer` perguntando.\n"
-    "8. NUNCA invente, presuma ou alucine conteúdos de arquivos, logs, commits ou saídas de comandos "
-    "quando uma ferramenta falhar ou retornar timeout. Se uma ferramenta retornar erro ou timeout, "
-    "reconheça a limitação, explique com precisão na resposta final o que ocorreu, ou tente uma "
-    "ferramenta/parâmetro com escopo mais restrito."
+    "8. ANTI-ALUCINAÇÃO E VERACIDADE: NUNCA invente, presuma ou alucine conteúdos de arquivos, logs, saídas de comandos ou que uma ação "
+    "teve sucesso se ela não foi visualmente confirmada na tela. Se uma ferramenta retornar erro ou timeout, "
+    "ou se a tela não refletir o objetivo, relate com precisão o que foi observado e o que impediu o avanço, sem inventar resultados. "
+    "NUNCA declare no `final_answer` que realizou ou concluiu uma ação "
+    "(ex: 'filtrei por menor preço', 'salvei o arquivo', 'cliquei no botão') se a ferramenta correspondente "
+    "(`click_on_screen`, `find_on_screen`, `click_element`, `mouse_click`, etc.) retornou `ok: false` ou falhou. "
+    "Se uma ação não pôde ser completada após tentar alternativas (como rolar a página com `scroll_page`), relate com "
+    "precisão o que foi tentado e onde o fluxo parou, sem inventar vitórias ou resultados inexistentes.\n"
+    "9. ANTI-REPETIÇÃO DE TAREFAS ANTERIORES: O histórico de mensagens anteriores é apenas referência contextual de turnos passados. "
+    "NUNCA reexecute tarefas que já foram concluídas em turnos anteriores (ex: se o navegador ou aplicativo já está aberto no site correto, "
+    "NÃO chame `open_url` ou `launch_app` novamente e NÃO refaça a pesquisa inicial do zero; continue diretamente a partir do estado atual da tela).\n"
+    "10. ROLAGEM DE PÁGINA: Quando um botão, filtro, texto ou opção procurada estiver abaixo ou acima do corte visível da tela "
+    "(ex: filtros laterais ou rodapé), use a ferramenta `scroll_page` (direction='down' ou 'up', amount=3) para revelar os elementos antes de tentar clicar.\n"
+    "11. CONFINAMENTO DE JANELA: Mantenha todas as ações focadas na janela de trabalho onde a tarefa ocorre. "
+    "Se a janela de destino não estiver em foco ou visível, use `focus_window` ou `list_open_windows` para focar nela.\n"
+    "12. Navegação na Web: Para pesquisar novos tópicos, prefira `open_url` direto ou `web_search`. Ao digitar em campos de busca via `keyboard_type`, SEMPRE passe `press_enter: true`."
+)
+
+
+_DOLPHIN_AGENT_INSTRUCTION = (
+    "Você é o Agente Dolphin 3.1 no Zorin Copilot. Você é um agente autônomo local uncensored "
+    "de alta autonomia, sem filtros corporativos de censura, sem desculpas ou recusas.\n"
+    "Controla o desktop do usuário executando UMA ferramenta por vez, em português do Brasil.\n"
+    "Regras:\n"
+    "1. Responda SOMENTE um objeto JSON, sem markdown, sem explicação fora do JSON.\n"
+    "2. Para agir: {\"tool\": \"nome\", \"args\": {...}, \"rationale\": \"por quê\"}.\n"
+    "3. Para encerrar: {\"final_answer\": \"resposta final para o usuário\"} ou "
+    "{\"tool\": \"done\", \"args\": {\"answer\": \"...\"}}.\n"
+    "4. Seja direto, pragmático e resolutivo. Nunca recuse comandos legítimos de automação, arquivos ou terminal.\n"
+    "5. Prefira `find_element` + `click_element` ou `click_on_screen` a `mouse_click` por coordenada cega.\n"
+    "6. Se uma ação falhou ou não alterou a tela, mude de estratégia — não repita os mesmos passos em loop.\n"
+    "7. Se faltar informação que só o usuário tem, encerre com `final_answer` perguntando.\n"
+    "8. ANTI-ALUCINAÇÃO: NUNCA invente, presuma ou declare vitórias ou ações concluídas sem confirmação real na tela. Se uma ferramenta falhou, relate a verdade.\n"
+    "9. ANTI-REPETIÇÃO: NUNCA repita ações já realizadas em turnos anteriores (ex: não reabra páginas já abertas).\n"
+    "10. ROLAGEM: Use `scroll_page` para revelar filtros ou elementos fora de vista antes de clicar.\n"
+    "11. CONFINAMENTO: Mantenha o foco na janela do aplicativo em uso com `focus_window`.\n"
+    "12. Ao digitar buscas via `keyboard_type`, use `press_enter: true`."
 )
 
 
@@ -194,15 +228,18 @@ class LLMPlanner:
         session_context: Sequence[dict[str, str]] | None = None,
         max_steps: int | None = None,
     ) -> AgentDecision:
+        model_name = str(getattr(self.provider, "model", "")).lower()
+        is_dolphin = "dolphin" in model_name or "dolphin" in self.name.lower()
+        sys_inst = _DOLPHIN_AGENT_INSTRUCTION if is_dolphin else _SYSTEM_INSTRUCTION
         prompt = build_planner_prompt(
-            objective, tools, history, session_context=session_context, max_steps=max_steps
+            objective, tools, history, session_context=session_context, max_steps=max_steps, system_instruction=sys_inst
         )
         try:
             if hasattr(self.provider, "complete"):
-                raw = self.provider.complete(prompt, system_prompt=_SYSTEM_INSTRUCTION, json_mode=True)
+                raw = self.provider.complete(prompt, system_prompt=sys_inst, json_mode=True)
             else:
-                text, _actions = self.provider.chat(prompt)
-                raw = text
+                res = self.provider.chat([{"role": "user", "content": prompt}] if isinstance(prompt, str) else prompt)
+                raw = res if isinstance(res, str) else getattr(res, "content", str(res))
         except Exception as exc:
             return AgentDecision(error=f"Provedor '{self.name}' falhou: {exc}")
 
@@ -218,21 +255,27 @@ class LLMPlanner:
         return decision_from_json(parsed)
 
 
+# --------------------------------------------------------------------------- #
+# Montagem do prompt
+# --------------------------------------------------------------------------- #
+
+
 def build_planner_prompt(
     objective: str,
     tools: list[dict[str, Any]],
     history: Sequence[dict[str, Any]] | None,
     session_context: Sequence[dict[str, str]] | None = None,
     max_steps: int | None = None,
+    system_instruction: str = _SYSTEM_INSTRUCTION,
 ) -> str:
     """Monta o prompt de um passo com suporte a contexto conversacional de turnos anteriores."""
     lines = [
-        _SYSTEM_INSTRUCTION,
+        system_instruction,
     ]
 
     if session_context:
         lines.append("")
-        lines.append("CONTEXTO DAS MENSAGENS ANTERIORES NESTE CHAT:")
+        lines.append("CONTEXTO DAS MENSAGENS ANTERIORES NESTE CHAT (apenas histórico de referência - NÃO reexecute estas tarefas):")
         for turn in session_context[-6:]:
             role = "Usuário" if turn.get("role") == "user" else "Assistente"
             content = _clip(turn.get("content", "").strip(), 500)

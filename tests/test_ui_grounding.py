@@ -36,6 +36,16 @@ class UIGroundingMathAndParsingTest(unittest.TestCase):
         self.assertLess(score_text_match("Salvar", "Excluir"), 0.50)
         self.assertEqual(score_text_match("", "qualquer"), 0.0)
 
+        # Prevenção contra falsos positivos críticos (ruído OCR de 1-2 letras não pode casar)
+        self.assertLess(score_text_match("Máximo", "o"), 0.35)
+        self.assertLess(score_text_match("Preço", "e"), 0.35)
+        self.assertLess(score_text_match("Até R$ 1.500", "1."), 0.35)
+        self.assertLess(score_text_match("Até R$ 1.500", "Até"), 0.50)
+
+        # Normalização de acentuação (pt-BR)
+        self.assertEqual(score_text_match("Máximo", "Maximo"), 1.0)
+        self.assertEqual(score_text_match("Preço", "Preco"), 1.0)
+
     def test_parse_tesseract_tsv(self):
         tsv_mock = """level	page_num	block_num	par_num	line_num	word_num	left	top	width	height	conf	text
 1	1	0	0	0	0	0	0	1920	1080	-1	
@@ -84,6 +94,20 @@ class UIGroundingServiceSearchTest(unittest.TestCase):
         self.assertEqual(results[0][1], 1.0)
         # O segundo deve ser "Salvar Como..."
         self.assertEqual(results[1][0].text, "Salvar Como...")
+
+    def test_find_elements_excludes_copilot_window(self):
+        fence = mock.MagicMock()
+        # Janela do Copilot simulada em x=1920..2880, y=0..1080
+        fence.get_all_excluded_rects.return_value = [(1920, 0, 960, 1080)]
+        elements = [
+            # Elemento dentro da janela do Copilot (ex: chat history dizendo "Buscar produtos")
+            VisualElement(text="Buscar produtos", x=2370, y=324, bbox=(2300, 310, 140, 28), confidence=95.0),
+            # Elemento fora do Copilot (ex: no Chrome em x=3100, y=150)
+            VisualElement(text="Buscar produtos", x=3100, y=150, bbox=(3000, 140, 200, 30), confidence=95.0),
+        ]
+        results = UIGroundingService.find_elements("Buscar produtos", elements=elements, fence=fence)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0][0].x, 3100)
 
 
 class UIGroundingClickExecutionTest(unittest.TestCase):

@@ -64,8 +64,23 @@ class TestVoicePillWindow(unittest.TestCase):
         self.assertIsNotNone(self.pill.status_lbl)
         self.assertIsNotNone(self.pill.drawing_area)
         self.assertIsNotNone(self.pill.mute_btn)
+        self.assertIsNotNone(self.pill.details_btn)
         self.assertIsNotNone(self.pill.expand_btn)
         self.assertIsNotNone(self.pill.close_btn)
+
+    def test_details_popover_and_screen_share(self):
+        """Verifica a abertura do popover de detalhes e alternância de compartilhamento de tela."""
+        self.mock_client.is_video_streaming.return_value = False
+        self.mock_client.toggle_video_stream.return_value = True
+
+        self.pill._on_details_clicked()
+        self.assertIsNotNone(self.pill._details_popover)
+        self.assertIsNotNone(self.pill._details_popover.get_child())
+
+        # Teste toggle video stream
+        self.pill._on_toggle_video_stream()
+        self.mock_client.toggle_video_stream.assert_called_once()
+        self.assertTrue(self.pill._video_streaming)
 
     def test_state_changes(self):
         """Verifica se a mudança de estado da chamada atualiza o rótulo da UI."""
@@ -266,6 +281,74 @@ class TestVoicePillWindow(unittest.TestCase):
         first = dict(self.pill._palette)
         self.pill.refresh_theme_colors()
         self.assertEqual(first, self.pill._palette)
+
+    def _walk_widgets(self, widget):
+        yield widget
+        child = widget.get_first_child() if hasattr(widget, "get_first_child") else None
+        while child:
+            yield from self._walk_widgets(child)
+            child = child.get_next_sibling() if hasattr(child, "get_next_sibling") else None
+
+    def test_details_popover_shows_voice_and_quick_dropdown(self):
+        self.pill._on_details_clicked()
+        self.assertIsNotNone(self.pill._details_popover)
+        child = self.pill._details_popover.get_child()
+        self.assertIsNotNone(child)
+
+        found_dropdown = False
+        found_voice_label = False
+        for widget in self._walk_widgets(child):
+            if isinstance(widget, Gtk.DropDown):
+                found_dropdown = True
+            if isinstance(widget, Gtk.Label) and "Voz:" in (widget.get_text() or ""):
+                found_voice_label = True
+
+        self.assertTrue(found_dropdown)
+        self.assertTrue(found_voice_label)
+
+    def test_details_popover_voice_change_calls_live_client(self):
+        self.pill._on_details_clicked()
+        child = self.pill._details_popover.get_child()
+        dropdown = None
+        for widget in self._walk_widgets(child):
+            if isinstance(widget, Gtk.DropDown):
+                dropdown = widget
+                break
+        self.assertIsNotNone(dropdown)
+
+        # Seleciona outro item no dropdown (índice 1)
+        dropdown.set_selected(1)
+        self.mock_client.set_voice.assert_called()
+
+    def test_overlay_probes_and_rec_dot_are_untargetable(self):
+        """Garante que os elementos de overlay (probes e rec_dot) não interceptam cliques."""
+        self.assertFalse(self.pill.rec_dot.get_can_target())
+        self.assertFalse(self.pill.rec_dot.get_focusable())
+        for state, probe in self.pill._probes.items():
+            self.assertFalse(probe.get_can_target(), f"Probe para {state} não deve ser alvo de eventos")
+            self.assertFalse(probe.get_focusable(), f"Probe para {state} não deve ser focável")
+
+    def test_close_button_click_triggers_on_close(self):
+        """Verifica se o acionamento do close_btn fecha a pílula e chama o callback."""
+        self.close_called = False
+        self.pill.close_btn.emit("clicked")
+        self.assertTrue(self.close_called)
+        self.assertFalse(self.pill.get_visible())
+
+    def test_expand_button_click_triggers_on_expand(self):
+        """Verifica se o acionamento do expand_btn chama o callback de expansão."""
+        self.expand_called = False
+        self.pill.expand_btn.emit("clicked")
+        self.assertTrue(self.expand_called)
+        self.assertFalse(self.pill.get_visible())
+
+    def test_escape_key_closes_pill(self):
+        """Verifica se a tecla Escape fecha a pílula."""
+        from gi.repository import Gdk
+        self.close_called = False
+        handled = self.pill._on_key_pressed(None, Gdk.KEY_Escape, 0, Gdk.ModifierType(0))
+        self.assertTrue(handled)
+        self.assertTrue(self.close_called)
 
 
 class TestWaveformGlow(unittest.TestCase):

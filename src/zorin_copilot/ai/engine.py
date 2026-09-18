@@ -15,6 +15,7 @@ from typing import Any
 
 from .actions import ActionPlan, ActionType, DesktopAction
 from .providers import BaseLLMProvider, get_llm_provider
+from ..core.academic_hub import AcademicHub
 from ..core.a11y import DesktopInspector
 from ..core.apps import AppManager
 from ..core.clipboard import ClipboardService
@@ -103,6 +104,7 @@ class IntentEngine:
         self.memory = memory or MemoryManager()
         self.search_client = search_client or WebSearchClient()
         self.rag = rag or LocalDocumentRAG(memory=self.memory)
+        self.academic_hub = AcademicHub(rag=self.rag, web_search=self.search_client, memory=self.memory)
         self.llm_provider: BaseLLMProvider = get_llm_provider(self.config)
         # Tracker de tokens por sessão (uma janela). Ligado ao provedor para que
         # cada resposta de modelo acumule seu consumo automaticamente.
@@ -1188,6 +1190,57 @@ class IntentEngine:
                     actions=[],
                 )
 
+        # =========================================================================
+        # Busca e Apresentação Acadêmica (Artigos, SciELO, Sebrae, IBGE, PIs, TCCs)
+        # =========================================================================
+        is_academic_query = any(w in low for w in [
+            "pesquise artigos", "pesquisar artigos", "buscar artigos", "busque artigos",
+            "artigos sobre", "artigo sobre", "artigos de", "artigo de",
+            "pesquisa científica", "pesquisa cientifica", "pesquisa acadêmica", "pesquisa academica",
+            "no scielo", "no sebrae", "no ibge", "no sidra", "no ipea", "no scholar", "google acadêmico", "google academico",
+            "meu projeto integrador", "meus projetos integradores", "no projeto integrador", "no meu pi", "meus pis",
+            "meu pi ", "sobre o pi", "meu trabalho de", "meus trabalhos", "minha anotação", "minhas anotações",
+            "anotações da uc", "anotacoes da uc", "meu tcc", "meus artigos", "biblioteca acadêmica", "biblioteca academica",
+            "fichamento", "fichamentos"
+        ])
+        if is_academic_query and getattr(self, "academic_hub", None):
+            source = "all"
+            if "scielo" in low:
+                source = "scielo"
+            elif "ibge" in low or "sidra" in low:
+                source = "ibge"
+            elif "sebrae" in low:
+                source = "sebrae"
+            elif "ipea" in low:
+                source = "ipea"
+            elif "scholar" in low or "acadêmico" in low or "academico" in low:
+                source = "scholar"
+
+            # Remove verbos de busca comuns para isolar o tema acadêmico
+            search_term = re.sub(
+                r"^(pesquise|pesquisar|buscar|busque|procurar|procure|encontre|encontrar|listar|mostre|mostrar|onde está|onde esta)\s+(artigos|artigo|pesquisas|pesquisa|trabalhos|trabalho|documentos|anotações|anotacoes)?\s*(sobre|de|no|na|do|da|com|em)?\s*",
+                "",
+                prompt_clean,
+                flags=re.I,
+            ).strip()
+            search_term = re.sub(
+                r"\b(no\s+)?(scielo|sebrae|ibge|sidra|ipea|scholar|google\s+acad[eê]mico)\b",
+                "",
+                search_term,
+                flags=re.I,
+            ).strip()
+            if not search_term:
+                search_term = prompt_clean
+
+            scope = "auto"
+            if any(k in low for k in ["meu pi", "meus pis", "projeto integrador", "meu trabalho", "meus trabalhos", "minha anotação", "minhas anotações", "anotações de aula", "meu tcc"]):
+                scope = "local"
+            elif any(k in low for k in ["scielo", "sebrae", "ibge", "sidra", "ipea", "scholar", "pesquise artigos", "buscar artigos", "artigos sobre", "pesquisa científica"]):
+                scope = "web"
+
+            docs = self.academic_hub.search(search_term, scope=scope, source=source, limit=4)
+            return self.academic_hub.format_chat_response(docs, search_term)
+
         # Busca semântica e localização em documentos pessoais (RAG Local: PDFs, contratos, planilhas)
         is_rag_query = any(w in low for w in [
             "buscar documento", "buscar documentos", "busque nos meus documentos", "busque no meu documento",
@@ -1307,23 +1360,47 @@ class IntentEngine:
                     "bom", "boa", "dia", "tarde", "noite", "obrigado", "obrigada", "valeu",
                     "tchau", "adeus"
                 }
-                doc_keywords = {
-                    "documento", "documentos", "arquivo", "arquivos", "pasta", "pastas",
-                    "pdf", "docx", "planilha", "relatorio", "relatório", "contrato",
-                    "extrato", "tabela", "artigo", "anexo", "nota", "comprovante",
-                    "leia", "ler", "leitura", "procure", "encontre", "buscar", "busque",
-                    "ache", "onde"
+                technical_context_words = {
+                    "script", "scripts", "comando", "comandos", "terminal", "bash", "sh",
+                    "python", "sudo", "nmap", "wifi", "rede", "pacman", "apt", "systemctl",
+                    "servico", "serviço", "service", "processo", "porta", "ip", "ping",
+                    "permissao", "permissão", "chmod", "chown", "erro", "error", "falha",
+                    "crash", "bug", "exception", "codigo", "código", "instalar", "instalacao",
+                    "instalação", "configurar", "configuracao", "configuração", "resolv",
+                    "dns", "ssh", "git", "grep", "cat", "echo", "mkdir", "rm", "cp", "mv"
                 }
                 words_list = [w.lower() for w in re.findall(r"\w+", prompt_clean)]
                 is_pure_greeting = bool(words_list) and all(w in greeting_words for w in words_list)
-                is_doc_intent = bool(set(words_list) & doc_keywords) or any(ext in prompt_clean.lower() for ext in [".pdf", ".docx", ".xlsx", ".csv", ".txt", ".md"])
+                is_technical_query = bool(set(words_list) & technical_context_words)
 
-                if getattr(self, "rag", None) and not is_pure_greeting:
+                doc_phrases = (
+                    "meu documento", "meus documentos", "no documento", "nos documentos",
+                    "meu contrato", "no contrato", "minha planilha", "na planilha",
+                    "meu pdf", "no pdf", "abrir documento", "abrir arquivo", "abrir o pdf",
+                    "abrir o docx", "onde está o documento", "onde esta o documento",
+                    "onde está o arquivo", "onde esta o arquivo", "pesquisar documento",
+                    "buscar documento", "procure no documento", "leia o documento", "leia o arquivo"
+                )
+                has_doc_ext = any(re.search(rf"\b[\w\-_]+\.{ext}\b", prompt_clean.lower()) for ext in ("pdf", "docx", "xlsx", "pptx", "odt", "ods"))
+                is_explicit_doc_intent = any(p in low for p in doc_phrases) or has_doc_ext
+
+                # Só consulta RAG de documentos pessoais se houver intenção documental explícita
+                # ou não for uma consulta técnica/operacional de comandos ou scripts de sistema
+                can_query_rag = (
+                    getattr(self, "rag", None)
+                    and not is_pure_greeting
+                    and (is_explicit_doc_intent or (not is_technical_query and bool(set(words_list) & {"documento", "documentos", "contrato", "planilha", "pdf", "docx"})))
+                )
+
+                if can_query_rag:
                     try:
                         doc_matches = self.rag.search(prompt_clean, limit=3)
                         if doc_matches:
+                            def _clean_snip(s: str) -> str:
+                                return re.sub(r"</?[a-zA-Z0-9]+[^>]*>", "", s or "").strip()
+
                             rag_text = "[Documentos Locais Relevantes]:\n" + "\n\n".join(
-                                f"📄 {d.file_name} (Pág. {d.page_number}):\n\"{d.snippet}\""
+                                f"📄 {d.file_name} (Pág. {d.page_number}):\n\"{_clean_snip(d.snippet)}\""
                                 for d in doc_matches
                             )
                             context_parts.append(rag_text)
@@ -1346,8 +1423,21 @@ class IntentEngine:
                     history=history,
                 )
 
-                # Se foram encontrados documentos locais relevantes com intenção documental e a IA não gerou ação de abrir documento
-                if doc_matches and not is_pure_greeting and is_doc_intent and not any(a.action_type == ActionType.OPEN_DOCUMENT for a in actions):
+                # Só anexa ação automática de abrir documento se:
+                # 1. Houve correspondência real no RAG
+                # 2. O usuário explicitamente pediu para abrir/ver/ler ou encontrar um documento pessoal
+                # 3. NÃO é uma consulta técnica ou de script
+                # 4. A IA ainda não gerou ação de abrir documento
+                is_open_doc_request = is_explicit_doc_intent and any(
+                    v in low for v in ("abrir", "abra", "leia", "ler", "ver", "mostre", "onde está", "onde esta", "encontre")
+                )
+                if (
+                    doc_matches
+                    and not is_pure_greeting
+                    and not is_technical_query
+                    and is_open_doc_request
+                    and not any(a.action_type == ActionType.OPEN_DOCUMENT for a in actions)
+                ):
                     top_doc = doc_matches[0]
                     actions.append(
                         DesktopAction(
@@ -1499,13 +1589,23 @@ class IntentEngine:
                         )
 
                 # Sanitização contra vazamento acidental de sintaxe JSON no campo de pensamento/explicação
-                if explanation.strip().startswith("{") and '"explanation"' in explanation:
+                if explanation.strip().startswith("{") and (explanation.strip().endswith("}") or '"' in explanation):
                     try:
-                        sanitized_exp, _ = BaseLLMProvider.parse_response_payload(explanation)
+                        sanitized_exp, extra_acts = BaseLLMProvider.parse_response_payload(explanation)
                         if sanitized_exp and sanitized_exp != explanation:
                             explanation = sanitized_exp
+                        if extra_acts:
+                            for ea in extra_acts:
+                                if not any(a.action_type == ea.action_type for a in actions):
+                                    actions.append(ea)
                     except Exception:
                         pass
+
+                # Higienização final de marcações HTML vazadas (ex: <b> -> **):
+                explanation = re.sub(r"</?(?:b|strong)>", "**", explanation)
+                explanation = re.sub(r"</?(?:i|em)>", "*", explanation)
+                explanation = re.sub(r"</?(?:code|tt)>", "`", explanation)
+                explanation = re.sub(r"</?[a-zA-Z0-9_-]+[^>]*>", "", explanation)
 
                 if not actions:
                     actions = [

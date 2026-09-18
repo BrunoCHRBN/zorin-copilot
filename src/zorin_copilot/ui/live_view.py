@@ -32,10 +32,13 @@ TRANSCRIPT_ROLE_ICONS = {
 def live_model_label(model: str) -> str:
     """Rótulo curto do modelo de voz, a partir do id da API.
 
-    A mensagem de conexão dizia "Gemini 2.5 Live" fixo, desmentindo a própria
-    tela de preferências quando o usuário escolhia outro modelo.
+    Exibe identificação amigável na pílula e no cabeçalho de status da sessão Live.
     """
-    name = (model or "").rsplit("/", 1)[-1]  # "models/gemini-2.5-flash-..." -> "gemini-2.5-flash-..."
+    name = (model or "").rsplit("/", 1)[-1]
+    if "extended-thinking" in name or "thinking" in name:
+        return "Gemini 3.8 Thinking"
+    if "3.8-live" in name:
+        return "Gemini 3.8 Live"
     parts = name.split("-")
     if len(parts) >= 2 and parts[0] == "gemini":
         return f"Gemini {parts[1]}"
@@ -422,6 +425,10 @@ class LiveVoiceWidget(Gtk.Box):
         elif state == LiveVoiceState.EXECUTING:
             self.status_dot.set_markup("<span foreground='#2ec27e'>●</span>")
             self.status_lbl.set_markup("<b>Zorin Copilot Live</b> • Executando no desktop...")
+        elif state == LiveVoiceState.THINKING:
+            self.status_dot.set_markup("<span foreground='#e5a50a'>●</span>")
+            self.status_lbl.set_markup("<b>Zorin Copilot Live</b> • Processando...")
+            self.subtitle_lbl.set_text(msg or "Processando resposta...")
         elif state == LiveVoiceState.ERROR:
             self.status_dot.set_markup("<span foreground='#e01b24'>●</span>")
             self.status_lbl.set_markup("<b>Zorin Copilot Live</b> • Erro")

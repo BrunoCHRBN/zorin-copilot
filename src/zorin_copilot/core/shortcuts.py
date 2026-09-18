@@ -58,6 +58,7 @@ APP_SHORTCUTS: Final[tuple[AppShortcut, ...]] = (
     AppShortcut("app.command-palette", "<Control>k", "Abrir o painel de comandos"),
     AppShortcut("app.export-conversation", "<Control>s", "Exportar a conversa como Markdown"),
     AppShortcut("app.undo-action", "<Control>z", "Desfazer a última ação reversível"),
+    AppShortcut("app.model-selector", "<Control><Shift>m", "Alternar modelo ou agente de IA"),
 )
 
 #: Paths legados do GNOME, mantidos para quem já tem os atalhos registrados.

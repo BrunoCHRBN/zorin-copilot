@@ -3,7 +3,7 @@
 import unittest
 from unittest import mock
 
-from zorin_copilot.core.fence import FenceMode, MonitorInfo, RedZone, ScreenFenceManager
+from zorin_copilot.core.fence import FenceMode, MonitorInfo, RedZone, ScreenFenceManager, WindowInfo
 from zorin_copilot.shell.input_driver import VirtualInputDriver
 
 
@@ -79,6 +79,19 @@ class ScreenFenceTest(unittest.TestCase):
         self.assertFalse(allowed)
         self.assertIn("área restrita", reason)
         self.assertIn("bottombar_monitor_0", reason)
+
+    def test_excluded_rect_blocks_clicks_inside_copilot_window(self):
+        """Cliques direcionados para dentro da própria janela do Copilot devem ser barrados pela cerca."""
+        # Registra janela simulada do Copilot em x=1920..2880, y=0..1080
+        self.fence.add_excluded_rect(1920, 0, 960, 1080)
+        # Coordenada dentro do Copilot (ex: x=2370, y=324)
+        allowed, reason = self.fence.is_coordinate_allowed(2370, 324)
+        self.assertFalse(allowed)
+        self.assertIn("própria janela do Zorin Copilot", reason)
+
+        # Coordenada fora do Copilot (ex: no Chrome em x=3100, y=324)
+        allowed_chrome, _ = self.fence.is_coordinate_allowed(3100, 324)
+        self.assertTrue(allowed_chrome)
 
     def test_all_monitors_mode(self):
         """Modo ALL_MONITORS permite cliques em ambos os monitores válidos."""
@@ -214,6 +227,87 @@ class VirtualInputDriverTest(unittest.TestCase):
         """Driver envia atalhos de teclado."""
         ok, msg = self.driver.hotkey("ctrl", "c")
         self.assertTrue(ok)
+
+
+class WindowFenceTest(unittest.TestCase):
+    """Testes para os modos de cerca baseados em janela (ACTIVE_WINDOW e CHOSEN_WINDOW)."""
+
+    def setUp(self):
+        self.monitors = [
+            MonitorInfo(index=0, name="Monitor 1", model="Generic", x=0, y=0, width=1920, height=1080, is_primary=True),
+        ]
+        self.fence = ScreenFenceManager(monitors=self.monitors)
+        self.test_win = WindowInfo(
+            id="0x1234abcd",
+            app="google-chrome",
+            title="GitHub - Repositório",
+            x=200,
+            y=150,
+            width=1000,
+            height=800,
+            is_active=True,
+        )
+
+    def test_set_chosen_window(self):
+        self.fence.set_chosen_window(self.test_win)
+        self.assertEqual(self.fence.mode, FenceMode.CHOSEN_WINDOW)
+        self.assertEqual(self.fence.get_target_window(), self.test_win)
+        self.assertEqual(self.fence.get_effective_bounds(), (200, 150, 1000, 800))
+
+    def test_coordinate_allowed_inside_chosen_window(self):
+        self.fence.set_chosen_window(self.test_win)
+        # Ponto dentro da janela (x=500, y=400)
+        allowed, reason = self.fence.is_coordinate_allowed(500, 400)
+        self.assertTrue(allowed)
+        self.assertIn("Permitido dentro da janela", reason)
+
+        # Ponto fora da janela mas dentro do monitor (x=50, y=50)
+        allowed_out, reason_out = self.fence.is_coordinate_allowed(50, 50)
+        self.assertFalse(allowed_out)
+        self.assertIn("fora da janela autorizada", reason_out)
+
+    def test_convert_relative_point_in_window_mode(self):
+        self.fence.set_chosen_window(self.test_win)
+        # Centro relativo [0.5, 0.5] na janela (x=200+500=700, y=150+400=550)
+        abs_x, abs_y = self.fence.convert_relative_point(0.5, 0.5)
+        self.assertEqual(abs_x, 700)
+        self.assertEqual(abs_y, 550)
+
+    @mock.patch("zorin_copilot.core.window_manager.WindowManager.get_active_or_last_window")
+    def test_active_window_mode_dynamic(self, mock_active):
+        mock_active.return_value = self.test_win
+        self.fence.set_active_window_mode()
+        self.assertEqual(self.fence.mode, FenceMode.ACTIVE_WINDOW)
+        self.assertEqual(self.fence.get_target_window(), self.test_win)
+
+        allowed, _ = self.fence.is_coordinate_allowed(600, 400)
+        self.assertTrue(allowed)
+
+        # Quando a janela ativa muda dinamicamente
+        other_win = WindowInfo(
+            id="0x9999",
+            app="kitty",
+            title="Terminal",
+            x=1250,
+            y=100,
+            width=600,
+            height=500,
+            is_active=True,
+        )
+        mock_active.return_value = other_win
+        self.assertEqual(self.fence.get_target_window(), other_win)
+        # Agora o ponto antigo (600, 400) fica fora da janela kitty
+        allowed_old, _ = self.fence.is_coordinate_allowed(600, 400)
+        self.assertFalse(allowed_old)
+        # E o ponto dentro da nova janela (1300, 200) é permitido
+        allowed_new, _ = self.fence.is_coordinate_allowed(1300, 200)
+        self.assertTrue(allowed_new)
+
+    def test_status_summary_includes_target_window(self):
+        self.fence.set_chosen_window(self.test_win)
+        summary = self.fence.get_status_summary()
+        self.assertEqual(summary["mode"], FenceMode.CHOSEN_WINDOW.value)
+        self.assertIn("Google-chrome", summary["target_window"])
 
 
 if __name__ == "__main__":

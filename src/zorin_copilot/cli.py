@@ -58,6 +58,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     config_cmd.add_argument("--set-workbuddy-key", help="define a chave de API do WorkBuddy AI / Tencent HY4")
     config_cmd.add_argument("--set-workbuddy-model", help="define o modelo WorkBuddy (ex: hy4-preview)")
+    config_cmd.add_argument("--set-ollama-model", help="define o modelo de texto Ollama (ex: dolphin3:latest, qwen2.5:7b)")
+    config_cmd.add_argument(
+        "--set-agent-preset",
+        choices=["dolphin", "qwen", "gemini", "workbuddy"],
+        help="aplica o preset de agente recomendado (ex: dolphin para Dolphin 3.1 Uncensored)",
+    )
     config_cmd.add_argument("--set-provider", choices=["gemini", "ollama", "openai", "workbuddy"], help="define o provedor ativo")
     config_cmd.add_argument(
         "--tutor",
@@ -229,6 +235,36 @@ def build_parser() -> argparse.ArgumentParser:
     study_ask.add_argument("--local-only", action="store_true", help="usa apenas o modelo local")
     study_ask.add_argument("--cloud", action="store_true", help="usa apenas o modelo em nuvem")
     study_ask.add_argument("--json", action="store_true", help="saída em JSON")
+
+    study_search = study_sub.add_parser(
+        "search",
+        help="pesquisa artigos científicos e trabalhos acadêmicos (local + SciELO/IBGE/Sebrae)",
+    )
+    study_search.add_argument("query", help="tema, palavras-chave ou conceito a pesquisar")
+    study_search.add_argument(
+        "--scope",
+        choices=["auto", "local", "web"],
+        default="auto",
+        help="escopo de busca: 'local' (seus trabalhos/anotações), 'web' (artigos científicos) ou 'auto'",
+    )
+    study_search.add_argument(
+        "--source",
+        choices=["all", "scielo", "ibge", "sebrae", "ipea", "scholar"],
+        default="all",
+        help="base de busca externa específica",
+    )
+    study_search.add_argument("--limit", type=int, default=4, help="máximo de resultados (padrão 4)")
+    study_search.add_argument("--save", action="store_true", help="salva os resultados na biblioteca local")
+    study_search.add_argument("--json", action="store_true", help="saída em JSON")
+
+    study_lib = study_sub.add_parser(
+        "library",
+        help="lista materiais salvos na biblioteca acadêmica local (memory.db)",
+    )
+    study_lib.add_argument("--query", default=None, help="filtro por palavra-chave")
+    study_lib.add_argument("--discipline", default=None, help="filtro por disciplina")
+    study_lib.add_argument("--limit", type=int, default=15, help="máximo de itens (padrão 15)")
+    study_lib.add_argument("--json", action="store_true", help="saída em JSON")
 
     return parser
 
@@ -432,6 +468,29 @@ def cmd_config(args: argparse.Namespace) -> int:
         cfg.workbuddy_model = args.set_workbuddy_model
         changed = True
         print(f"Modelo WorkBuddy alterado para '{args.set_workbuddy_model}'.")
+
+    if args.set_ollama_model:
+        cfg.ollama_model = args.set_ollama_model
+        changed = True
+        print(f"Modelo Ollama alterado para '{args.set_ollama_model}'.")
+
+    if args.set_agent_preset:
+        preset = args.set_agent_preset
+        if preset == "dolphin":
+            cfg.provider = "ollama"
+            cfg.ollama_model = "dolphin3:latest"
+            print("Preset de Agente ativado: Dolphin 3.1 (Local Uncensored).")
+        elif preset == "qwen":
+            cfg.provider = "ollama"
+            cfg.ollama_model = "qwen2.5:7b"
+            print("Preset de Agente ativado: Qwen 2.5 7B (Local Geral/Tools).")
+        elif preset == "gemini":
+            cfg.provider = "gemini"
+            print("Preset de Agente ativado: Google Gemini (Nuvem).")
+        elif preset == "workbuddy":
+            cfg.provider = "workbuddy"
+            print("Preset de Agente ativado: WorkBuddy HY4 (Nuvem).")
+        changed = True
 
     if args.set_provider:
         cfg.provider = args.set_provider
@@ -944,6 +1003,10 @@ def cmd_study(args: argparse.Namespace) -> int:
         return _study_abnt(args)
     if args.study_action == "ask":
         return _study_ask(args)
+    if args.study_action == "search":
+        return _study_search(args)
+    if args.study_action == "library":
+        return _study_library(args)
     return 0
 
 
@@ -1148,6 +1211,104 @@ def _study_ask(args: argparse.Namespace) -> int:
     print(text)
     for warning in warnings:
         print(f"\n  ⚠️  {warning}")
+    return 0
+
+
+def _study_search(args: argparse.Namespace) -> int:
+    """Pesquisa artigos científicos, trabalhos locais e dados de mercado."""
+    from .core.academic_hub import AcademicHub
+
+    hub = AcademicHub()
+    docs = hub.search(
+        args.query,
+        scope=args.scope,
+        source=args.source,
+        limit=args.limit,
+    )
+
+    if args.save:
+        for doc in docs:
+            hub.save_to_library(doc)
+
+    if args.json:
+        payload = {
+            "query": args.query,
+            "scope": args.scope,
+            "source": args.source,
+            "count": len(docs),
+            "results": [
+                {
+                    "title": d.title,
+                    "source": d.source,
+                    "year": d.year,
+                    "authors": d.authors,
+                    "abstract": d.abstract,
+                    "abnt_citation": d.abnt_citation,
+                    "file_path_or_url": d.file_path_or_url,
+                    "is_local": d.is_local,
+                    "page_number": d.page_number,
+                }
+                for d in docs
+            ],
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+
+    if not docs:
+        print(f"Nenhum material acadêmico encontrado para '{args.query}'.")
+        return 0
+
+    plan = hub.format_chat_response(docs, args.query)
+    print(plan.thought)
+    if plan.actions:
+        print("\n--- Ações Recomendadas ---")
+        for a in plan.actions:
+            print(f"• [{a.action_type.value}] {a.description} -> {a.target}")
+    if args.save:
+        print(f"\n✓ {len(docs)} item(ns) salvo(s) na biblioteca acadêmica local.")
+    return 0
+
+
+def _study_library(args: argparse.Namespace) -> int:
+    """Lista itens salvos na biblioteca acadêmica local (memory.db)."""
+    from .core.academic_hub import AcademicHub
+
+    hub = AcademicHub()
+    docs = hub.list_saved_library(query=args.query, limit=args.limit)
+
+    if args.json:
+        payload = {
+            "count": len(docs),
+            "results": [
+                {
+                    "title": d.title,
+                    "source": d.source,
+                    "year": d.year,
+                    "authors": d.authors,
+                    "abstract": d.abstract,
+                    "abnt_citation": d.abnt_citation,
+                    "file_path_or_url": d.file_path_or_url,
+                    "is_local": d.is_local,
+                    "discipline": d.discipline,
+                }
+                for d in docs
+            ],
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+
+    if not docs:
+        print("Biblioteca acadêmica vazia ou nenhum item corresponde ao filtro.")
+        return 0
+
+    print(f"📚 Biblioteca Acadêmica Local ({len(docs)} itens):\n")
+    for idx, d in enumerate(docs, 1):
+        print(f"{idx}. {d.title} ({d.source})")
+        if d.abnt_citation:
+            print(f"   Citação: {d.abnt_citation}")
+        if d.file_path_or_url:
+            print(f"   Acesso: {d.file_path_or_url}")
+        print()
     return 0
 
 

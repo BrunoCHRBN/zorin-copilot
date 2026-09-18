@@ -13,7 +13,11 @@ from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
 
 from ..ai.providers import (
     DEFAULT_GEMINI_MODEL,
+    DEFAULT_GEMINI_LIVE_MODEL,
+    DEFAULT_GEMINI_LIVE_VOICE,
     GEMINI_MODEL_CHOICES,
+    GEMINI_LIVE_MODEL_CHOICES,
+    GEMINI_LIVE_VOICE_CHOICES,
     GeminiProvider,
     HybridProvider,
     OllamaProvider,
@@ -113,6 +117,37 @@ class PreferencesDialog(Adw.PreferencesDialog):
         self.gemini_custom_model_row = Adw.EntryRow(title="Nome do Modelo Personalizado")
         self.gemini_custom_model_row.set_visible(False)
         self.gemini_group.add(self.gemini_custom_model_row)
+
+        # Modelo de Voz em Tempo Real (Gemini Multimodal Live API)
+        self.gemini_live_models_list: list[str] = [m[1] for m in GEMINI_LIVE_MODEL_CHOICES] + ["Outro (Personalizado)"]
+        self.gemini_live_model_row = Adw.ComboRow(
+            title="Modelo de Voz (Live API)",
+            subtitle="Modelo de áudio bidirecional em tempo real (Ctrl+M ou Super+Shift+V)",
+            model=Gtk.StringList.new(self.gemini_live_models_list),
+        )
+        self.gemini_live_model_row.connect("notify::selected", self._on_gemini_live_model_changed)
+        self.gemini_group.add(self.gemini_live_model_row)
+
+        self.gemini_custom_live_model_row = Adw.EntryRow(title="Nome do Modelo Live Personalizado")
+        self.gemini_custom_live_model_row.set_visible(False)
+        self.gemini_group.add(self.gemini_custom_live_model_row)
+
+        # Voz do Assistente (Gemini Live Voice)
+        self.gemini_live_voices_list: list[str] = [v[1] for v in GEMINI_LIVE_VOICE_CHOICES]
+        self.gemini_live_voice_row = Adw.ComboRow(
+            title="Voz do Assistente",
+            subtitle="Timbre e personalidade da fala gerada pela IA",
+            model=Gtk.StringList.new(self.gemini_live_voices_list),
+        )
+        self.gemini_live_voice_prev_btn = Gtk.Button.new_from_icon_name("media-playback-start-symbolic")
+        self.gemini_live_voice_prev_btn.add_css_class("flat")
+        self.gemini_live_voice_prev_btn.add_css_class("circular")
+        self.gemini_live_voice_prev_btn.set_valign(Gtk.Align.CENTER)
+        self.gemini_live_voice_prev_btn.set_tooltip_text("Ouvir demonstração da voz selecionada")
+        self.gemini_live_voice_prev_btn.connect("clicked", self._on_preview_live_voice_clicked)
+        self.gemini_live_voice_row.add_suffix(self.gemini_live_voice_prev_btn)
+        self.gemini_live_voice_row.connect("notify::selected", self._on_preferences_voice_selected)
+        self.gemini_group.add(self.gemini_live_voice_row)
 
         link_row = Adw.ActionRow(title="Obter chave gratuita")
         link_btn = Gtk.LinkButton(
@@ -768,6 +803,11 @@ class PreferencesDialog(Adw.PreferencesDialog):
         # ---------------------------------------------------------------------
         self._build_mcp_page()
 
+        # ---------------------------------------------------------------------
+        # Página 6: Casa Inteligente & IoT (Home Assistant)
+        # ---------------------------------------------------------------------
+        self._build_smart_home_page()
+
     def _build_mcp_page(self) -> None:
         page = Adw.PreferencesPage(title="Extensões &amp; MCP", icon_name="application-x-addon-symbolic")
         self.add(page)
@@ -809,6 +849,96 @@ class PreferencesDialog(Adw.PreferencesDialog):
         page.add(self.mcp_servers_group)
         self._populate_mcp_servers()
 
+    def _build_smart_home_page(self) -> None:
+        page = Adw.PreferencesPage(title="Casa Inteligente", icon_name="user-home-symbolic")
+        self.add(page)
+
+        ha_group = Adw.PreferencesGroup(
+            title="Home Assistant (IoT)",
+            description="Integração local para controle de lâmpadas (Avant Neo / Tuya), ar-condicionado e tomadas.",
+        )
+
+        self.ha_switch_row = Adw.SwitchRow(
+            title="Habilitar Casa Inteligente",
+            subtitle="Permite ao Gemini Live e ao agente ReAct controlar aparelhos via Home Assistant.",
+        )
+        ha_group.add(self.ha_switch_row)
+
+        self.ha_url_row = Adw.EntryRow(title="URL do Home Assistant")
+        ha_group.add(self.ha_url_row)
+
+        self.ha_token_row = Adw.PasswordEntryRow(title="Token de Acesso (Long-Lived Access Token)")
+        ha_group.add(self.ha_token_row)
+
+        test_row = Adw.ActionRow(
+            title="Testar Conexão",
+            subtitle="Verifica se o container ou servidor local está acessível e autenticado.",
+        )
+        self.ha_test_btn = Gtk.Button(label="Testar", valign=Gtk.Align.CENTER)
+        self.ha_test_btn.add_css_class("pill")
+        self.ha_test_btn.connect("clicked", self._on_test_ha_connection)
+        test_row.add_suffix(self.ha_test_btn)
+        ha_group.add(test_row)
+
+        self.ha_default_light_row = Adw.EntryRow(
+            title="Entidade de Luz Padrão (Opcional)",
+        )
+        ha_group.add(self.ha_default_light_row)
+
+        page.add(ha_group)
+
+        # Grupo: Instruções Docker
+        docker_group = Adw.PreferencesGroup(
+            title="Instalação Local via Docker",
+            description="Comando pronto para iniciar o Home Assistant Container localmente na sua máquina.",
+        )
+        docker_cmd = (
+            "docker run -d --name homeassistant --privileged --restart=unless-stopped "
+            "-e TZ=America/Sao_Paulo -v ~/.homeassistant:/config --network=host "
+            "ghcr.io/home-assistant/home-assistant:stable"
+        )
+        docker_row = Adw.ActionRow(
+            title="Iniciar Container Docker",
+            subtitle="Disponível em http://localhost:8123",
+        )
+        copy_docker_btn = Gtk.Button(label="Copiar Comando", valign=Gtk.Align.CENTER)
+        copy_docker_btn.add_css_class("pill")
+
+        def _on_copy_docker(_btn: Gtk.Button) -> None:
+            try:
+                display = Gdk.Display.get_default()
+                if display:
+                    display.get_clipboard().set(docker_cmd)
+                    self.add_toast(Adw.Toast.new("Comando Docker copiado para a área de transferência!"))
+            except Exception as exc:
+                self.add_toast(Adw.Toast.new(f"Falha ao copiar: {exc}"))
+
+        copy_docker_btn.connect("clicked", _on_copy_docker)
+        docker_row.add_suffix(copy_docker_btn)
+        docker_group.add(docker_row)
+        page.add(docker_group)
+
+    def _on_test_ha_connection(self, _btn: Gtk.Button) -> None:
+        url = self.ha_url_row.get_text().strip() or "http://localhost:8123"
+        token = self.ha_token_row.get_text().strip()
+        self.ha_test_btn.set_sensitive(False)
+
+        def run_test():
+            from ..core.home_assistant import HomeAssistantManager
+
+            ha = HomeAssistantManager(url=url, token=token)
+            res = ha.test_connection()
+            msg = res.get("message", "Sem resposta")
+
+            def update_ui():
+                self.ha_test_btn.set_sensitive(True)
+                self.add_toast(Adw.Toast.new(msg))
+                return GLib.SOURCE_REMOVE
+
+            GLib.idle_add(update_ui)
+
+        threading.Thread(target=run_test, daemon=True).start()
+
     def _on_open_mcp_config(self, _btn: Gtk.Button) -> None:
         import subprocess
         try:
@@ -818,6 +948,11 @@ class PreferencesDialog(Adw.PreferencesDialog):
 
     def _on_dialog_closed(self, *args) -> None:
         self._is_closed = True
+        try:
+            from ..ai.voice_preview import VoicePreviewService
+            VoicePreviewService.get_default().stop()
+        except Exception:
+            pass
         mgr = getattr(self, "_mcp_manager", None)
         if mgr and getattr(self, "_mcp_change_listener", None):
             mgr.remove_change_listener(self._mcp_change_listener)
@@ -998,6 +1133,28 @@ class PreferencesDialog(Adw.PreferencesDialog):
             self.gemini_custom_model_row.set_text(self.config.gemini_model)
             self.gemini_custom_model_row.set_visible(True)
 
+        # Gemini Live Model
+        live_model = getattr(self.config, "gemini_live_model", DEFAULT_GEMINI_LIVE_MODEL)
+        live_ids = [m[0] for m in GEMINI_LIVE_MODEL_CHOICES]
+        if live_model in live_ids:
+            lm_idx = live_ids.index(live_model)
+            self.gemini_live_model_row.set_selected(lm_idx)
+            self.gemini_custom_live_model_row.set_visible(False)
+        else:
+            custom_lm_idx = len(self.gemini_live_models_list) - 1
+            self.gemini_live_model_row.set_selected(custom_lm_idx)
+            self.gemini_custom_live_model_row.set_text(live_model)
+            self.gemini_custom_live_model_row.set_visible(True)
+
+        # Gemini Live Voice
+        live_voice = getattr(self.config, "gemini_live_voice", DEFAULT_GEMINI_LIVE_VOICE)
+        voice_ids = [v[0] for v in GEMINI_LIVE_VOICE_CHOICES]
+        if live_voice in voice_ids:
+            v_idx = voice_ids.index(live_voice)
+            self.gemini_live_voice_row.set_selected(v_idx)
+        else:
+            self.gemini_live_voice_row.set_selected(0)
+
         # WorkBuddy
         self.workbuddy_key_row.set_text(getattr(self.config, "workbuddy_api_key", ""))
         wb_model = getattr(self.config, "workbuddy_model", "hy4-preview")
@@ -1122,15 +1279,57 @@ class PreferencesDialog(Adw.PreferencesDialog):
         # MCP (Model Context Protocol)
         self.mcp_switch_row.set_active(getattr(self.config, "mcp_enabled", True))
 
+        # Casa Inteligente (Home Assistant)
+        self.ha_switch_row.set_active(getattr(self.config, "ha_enabled", True))
+        self.ha_url_row.set_text(getattr(self.config, "ha_url", "http://localhost:8123"))
+        self.ha_token_row.set_text(getattr(self.config, "ha_token", ""))
+        self.ha_default_light_row.set_text(getattr(self.config, "ha_default_light", ""))
+
         self._update_visibility()
 
     def _on_gemini_model_changed(self, *_args) -> None:
         is_custom = self.gemini_model_row.get_selected() == len(self.gemini_models_list) - 1
         self.gemini_custom_model_row.set_visible(is_custom)
 
+    def _on_gemini_live_model_changed(self, *_args) -> None:
+        is_custom = self.gemini_live_model_row.get_selected() == len(self.gemini_live_models_list) - 1
+        self.gemini_custom_live_model_row.set_visible(is_custom)
+
     def _on_workbuddy_model_changed(self, *_args) -> None:
         is_custom = self.workbuddy_model_row.get_selected() == len(self.workbuddy_models_list) - 1
         self.workbuddy_custom_model_row.set_visible(is_custom)
+
+    def _on_preview_live_voice_clicked(self, _btn: Gtk.Button) -> None:
+        """Inicia ou interrompe a demonstração em áudio da voz selecionada no combo."""
+        from ..ai.voice_preview import VoicePreviewService
+        from ..ai.providers import GEMINI_LIVE_VOICE_CHOICES
+
+        service = VoicePreviewService.get_default()
+        idx = self.gemini_live_voice_row.get_selected()
+        v_name = GEMINI_LIVE_VOICE_CHOICES[idx][0] if 0 <= idx < len(GEMINI_LIVE_VOICE_CHOICES) else "Puck"
+
+        if service.is_playing(v_name):
+            service.stop()
+            self.gemini_live_voice_prev_btn.set_icon_name("media-playback-start-symbolic")
+            return
+
+        service.stop()
+        self.gemini_live_voice_prev_btn.set_icon_name("media-playback-stop-symbolic")
+
+        def _done():
+            self.gemini_live_voice_prev_btn.set_icon_name("media-playback-start-symbolic")
+
+        service.play_voice(v_name, on_finished=_done)
+
+    def _on_preferences_voice_selected(self, _row, _pspec) -> None:
+        """Interrompe áudio anterior se o usuário alterar a voz no combo."""
+        try:
+            from ..ai.voice_preview import VoicePreviewService
+            VoicePreviewService.get_default().stop()
+        except Exception:
+            pass
+        if hasattr(self, "gemini_live_voice_prev_btn"):
+            self.gemini_live_voice_prev_btn.set_icon_name("media-playback-start-symbolic")
 
     def _collect_current_config(self) -> CopilotConfig:
         cfg = CopilotConfig()
@@ -1145,6 +1344,21 @@ class PreferencesDialog(Adw.PreferencesDialog):
             cfg.gemini_model = self.gemini_models_list[g_idx]
         else:
             cfg.gemini_model = DEFAULT_GEMINI_MODEL
+
+        # Gemini Live Model & Voice
+        lm_idx = self.gemini_live_model_row.get_selected()
+        if lm_idx == len(self.gemini_live_models_list) - 1:
+            cfg.gemini_live_model = self.gemini_custom_live_model_row.get_text().strip() or DEFAULT_GEMINI_LIVE_MODEL
+        elif lm_idx < len(GEMINI_LIVE_MODEL_CHOICES):
+            cfg.gemini_live_model = GEMINI_LIVE_MODEL_CHOICES[lm_idx][0]
+        else:
+            cfg.gemini_live_model = DEFAULT_GEMINI_LIVE_MODEL
+
+        v_idx = self.gemini_live_voice_row.get_selected()
+        if 0 <= v_idx < len(GEMINI_LIVE_VOICE_CHOICES):
+            cfg.gemini_live_voice = GEMINI_LIVE_VOICE_CHOICES[v_idx][0]
+        else:
+            cfg.gemini_live_voice = DEFAULT_GEMINI_LIVE_VOICE
 
         # WorkBuddy
         cfg.workbuddy_api_key = self.workbuddy_key_row.get_text().strip()
@@ -1264,6 +1478,12 @@ class PreferencesDialog(Adw.PreferencesDialog):
         cfg.mcp_enabled = self.mcp_switch_row.get_active()
         cfg.mcp_config_path = getattr(self.config, "mcp_config_path", "")
         cfg.mcp_auto_connect = getattr(self.config, "mcp_auto_connect", True)
+
+        # Casa Inteligente (Home Assistant)
+        cfg.ha_enabled = self.ha_switch_row.get_active()
+        cfg.ha_url = self.ha_url_row.get_text().strip() or "http://localhost:8123"
+        cfg.ha_token = self.ha_token_row.get_text().strip()
+        cfg.ha_default_light = self.ha_default_light_row.get_text().strip()
 
         return cfg
 

@@ -5,7 +5,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 import logging
+import re
+import shutil
+import subprocess
 from typing import Any, Callable, Sequence
 
 logger = logging.getLogger(__name__)
@@ -77,6 +81,17 @@ class DesktopInspector:
     def _ensure_init(self) -> bool:
         if self._initialized:
             return True
+        try:
+            if shutil.which("gsettings"):
+                subprocess.run(
+                    ["gsettings", "set", "org.gnome.desktop.interface", "toolkit-accessibility", "true"],
+                    capture_output=True,
+                    timeout=1,
+                    check=False,
+                )
+        except Exception:
+            pass
+
         if self._atspi is None:
             try:
                 import gi
@@ -114,15 +129,46 @@ class DesktopInspector:
         """Extrai a árvore estruturada da janela de uma aplicação específica."""
         if not self._ensure_init() or not self._atspi:
             return None
+        target = app_name.strip().lower()
+        if not target:
+            return None
         try:
             desktop = self._atspi.get_desktop(0)
             count = desktop.get_child_count()
+            candidates: list[UIElement] = []
+
+            # 1. Correspondência exata (case-insensitive)
             for i in range(count):
                 app = desktop.get_child_at_index(i)
-                if app and app.get_name().lower() == app_name.lower():
-                    return self._parse_node(app, max_depth=max_depth, uid_path=(i,))
-        except Exception:
-            pass
+                if not app:
+                    continue
+                name = (app.get_name() or "").strip().lower()
+                if name == target:
+                    node = self._parse_node(app, max_depth=max_depth, uid_path=(i,))
+                    if node:
+                        if node.children or node.actions:
+                            return node
+                        candidates.append(node)
+
+            # 2. Correspondência aproximada / substring
+            target_clean = re.sub(r"[-_.\s]", "", target)
+            for i in range(count):
+                app = desktop.get_child_at_index(i)
+                if not app:
+                    continue
+                name = (app.get_name() or "").strip().lower()
+                name_clean = re.sub(r"[-_.\s]", "", name)
+                if target in name or name in target or (target_clean and (target_clean in name_clean or name_clean in target_clean)):
+                    node = self._parse_node(app, max_depth=max_depth, uid_path=(i,))
+                    if node:
+                        if node.children or node.actions:
+                            return node
+                        candidates.append(node)
+
+            if candidates:
+                return candidates[0]
+        except Exception as exc:
+            logger.debug(f"Erro ao inspecionar aplicação '{app_name}': {exc}")
         return None
 
     def _parse_node(
@@ -197,9 +243,21 @@ class DesktopInspector:
             pass
         return False
 
+    @staticmethod
+    def _find_sway_focused(node: dict[str, Any]) -> dict[str, Any] | None:
+        if node.get("focused"):
+            return node
+        for child in node.get("nodes", []) + node.get("floating_nodes", []):
+            found = DesktopInspector._find_sway_focused(child)
+            if found:
+                return found
+        return None
+
     def get_active_window_info(self) -> tuple[str, str, tuple[int, int, int, int] | None]:
         """
         Retorna informações da janela de aplicativo atualmente ativa e em foco.
+
+        Tenta via AT-SPI2 com fallbacks nativos para Hyprland, Sway e X11.
 
         Returns:
             Tuple com (nome_do_app, titulo_da_janela, (x, y, largura, altura) ou None).
@@ -208,6 +266,8 @@ class DesktopInspector:
             return "", "", None
 
         ignored_apps = {"zorin-copilot", "io.github.bruno.zorincopilot", "org.zorin.copilot"}
+
+        # 1. Caminho principal via AT-SPI2
         try:
             desktop = self._atspi.get_desktop(0)
             count = desktop.get_child_count()
@@ -238,6 +298,99 @@ class DesktopInspector:
                         continue
         except Exception as exc:
             logger.debug(f"Erro ao obter janela ativa via Atspi: {exc}")
+
+        # 2. Fallback Hyprland (comum em compositores Wayland modernos)
+        if shutil.which("hyprctl"):
+            try:
+                proc = subprocess.run(
+                    ["hyprctl", "activewindow", "-j"],
+                    capture_output=True,
+                    text=True,
+                    timeout=0.6,
+                    check=False,
+                )
+                if proc.returncode == 0 and proc.stdout.strip():
+                    data = json.loads(proc.stdout)
+                    cls_name = (data.get("class") or data.get("initialClass") or "").strip()
+                    if cls_name and not any(ign in cls_name.lower() for ign in ignored_apps):
+                        title = data.get("title") or ""
+                        at = data.get("at", [0, 0])
+                        size = data.get("size", [0, 0])
+                        bbox = (at[0], at[1], size[0], size[1]) if len(at) == 2 and len(size) == 2 else None
+                        return cls_name, title, bbox
+
+                # Se a janela ativa for o próprio Copilot, consulta histórico de foco do Hyprland
+                clients_proc = subprocess.run(
+                    ["hyprctl", "clients", "-j"],
+                    capture_output=True,
+                    text=True,
+                    timeout=0.6,
+                    check=False,
+                )
+                if clients_proc.returncode == 0 and clients_proc.stdout.strip():
+                    clients = json.loads(clients_proc.stdout)
+                    valid_clients = [
+                        c for c in clients
+                        if not any(ign in (c.get("class") or "").lower() for ign in ignored_apps)
+                        and (c.get("focusHistoryID") is not None or c.get("focusHistoryId") is not None)
+                    ]
+                    if valid_clients:
+                        valid_clients.sort(
+                            key=lambda c: c.get("focusHistoryID", c.get("focusHistoryId", 999))
+                        )
+                        best = valid_clients[0]
+                        c_name = (best.get("class") or best.get("initialClass") or "").strip()
+                        c_title = best.get("title") or ""
+                        at = best.get("at", [0, 0])
+                        size = best.get("size", [0, 0])
+                        bbox = (at[0], at[1], size[0], size[1]) if len(at) == 2 and len(size) == 2 else None
+                        if c_name:
+                            return c_name, c_title, bbox
+            except Exception as exc:
+                logger.debug(f"Fallback hyprctl em get_active_window_info falhou: {exc}")
+
+        # 3. Fallback Sway / i3
+        if shutil.which("swaymsg"):
+            try:
+                proc = subprocess.run(
+                    ["swaymsg", "-t", "get_tree"],
+                    capture_output=True,
+                    text=True,
+                    timeout=0.8,
+                    check=False,
+                )
+                if proc.returncode == 0 and proc.stdout.strip():
+                    tree = json.loads(proc.stdout)
+                    focused = self._find_sway_focused(tree)
+                    if focused:
+                        app = focused.get("app_id") or focused.get("window_properties", {}).get("class") or ""
+                        app = app.strip()
+                        if app and not any(ign in app.lower() for ign in ignored_apps):
+                            title = focused.get("name") or ""
+                            rect = focused.get("rect", {})
+                            bbox = (rect.get("x", 0), rect.get("y", 0), rect.get("width", 0), rect.get("height", 0))
+                            return app, title, bbox
+            except Exception as exc:
+                logger.debug(f"Fallback swaymsg em get_active_window_info falhou: {exc}")
+
+        # 4. Fallback X11 via xdotool / xprop
+        if shutil.which("xdotool"):
+            try:
+                wid_proc = subprocess.run(["xdotool", "getactivewindow"], capture_output=True, text=True, timeout=0.5, check=False)
+                if wid_proc.returncode == 0 and wid_proc.stdout.strip():
+                    wid = wid_proc.stdout.strip()
+                    title_proc = subprocess.run(["xdotool", "getwindowname", wid], capture_output=True, text=True, timeout=0.5, check=False)
+                    title = title_proc.stdout.strip() if title_proc.returncode == 0 else ""
+                    cls_proc = subprocess.run(["xprop", "-id", wid, "WM_CLASS"], capture_output=True, text=True, timeout=0.5, check=False)
+                    app = ""
+                    if cls_proc.returncode == 0 and cls_proc.stdout:
+                        parts = cls_proc.stdout.split("=")
+                        if len(parts) > 1:
+                            app = parts[1].split(",")[-1].strip().strip('"')
+                    if app and not any(ign in app.lower() for ign in ignored_apps):
+                        return app, title, None
+            except Exception as exc:
+                logger.debug(f"Fallback xdotool em get_active_window_info falhou: {exc}")
 
         return "", "", None
 
@@ -296,26 +449,31 @@ class DesktopInspector:
 
     def get_focused_app(self) -> str | None:
         """Retorna o nome da aplicação que detém o foco de teclado no momento."""
-        if not self._ensure_init() or not self._atspi:
-            return None
-        try:
-            focused = self._atspi.get_focused_element()
-            node = focused
-            last = None
-            while node is not None:
-                last = node
-                try:
-                    if node.get_role_name() == "application":
-                        return node.get_name() or None
-                except Exception:
-                    pass
-                parent = node.get_parent()
-                if parent is None:
-                    break
-                node = parent
-            return last.get_name() if last else None
-        except Exception:
-            return None
+        # Se um objeto _atspi fake com get_focused_element foi injetado (testes unitários)
+        if self._atspi and hasattr(self._atspi, "get_focused_element"):
+            try:
+                focused = self._atspi.get_focused_element()
+                node = focused
+                last = None
+                while node is not None:
+                    last = node
+                    try:
+                        if node.get_role_name() == "application":
+                            return node.get_name() or None
+                    except Exception:
+                        pass
+                    parent = node.get_parent()
+                    if parent is None:
+                        break
+                    node = parent
+                if last and last.get_name():
+                    return last.get_name()
+            except Exception:
+                pass
+
+        # Caminho universal do desktop (AT-SPI / compositor)
+        app_name, _, _ = self.get_active_window_info()
+        return app_name or None
 
     def get_ui_tree(self, app_name: str | None = None) -> UIElement | None:
         """Árvore de acessibilidade de um app (ou do app com foco, se omitido)."""

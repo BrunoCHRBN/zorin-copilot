@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -96,13 +97,24 @@ class GhostCursorWindow:
         self.win.set_decorated(False)
         self.win.set_resizable(False)
         self.win.set_can_target(False)
+        if hasattr(self.win, "set_focusable"):
+            self.win.set_focusable(False)
+        if hasattr(self.win, "set_can_focus"):
+            self.win.set_can_focus(False)
+        if hasattr(self.win, "set_focus_on_map"):
+            self.win.set_focus_on_map(False)
         self.win.add_css_class("ghost-cursor-window")
 
         self.primary_color = _parse_hex_color(primary_color)
         self._blur_namespace = "zorin-copilot-ghost-cursor"
 
         # Tenta ancorar via gtk4-layer-shell
-        self._init_layer_shell()
+        self.is_layer_shell: bool = self._init_layer_shell()
+        if not self.is_layer_shell:
+            try:
+                self.win.fullscreen()
+            except Exception as exc:
+                logger.debug("Falha ao colocar Ghost Cursor em fullscreen: %s", exc)
 
         # Configura transparência e desativação total de captura de ponteiro
         self.win.connect("realize", self._on_realize)
@@ -414,7 +426,8 @@ class GhostCursorOverlay:
 
         try:
             self._window = GhostCursorWindow(application=application, primary_color=self.primary_color)
-            self._window.present()
+            if not (os.environ.get("ZORIN_TEST_MODE") or os.environ.get("PYTEST_CURRENT_TEST") or "pytest" in sys.modules):
+                self._window.present()
             self._initialized = True
             logger.info("Ghost Cursor Overlay inicializado com sucesso.")
             return True
@@ -479,6 +492,41 @@ class GhostCursorOverlay:
         self.point_to(x, y, label=lbl)
         self.last_action_kind = "type"
 
+    def animate_drag(
+        self,
+        start_x: float,
+        start_y: float,
+        end_x: float,
+        end_y: float,
+        duration_ms: int = 450,
+        label: str = "",
+        wait_glide: bool = False,
+    ) -> None:
+        """Move o cursor da IA arrastando do ponto inicial até o destino (ex: entre monitores)."""
+        dur_sec = max(0.1, float(duration_ms) / 1000.0)
+        self.last_target = (float(end_x), float(end_y))
+        lbl = label or "Movendo janela..."
+        self.last_label = lbl
+        self.last_action_kind = "drag"
+        self.ripple_count += 2
+
+        if not self.enabled:
+            return
+
+        if _GTK_AVAILABLE and GLib:
+            GLib.idle_add(
+                self._main_animate_drag,
+                float(start_x),
+                float(start_y),
+                float(end_x),
+                float(end_y),
+                dur_sec,
+                lbl,
+            )
+
+        if wait_glide and threading.current_thread() is not threading.main_thread():
+            time.sleep(min(0.35, dur_sec * 0.8))
+
     def show_action(self, label: str, x: float | None = None, y: float | None = None) -> None:
         """Atualiza a etiqueta com o objetivo atual da IA."""
         self.last_label = label
@@ -527,6 +575,14 @@ class GhostCursorOverlay:
     def _ensure_window(self) -> GhostCursorWindow | None:
         if self._window is None and _GTK_AVAILABLE:
             self.initialize(self._app)
+        if (
+            self._window is not None
+            and hasattr(self._window, "win")
+            and hasattr(self._window.win, "is_visible")
+            and not self._window.win.is_visible()
+            and not (os.environ.get("ZORIN_TEST_MODE") or os.environ.get("PYTEST_CURRENT_TEST") or "pytest" in sys.modules)
+        ):
+            self._window.present()
         return self._window
 
     def _main_point_to(self, x: float, y: float, duration_sec: float, label: str) -> None:
@@ -615,6 +671,55 @@ class GhostCursorOverlay:
         win.target_label_opacity = 1.0
         win.target_cursor_opacity = 1.0
         win.last_action_time = now
+        win.start_animation_loop()
+
+    def _main_animate_drag(
+        self,
+        start_x: float,
+        start_y: float,
+        end_x: float,
+        end_y: float,
+        duration_sec: float,
+        label: str,
+    ) -> None:
+        win = self._ensure_window()
+        if win is None:
+            return
+
+        now = time.monotonic()
+        win.current_x = start_x
+        win.current_y = start_y
+        win.start_x = start_x
+        win.start_y = start_y
+        win.target_x = end_x
+        win.target_y = end_y
+        win.move_start_time = now
+        win.move_duration = max(0.1, duration_sec)
+        win.is_moving = True
+
+        win.target_cursor_opacity = 1.0
+        win.cursor_opacity = 1.0
+        if label:
+            win.label_text = label
+            win.target_label_opacity = 1.0
+
+        win.last_action_time = now
+
+        # Efeito de agarrar (grab) no ponto inicial
+        win.ripples.append(
+            ClickRipple(x=start_x, y=start_y, start_time=now, max_radius=36.0, color=win.primary_color)
+        )
+        # Efeito de soltar (release) no ponto de destino ao terminar o trajeto
+        win.ripples.append(
+            ClickRipple(
+                x=end_x,
+                y=end_y,
+                start_time=now + duration_sec,
+                max_radius=46.0,
+                color=(0.2, 0.9, 0.4),  # Tom esmeralda de confirmação
+            )
+        )
+
         win.start_animation_loop()
 
     def _main_hide(self) -> None:

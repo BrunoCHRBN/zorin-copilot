@@ -20,10 +20,11 @@ import re
 import shutil
 import subprocess
 import time
+import unicodedata
 from dataclasses import dataclass
 from typing import Any, Sequence
 
-from .fence import ScreenFenceManager
+from .fence import FenceMode, ScreenFenceManager
 from .vision import ScreenCaptureService
 
 logger = logging.getLogger(__name__)
@@ -170,30 +171,69 @@ def parse_tesseract_tsv(
     return elements
 
 
+def _normalize_text(s: str) -> str:
+    nfkd = unicodedata.normalize("NFKD", s.strip().lower())
+    return "".join(c for c in nfkd if not unicodedata.combining(c))
+
+
 def score_text_match(query: str, target: str) -> float:
     """Calcula pontuação de compatibilidade [0.0..1.0] entre a consulta e o texto detectado."""
-    q = query.strip().lower()
-    t = target.strip().lower()
-    if not q or not t:
+    q_raw = query.strip().lower()
+    t_raw = target.strip().lower()
+    if not q_raw or not t_raw:
         return 0.0
 
-    # 1. Casamento exato
-    if q == t:
+    # 1. Casamento exato (bruto ou com acentuação normalizada)
+    if q_raw == t_raw:
         return 1.0
 
-    # 2. Casamento de substring exata
-    if q in t:
-        # Se for quase o tamanho inteiro, pontuação altíssima
-        ratio = len(q) / max(len(t), 1)
-        return 0.85 + 0.12 * ratio
+    q_norm = _normalize_text(q_raw)
+    t_norm = _normalize_text(t_raw)
+    if q_norm == t_norm:
+        return 1.0
 
-    if t in q:
-        ratio = len(t) / max(len(q), 1)
-        return 0.80 + 0.10 * ratio
+    # 2. Casamento de substring
+    # Caso A: A query inteira é substring do alvo (ex: "Salvar" em "Salvar Como...", "Buscar produtos" em "Buscar produtos, marcas e mais")
+    for q, t in ((q_raw, t_raw), (q_norm, t_norm)):
+        if q in t:
+            if len(q) < 3:
+                # Letras curtas (1-2 caracteres como 'a', 'o', 'ok') só dão match se o alvo for quase do mesmo tamanho
+                if len(t) <= len(q) + 1:
+                    return 0.90
+                continue
 
-    # 3. Tolerância a ruídos de OCR via SequenceMatcher
-    matcher = difflib.SequenceMatcher(None, q, t)
-    return matcher.ratio()
+            # Verifica se q aparece como palavra inteira/frase delimitada
+            pattern = rf"(?:\b|^){re.escape(q)}(?:\b|$)"
+            is_word_boundary = bool(re.search(pattern, t))
+            ratio = len(q) / max(len(t), 1)
+
+            if is_word_boundary:
+                # Palavra/frase inteira presente: alta confiança proporcional ao tamanho
+                return min(1.0, 0.85 + 0.12 * ratio)
+            else:
+                # Apenas substring interna sem limite de palavra (ex: "car" em "scarce")
+                return 0.50 * ratio
+
+    # Caso B: O alvo detectado é substring da query (ex: "Configurac" em "Configuracoes")
+    # CUIDADO CRÍTICO: Letras isoladas ou palavras minúsculas NUNCA devem casar com consultas longas
+    # (ex: 'o' em 'Máximo', 'e' em 'Preço', '1.' em 'Até R$ 1.500').
+    for q, t in ((q_raw, t_raw), (q_norm, t_norm)):
+        if t in q:
+            if len(t) < 3:
+                # Fragmento mínimo de OCR (1-2 chars) jamais deve pontuar alto para queries >= 3 chars
+                continue
+
+            coverage = len(t) / max(len(q), 1)
+            # Se cobre quase toda a query (>= 80%, ex: pequeno truncamento de OCR na borda)
+            if coverage >= 0.80:
+                return min(1.0, 0.70 + 0.20 * coverage)
+            # Se for apenas uma fração da query, a pontuação é baixa e NUNCA atinge o threshold de 0.65
+            return 0.30 * coverage
+
+    # 3. Tolerância a ruídos de OCR via SequenceMatcher (difflib)
+    matcher_raw = difflib.SequenceMatcher(None, q_raw, t_raw).ratio()
+    matcher_norm = difflib.SequenceMatcher(None, q_norm, t_norm).ratio()
+    return max(matcher_raw, matcher_norm)
 
 
 class UIGroundingService:
@@ -205,6 +245,7 @@ class UIGroundingService:
         fence: ScreenFenceManager | None = None,
         image_bytes: bytes | None = None,
         crop_rect: tuple[int, int, int, int] | None = None,
+        exclude_self: bool = True,
     ) -> list[VisualElement]:
         """Captura a tela ou janela e extrai todos os elementos textuais visíveis com coordenadas."""
         tess_bin = shutil.which("tesseract")
@@ -215,19 +256,25 @@ class UIGroundingService:
         offset_x = 0
         offset_y = 0
 
-        # Se imagem não fornecida, captura o monitor ativo ou área solicitada
+        # Se imagem não fornecida, captura o alvo ativo (janela, monitor ou área solicitada)
         if image_bytes is None:
             f = fence or ScreenFenceManager()
-            active_m = f.get_active_monitor()
             if crop_rect:
                 target_crop = crop_rect
                 offset_x, offset_y = crop_rect[0], crop_rect[1]
-            elif active_m:
-                # Recorta no monitor autorizado para acelerar e manter coordenadas exatas
-                target_crop = (active_m.x, active_m.y, active_m.width, active_m.height)
-                offset_x, offset_y = active_m.x, active_m.y
+            elif f.mode in (FenceMode.ACTIVE_WINDOW, FenceMode.CHOSEN_WINDOW) and f.get_target_window():
+                win = f.get_target_window()
+                assert win is not None
+                target_crop = (win.x, win.y, win.width, win.height)
+                offset_x, offset_y = win.x, win.y
             else:
-                target_crop = None
+                active_m = f.get_active_monitor()
+                if active_m:
+                    # Recorta no monitor autorizado para acelerar e manter coordenadas exatas
+                    target_crop = (active_m.x, active_m.y, active_m.width, active_m.height)
+                    offset_x, offset_y = active_m.x, active_m.y
+                else:
+                    target_crop = None
 
             # max_size=0 preserva a resolução 1:1 original para precisão pixel-perfect
             ok, img_data, _mode = ScreenCaptureService.capture(
@@ -253,7 +300,19 @@ class UIGroundingService:
                 return []
 
             tsv_text = proc.stdout.decode("utf-8", errors="replace")
-            return parse_tesseract_tsv(tsv_text, offset_x=offset_x, offset_y=offset_y)
+            elements = parse_tesseract_tsv(tsv_text, offset_x=offset_x, offset_y=offset_y)
+
+            # Exclui elementos que se encontram dentro da janela do próprio Copilot
+            if exclude_self:
+                f = fence or ScreenFenceManager()
+                excluded_rects = f.get_all_excluded_rects()
+                if excluded_rects:
+                    elements = [
+                        el for el in elements
+                        if not any(rx <= el.x < rx + rw and ry <= el.y < ry + rh for rx, ry, rw, rh in excluded_rects)
+                    ]
+
+            return elements
 
         except Exception as exc:
             logger.error(f"Erro ao processar OCR da tela: {exc}")
@@ -272,6 +331,16 @@ class UIGroundingService:
             return []
 
         all_elements = elements if elements is not None else cls.scan_screen(fence=fence)
+
+        # Se elementos foram passados externamente, garante exclusão da janela do Copilot
+        f = fence or ScreenFenceManager()
+        excluded_rects = f.get_all_excluded_rects()
+        if excluded_rects and elements is not None:
+            all_elements = [
+                el for el in all_elements
+                if not any(rx <= el.x < rx + rw and ry <= el.y < ry + rh for rx, ry, rw, rh in excluded_rects)
+            ]
+
         candidates: list[tuple[VisualElement, float]] = []
 
         for el in all_elements:

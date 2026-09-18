@@ -55,6 +55,8 @@ def get_action_icon(action: DesktopAction) -> str:
         return "multimedia-player-symbolic"
     if action.action_type == ActionType.WRITE_FILE:
         return "document-save-symbolic"
+    if action.action_type == ActionType.OPEN_DOCUMENT:
+        return "x-office-document-symbolic"
     if action.action_type == ActionType.ORGANIZE_FILES:
         return "folder-symbolic"
     return "system-run-symbolic"

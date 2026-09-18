@@ -5,6 +5,7 @@ import shutil
 import tempfile
 import unittest
 import zipfile
+from pathlib import Path
 from unittest.mock import patch
 
 from zorin_copilot.core.files import FileManager
@@ -243,10 +244,22 @@ class OfficeDocumentTest(unittest.TestCase):
         pi_path = FileManager.resolve_target_path("pi_senac_plano_de_negocio.docx")
         self.assertEqual(os.path.dirname(pi_path), expected_dir)
 
-    def test_resolve_destination_path_default_relatorios(self):
-        normal_path = FileManager.resolve_target_path("anotacoes_gerais.md")
-        expected_dir = os.path.expanduser("~/Documentos/Relatorios")
-        self.assertEqual(os.path.dirname(normal_path), expected_dir)
+    def test_resolve_destination_path_dummy_user(self):
+        # /home/usuario/scripts deve ser normalizado para Path.home()/scripts
+        resolved = FileManager.resolve_target_path("scan_wifi.py", directory="/home/usuario/scripts")
+        expected_dir = str(Path.home() / "scripts")
+        self.assertEqual(os.path.dirname(resolved), expected_dir)
+        self.assertEqual(os.path.basename(resolved), "scan_wifi.py")
+
+        # Caminho completo passado em filename
+        resolved2 = FileManager.resolve_target_path("/home/alguem/Documentos/relatorio.md")
+        expected_dir2 = str(Path.home() / "Documentos")
+        self.assertEqual(os.path.dirname(resolved2), expected_dir2)
+
+    def test_resolve_destination_path_script_default(self):
+        resolved = FileManager.resolve_target_path("scan_wifi.py")
+        expected_dir = str(Path.home() / "scripts")
+        self.assertEqual(os.path.dirname(resolved), expected_dir)
 
 
 if __name__ == "__main__":

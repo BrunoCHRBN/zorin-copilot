@@ -27,8 +27,18 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CONFIG_DIR = os.path.expanduser("~/.config/zorin-copilot")
-DEFAULT_MCP_CONFIG_PATH = os.path.join(DEFAULT_CONFIG_DIR, "mcp_servers.json")
+
+def get_default_config_dir() -> str:
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return os.path.join(base, "zorin-copilot")
+
+
+def get_default_mcp_config_path() -> str:
+    return os.path.join(get_default_config_dir(), "mcp_servers.json")
+
+
+DEFAULT_CONFIG_DIR = get_default_config_dir()
+DEFAULT_MCP_CONFIG_PATH = get_default_mcp_config_path()
 
 # Template inicial com servidores MCP padrão sugeridos (desabilitados por padrão para não gastar recursos)
 DEFAULT_MCP_TEMPLATE = {

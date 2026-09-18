@@ -97,6 +97,25 @@ class RiskPolicy:
             if mode == "quit":
                 return RiskLevel.CONFIRM, RISK_DESCRIPTION.get(name, "encerramento do aplicativo")
 
+        if name == "vscode_workspace":
+            action = str(args.get("action", "")).strip().lower()
+            if action in ("write_code", "create_file", "patch_code"):
+                f_path = args.get("file_path", "")
+                if f_path:
+                    try:
+                        from pathlib import Path
+                        raw_path = Path(f_path).expanduser()
+                        if not raw_path.is_absolute():
+                            from ..core.vscode import VSCodeManager
+                            base = VSCodeManager.get_active_workspace() or Path.cwd()
+                            target = base / raw_path
+                        else:
+                            target = raw_path
+                        if target.exists() and target.is_file() and target.stat().st_size > 50:
+                            return RiskLevel.CONFIRM, f"atualização de arquivo de código existente '{target.name}' no VS Code"
+                    except Exception:
+                        pass
+
         return RiskLevel.SAFE, ""
 
 

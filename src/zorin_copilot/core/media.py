@@ -159,15 +159,38 @@ class MediaPlayerManager:
         return TrackInfo(player_name=bus_name or "")
 
     @classmethod
-    def control(cls, action: str, player_name: str | None = None) -> tuple[bool, str]:
-        """Envia um comando de controle de mídia via MPRIS2."""
-        act_norm = action.lower().strip()
+    def control(
+        cls,
+        action: str,
+        player_name: str | None = None,
+        query: str | None = None,
+    ) -> tuple[bool, str]:
+        """Envia comandos de transporte MPRIS2 ao reprodutor alvo."""
+        act_norm = (action or "").strip().lower()
+
+        # Consulta de status / faixa
+        if act_norm in ("status", "get_status", "info", "faixa", "musica", "track", "current"):
+            info = cls.get_track_info(cls.resolve_player(player_name))
+            return (True, info.summary())
+
+        # Busca ou reprodução de música / artista específico no Spotify / player
+        if query or act_norm in ("search", "play_song", "tocar_musica", "buscar", "pesquisar"):
+            term = (query or "").strip()
+            if not term and act_norm not in ("search", "play_song", "buscar", "pesquisar"):
+                term = action
+            if term:
+                return cls.play_search(term, player_name=player_name or "spotify")
+
         method_map = {
             "play": "Play",
             "tocar": "Play",
+            "iniciar": "Play",
+            "resume": "Play",
+            "despausar": "Play",
             "pause": "Pause",
             "pausar": "Pause",
             "play_pause": "PlayPause",
+            "playpause": "PlayPause",
             "toggle": "PlayPause",
             "alternar": "PlayPause",
             "next": "Next",
@@ -181,11 +204,6 @@ class MediaPlayerManager:
             "stop": "Stop",
             "parar": "Stop",
         }
-
-        # Consulta de status / faixa
-        if act_norm in ("status", "get_status", "info", "faixa", "musica", "track", "current"):
-            info = cls.get_track_info(cls.resolve_player(player_name))
-            return (True, info.summary())
 
         method = method_map.get(act_norm, "PlayPause")
         target_bus = cls.resolve_player(player_name)
@@ -254,9 +272,34 @@ class MediaPlayerManager:
             if res.returncode == 0:
                 clean_player = target_bus.replace("org.mpris.MediaPlayer2.", "").capitalize()
                 return (True, f"Comando de mídia ({method}) enviado com sucesso ao {clean_player}.")
-            return (False, f"Falha ao controlar mídia: {res.stderr.strip() or 'Erro desconhecido'}")
-        except Exception as exc:
-            return (False, f"Erro ao controlar mídia: {exc}")
+        except Exception:
+            pass
+
+        # Fallback 3: playerctl CLI (se disponível)
+        if shutil.which("playerctl"):
+            try:
+                cmd_map = {
+                    "Play": "play",
+                    "Pause": "pause",
+                    "PlayPause": "play-pause",
+                    "Next": "next",
+                    "Previous": "previous",
+                    "Stop": "stop",
+                }
+                subcmd = cmd_map.get(method, "play-pause")
+                pctl_cmd = ["playerctl"]
+                if player_name:
+                    clean_p = player_name.lower().replace("org.mpris.mediaplayer2.", "")
+                    pctl_cmd.extend(["-p", clean_p])
+                pctl_cmd.append(subcmd)
+                pctl_res = subprocess.run(pctl_cmd, capture_output=True, text=True, timeout=1.5, check=False)
+                if pctl_res.returncode == 0:
+                    clean_player = (player_name or "reprodutor").capitalize()
+                    return (True, f"Comando de mídia ({method}) enviado com sucesso ao {clean_player} via playerctl.")
+            except Exception as exc:
+                logger.debug("Fallback playerctl falhou: %s", exc)
+
+        return (False, f"Falha ao controlar mídia: {target_bus or 'nenhum player respondendo'}")
 
     @classmethod
     def open_uri(cls, uri: str, player_name: str | None = None) -> tuple[bool, str]:
@@ -328,12 +371,73 @@ class MediaPlayerManager:
 
     @classmethod
     def play_search(cls, query: str, player_name: str = "spotify") -> tuple[bool, str]:
-        """Inicia reprodução de busca de música/artista no Spotify ou reprodutor configurado."""
-        import urllib.parse
-        clean_q = query.strip()
-        encoded = urllib.parse.quote(clean_q)
-        uri = f"spotify:search:{encoded}"
-        ok, msg = cls.open_uri(uri, player_name=player_name)
-        if ok:
-            return (True, f"Buscando e reproduzindo '{clean_q}' no Spotify.")
-        return (False, msg)
+        """Inicia busca e reprodução de música/artista no Spotify ou reprodutor ativo."""
+        clean_q = query.strip().strip('"').strip("'")
+        if not clean_q:
+            return (False, "Nenhum termo de música fornecido.")
+
+        uri = f"spotify:search:{clean_q}"
+
+        # 1. Se o Spotify não estiver rodando, inicia o app diretamente com a busca
+        players = cls.list_players()
+        has_spotify = any("spotify" in p.lower() for p in players)
+        spot_bin = shutil.which("spotify")
+        if not has_spotify and spot_bin:
+            try:
+                subprocess.Popen([spot_bin, f"--uri={uri}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return (True, f"Spotify iniciado buscando '{clean_q}'. A reprodução iniciará em instantes.")
+            except Exception as exc:
+                logger.debug(f"Falha ao iniciar Spotify com --uri: {exc}")
+
+        # 2. Se já estiver aberto, foca na janela do Spotify para receber a navegação e enter
+        if shutil.which("hyprctl"):
+            try:
+                subprocess.run(["hyprctl", "dispatch", "focuswindow", "class:Spotify"], capture_output=True, text=True, timeout=0.8, check=False)
+            except Exception:
+                pass
+        elif shutil.which("swaymsg"):
+            try:
+                subprocess.run(["swaymsg", '[app_id="(?i)spotify"], focus'], capture_output=True, text=True, timeout=0.8, check=False)
+            except Exception:
+                pass
+        elif shutil.which("xdotool"):
+            try:
+                subprocess.run(["xdotool", "search", "--class", "spotify", "windowactivate"], capture_output=True, text=True, timeout=0.8, check=False)
+            except Exception:
+                pass
+
+        # 3. Navega para a busca via playerctl ou open_uri
+        opened = False
+        if shutil.which("playerctl"):
+            try:
+                res = subprocess.run(["playerctl", "-p", "spotify", "open", uri], capture_output=True, text=True, timeout=1.5, check=False)
+                if res.returncode == 0:
+                    opened = True
+            except Exception:
+                pass
+
+        if not opened:
+            opened, _ = cls.open_uri(uri, player_name=player_name)
+
+        # 4. Pressiona Enter para reproduzir automaticamente o primeiro resultado encontrado
+        import time
+        time.sleep(0.4)
+        if shutil.which("ydotool"):
+            try:
+                subprocess.run(["ydotool", "key", "28:1", "28:0"], capture_output=True, text=True, timeout=1.0, check=False)
+            except Exception:
+                pass
+        elif shutil.which("wtype"):
+            try:
+                subprocess.run(["wtype", "-k", "Return"], capture_output=True, text=True, timeout=1.0, check=False)
+            except Exception:
+                pass
+
+        # 5. Obtém os metadados da faixa para responder ao usuário
+        time.sleep(0.3)
+        info = cls.get_track_info(cls.resolve_player("spotify"))
+        if info.title:
+            artist_str = f" de {info.artist}" if info.artist else ""
+            return (True, f"Tocando no Spotify: '{info.title}'{artist_str}.")
+
+        return (True, f"Buscando e tocando '{clean_q}' no Spotify.")

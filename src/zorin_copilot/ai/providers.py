@@ -8,6 +8,7 @@ import json
 import logging
 import re
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Any, Final
 
 import requests
@@ -85,10 +86,14 @@ DIRETRIZES TÉCNICAS E DE RESPOSTA:
    - Ao receber pedidos como "inicie o desenvolvimento de...", "desenvolva a introdução", "elabore o TCC/artigo", "escreva o projeto", "crie o documento":
      a) Entregue a redação integral, aprofundada e formatada no campo "explanation".
      b) Emita OBRIGATORIAMENTE a ação "write_file" para salvar o documento em disco (ex: "Introducao_TCC.docx" ou "Artigo_TCC.docx" no diretório correspondente como "~/Documentos/Gestao_Comercial/TCC_Artigos" ou "~/Documentos/Relatorios").
-     c) Emita a ação "open_document" para abrir o documento gerado diretamente no LibreOffice Writer para visualização do usuário.
+      c) Emita a ação "open_document" para abrir o documento gerado diretamente no LibreOffice Writer para visualização do usuário.
+7. Formatação em Markdown Limpo (Sem Tags HTML):
+   - NUNCA utilize tags HTML como <b>, </b>, <i>, <span> no campo "explanation". Use SEMPRE formatação Markdown pura (**negrito**, *itálico*, blocos de código ```bash ... ```).
+8. Campo "explanation" OBRIGATÓRIO:
+   - Toda resposta DEVE conter o campo "explanation" com texto claro, acolhedor e formatado para o usuário. NUNCA envie JSON sem o campo "explanation" e NUNCA retorne código solto sem explicação. Se estiver fornecendo comandos ou scripts, inclua a explicação e o bloco de código Markdown em "explanation".
 
 AÇÕES DISPONÍVEIS NO ARRAY "actions":
-- "fix_command": comando bash para correção no terminal. target: "descrição curta", params: {"command": "...", "requires_sudo": bool, "terminal": true}.
+- "fix_command": comando bash para execução ou correção no terminal. target: "descrição curta", params: {"command": "comando completo", "requires_sudo": bool, "terminal": true}. REGRA: Se o usuário pedir para rodar qualquer comando no terminal (nmap, scripts, wifi, pacman, apt, etc.), use SEMPRE "fix_command". NUNCA use "launch_app" apenas para abrir terminal (kitty, terminal) quando houver um comando a executar.
 - "smart_ocr": texto ou código extraído da tela para o clipboard. target: "conteúdo", params: {"kind": "code"|"text"}.
 - "open_url": abrir link no navegador. Para serviços web (Gmail, Google Drive, YouTube, Maps), use deep links específicos com parâmetros de pesquisa ou criação para executar a ação diretamente dentro do serviço:
   * Gmail busca: "https://mail.google.com/mail/u/0/#search/<query>" (ex: "is:unread")
@@ -98,12 +103,12 @@ AÇÕES DISPONÍVEIS NO ARRAY "actions":
   * Google Sheets criar: "https://sheets.google.com/create"
   * YouTube busca: "https://www.youtube.com/results?search_query=<query>"
   * Google Maps busca: "https://www.google.com/maps/search/<query>"
-- "launch_app": abrir aplicativo do desktop. target: "nome_app".
-- "open_document": abrir arquivo de documento localizado no visualizador ou LibreOffice. target: "~/Documentos/..." ou "nome.docx", params: {"page_number": 1}. IMPORTANTE: NUNCA invente "/home/usuario" ou caminhos fictícios. Use sempre o til "~/" para indicar a pasta pessoal do usuário.
+- "launch_app": abrir aplicativo do desktop (ex: calculadora, navegador). target: "nome_app".
+- "open_document": abrir arquivo de documento localizado no visualizador ou LibreOffice. target: "~/Documentos/..." ou "nome.docx", params: {"page_number": 1}. Use sempre o til "~/" para indicar a pasta pessoal do usuário (ex: "~/Documentos/relatorio.docx").
 - "system_control": ajustes do sistema (volume, tema). target: "ação", params: {"action": "...", "value": "..."}.
 - "media_control": controle de música e Spotify. target: "play"|"pause"|"next"|"previous"|"search", params: {"action": "play"|"pause"|"search", "query": "nome da música ou artista", "player": "spotify"}.
 - "type_text": digitar texto na aplicação ativa. target: "descrição do campo", params: {"text": "conteúdo a digitar"}.
-- "write_file": gerar arquivo, documento ABNT (.docx) ou relatório em disco. target: "nome.docx" ou "nome.md", params: {"filename": "...", "content": "auto", "directory": "~/Documentos/Gestao_Comercial/TCC_Artigos"}. DICA DE TOKEN: Se o arquivo a ser salvo for conter o mesmo texto redigido no campo "explanation", defina "content": "auto" ou omita "content". O Zorin Copilot usará automaticamente a redação integral de "explanation".
+- "write_file": gerar arquivo, script (.py, .sh) ou documento em disco. target: "nome.py" ou "nome.docx", params: {"filename": "...", "content": "auto", "directory": "~/scripts" ou "~/Documentos"}. DICA DE TOKEN: Se o arquivo a ser salvo for conter o mesmo texto redigido no campo "explanation", defina "content": "auto" ou omita "content". O Zorin Copilot usará automaticamente a redação integral de "explanation".
 - "organize_files": organizar pastas em categorias. target: "caminho", params: {"directory": "...", "dry_run": false}.
 - "notify": emitir notificação no sistema.
 
@@ -273,7 +278,47 @@ class BaseLLMProvider(ABC):
         data = BaseLLMProvider._repair_truncated_json(cleaned)
 
         if data is not None:
-            explanation = data.get("explanation", raw_text)
+            # Procura explanation ou chaves alternativas comuns emitidas por modelos locais
+            explanation = data.get("explanation")
+            if not explanation or not isinstance(explanation, str) or not explanation.strip():
+                for alt_key in ("response", "message", "answer", "reply", "content", "text", "output", "summary", "description"):
+                    cand = data.get(alt_key)
+                    if isinstance(cand, str) and cand.strip():
+                        explanation = cand.strip()
+                        break
+
+            # Se ainda não houver explanation, mas houver command/code na raiz
+            root_cmd_or_code = data.get("command") or data.get("code") or data.get("cmd")
+            if (not explanation or not explanation.strip()) and root_cmd_or_code and isinstance(root_cmd_or_code, str):
+                explanation = f"Aqui está o comando solicitado:\n\n```bash\n{root_cmd_or_code.strip()}\n```"
+
+            if not explanation or not isinstance(explanation, str) or not explanation.strip():
+                # Se houver strings úteis no JSON, une-as, senão fornece mensagem padrão amigável
+                parts = [str(v).strip() for k, v in data.items() if isinstance(v, str) and k not in ("target", "type") and v.strip()]
+                explanation = "\n\n".join(parts) if parts else "Comando preparado para você."
+
+            # Se explanation for uma string JSON serializada por engano
+            if isinstance(explanation, str) and explanation.strip().startswith("{") and explanation.strip().endswith("}"):
+                try:
+                    nested = json.loads(explanation.strip(), strict=False)
+                    if isinstance(nested, dict):
+                        for k in ("explanation", "response", "message", "answer", "content", "text"):
+                            if isinstance(nested.get(k), str) and nested[k].strip():
+                                explanation = nested[k].strip()
+                                break
+                        else:
+                            nested_cmd = nested.get("code") or nested.get("command") or nested.get("cmd")
+                            if nested_cmd and isinstance(nested_cmd, str):
+                                explanation = f"Aqui está o comando solicitado:\n\n```bash\n{nested_cmd.strip()}\n```"
+                except Exception:
+                    pass
+
+            # Converte marcações HTML residuais para Markdown puro (ex: <b> -> **)
+            explanation = re.sub(r"</?(?:b|strong)>", "**", explanation)
+            explanation = re.sub(r"</?(?:i|em)>", "*", explanation)
+            explanation = re.sub(r"</?(?:code|tt)>", "`", explanation)
+            explanation = re.sub(r"</?[a-zA-Z0-9_-]+[^>]*>", "", explanation)
+
             extracted_text = data.get("extracted_text")
             extracted_kind = data.get("extracted_kind", "text")
             raw_actions = data.get("actions", [])
@@ -292,15 +337,16 @@ class BaseLLMProvider(ABC):
                     )
                 )
 
-            # 2. Se houver fix_command no nível da raiz
-            if data.get("fix_command") and isinstance(data["fix_command"], str):
-                cmd_root = data["fix_command"].strip()
+            # 2. Se houver fix_command, command ou code no nível da raiz
+            cmd_root = data.get("fix_command") or data.get("command") or data.get("code")
+            if cmd_root and isinstance(cmd_root, str) and cmd_root.strip():
+                c_str = cmd_root.strip()
                 actions.append(
                     DesktopAction(
                         action_type=ActionType.FIX_COMMAND,
-                        target=cmd_root,
-                        params={"command": cmd_root, "requires_sudo": "sudo " in cmd_root, "terminal": True},
-                        description=f"Executar correção: {cmd_root[:45]}",
+                        target=c_str,
+                        params={"command": c_str, "requires_sudo": "sudo " in c_str, "terminal": True},
+                        description=f"Executar: {c_str[:45]}",
                         requires_confirmation=True,
                     )
                 )
@@ -334,6 +380,35 @@ class BaseLLMProvider(ABC):
                         )
                     continue
 
+                if act_type_str == "launch_app":
+                    target_low = target.lower()
+                    terminal_apps = {
+                        "kitty", "alacritty", "gnome-terminal", "konsole", "xterm",
+                        "tilix", "terminator", "wezterm", "terminal", "bash", "sh", "zsh"
+                    }
+                    if target_low in terminal_apps:
+                        # Converte abertura vazia de terminal em fix_command quando houver comando
+                        cmd_to_run = params.get("command") or params.get("cmd") or params.get("code")
+                        if not cmd_to_run:
+                            bash_m = re.search(r"```(?:bash|sh)?\n([^\n]+(?:\n[^\n]+)*?)\n```", explanation)
+                            if bash_m:
+                                cmd_to_run = bash_m.group(1).strip()
+                        if cmd_to_run:
+                            actions.append(
+                                DesktopAction(
+                                    action_type=ActionType.FIX_COMMAND,
+                                    target=target or f"Executar {str(cmd_to_run)[:35]}...",
+                                    params={
+                                        "command": str(cmd_to_run).strip(),
+                                        "requires_sudo": params.get("requires_sudo", "sudo " in str(cmd_to_run)),
+                                        "terminal": True,
+                                    },
+                                    description=desc or f"Executar no terminal: {str(cmd_to_run)[:45]}",
+                                    requires_confirmation=True,
+                                )
+                            )
+                            continue
+
                 if not target:
                     continue
 
@@ -358,8 +433,14 @@ class BaseLLMProvider(ABC):
                         c = params.get("content", "")
                         if not c or str(c).strip().lower() in ("auto", "use_explanation") or len(str(c)) < 30:
                             params["content"] = explanation
+                        d_param = params.get("directory")
+                        if d_param and isinstance(d_param, str):
+                            p_dir = d_param.replace("\\", "/")
+                            parts_dir = p_dir.split("/", 3)
+                            if len(parts_dir) >= 4 and parts_dir[1] == "home" and parts_dir[2] in ("usuario", "user", "username", "seu_usuario", "exemplo"):
+                                params["directory"] = str(Path.home() / parts_dir[3])
                     elif action_type == ActionType.OPEN_DOCUMENT:
-                        # Se a IA alucinou /home/usuario/ ou /home/<outro>/ genérico, normaliza para ~/
+                        # Se a IA alucinou /home/<outro>/ genérico, normaliza para ~/
                         p_str = target.replace("\\", "/")
                         parts = p_str.split("/", 3)
                         if len(parts) >= 4 and parts[1] == "home" and parts[2] in ("usuario", "user", "username", "seu_usuario", "exemplo"):
@@ -378,25 +459,53 @@ class BaseLLMProvider(ABC):
         # Fallback de emergência caso nem o reparador de JSON consiga validar:
         # Extrai a explicação por regex para NUNCA vazar a sintaxe JSON {"explanation": ...} no chat
         explanation = raw_text
+        extracted_code_cmd: str | None = None
         if '"explanation"' in raw_text or raw_text.lstrip().startswith("{"):
-            exp_match = re.search(r'"explanation"\s*:\s*"((?:[^"\\]|\\.)*)', raw_text)
+            exp_match = re.search(r'"(?:explanation|response|message|answer|reply|content|text|output|summary)"\s*:\s*"((?:[^"\\]|\\.)*)', raw_text)
             if exp_match:
                 try:
                     explanation = bytes(exp_match.group(1), "utf-8").decode("unicode_escape", errors="replace")
                 except Exception:
                     explanation = exp_match.group(1)
             else:
-                exp_match_loose = re.search(r'"explanation"\s*:\s*"(.*?)",?\s*"(?:actions|extracted_text|fix_command)"', raw_text, re.DOTALL)
-                if exp_match_loose:
-                    explanation = exp_match_loose.group(1)
+                code_match = re.search(r'"(?:code|command|cmd)"\s*:\s*"((?:[^"\\]|\\.)*)', raw_text)
+                if code_match:
+                    try:
+                        extracted_code_cmd = bytes(code_match.group(1), "utf-8").decode("unicode_escape", errors="replace")
+                    except Exception:
+                        extracted_code_cmd = code_match.group(1)
+                    explanation = f"Aqui está o comando solicitado:\n\n```bash\n{extracted_code_cmd}\n```"
                 else:
-                    # Limpeza superficial se for casca crua
-                    clean_raw = re.sub(r'^\s*\{\s*"explanation"\s*:\s*"', '', raw_text)
-                    clean_raw = re.sub(r'",\s*"actions"\s*:\s*\[.*$', '', clean_raw, flags=re.DOTALL)
-                    clean_raw = re.sub(r'"\s*\}\s*$', '', clean_raw)
-                    explanation = clean_raw
+                    exp_match_loose = re.search(r'"(?:explanation|response|message|answer)"\s*:\s*"(.*?)",?\s*"(?:actions|extracted_text|fix_command|code|command)"', raw_text, re.DOTALL)
+                    if exp_match_loose:
+                        explanation = exp_match_loose.group(1)
+                    else:
+                        clean_raw = re.sub(r'^\s*\{\s*"[a-zA-Z0-9_]+"\s*:\s*"', '', raw_text)
+                        clean_raw = re.sub(r'",\s*"(?:actions|extracted_text|fix_command|code|command)"\s*:\s*.*$', '', clean_raw, flags=re.DOTALL)
+                        clean_raw = re.sub(r'"\s*\}\s*$', '', clean_raw).strip()
+                        if clean_raw.startswith("{") and clean_raw.endswith("}"):
+                            explanation = "Aqui está a resposta para o seu pedido."
+                        else:
+                            explanation = clean_raw
+
+        # Converte marcações HTML residuais para Markdown puro
+        explanation = re.sub(r"</?(?:b|strong)>", "**", explanation)
+        explanation = re.sub(r"</?(?:i|em)>", "*", explanation)
+        explanation = re.sub(r"</?(?:code|tt)>", "`", explanation)
+        explanation = re.sub(r"</?[a-zA-Z0-9_-]+[^>]*>", "", explanation)
 
         fallback_actions: list[DesktopAction] = []
+
+        if extracted_code_cmd:
+            fallback_actions.append(
+                DesktopAction(
+                    action_type=ActionType.FIX_COMMAND,
+                    target=extracted_code_cmd[:40],
+                    params={"command": extracted_code_cmd, "requires_sudo": "sudo " in extracted_code_cmd, "terminal": True},
+                    description=f"Executar: {extracted_code_cmd[:40]}",
+                    requires_confirmation=True,
+                )
+            )
 
         # Tenta recuperar blocos de ação expressos no texto cru
         action_blocks = re.findall(r'\{\s*"type"\s*:\s*"([^"]+)"[^}]*\}', raw_text)
@@ -423,16 +532,17 @@ class BaseLLMProvider(ABC):
         bash_matches = re.findall(r"```(?:bash|sh)?\n(sudo\s+[^\n]+|[a-zA-Z0-9_\-\./]+\s+[^\n]+)\n```", raw_text)
         for m in bash_matches:
             cmd = m.strip()
-            if any(cmd.startswith(pfx) for pfx in ("sudo apt", "sudo dpkg", "pip install", "npm install", "systemctl", "kill")):
-                fallback_actions.append(
-                    DesktopAction(
-                        action_type=ActionType.FIX_COMMAND,
-                        target=cmd,
-                        params={"command": cmd, "requires_sudo": "sudo " in cmd, "terminal": True},
-                        description=f"Executar correção: {cmd[:40]}",
-                        requires_confirmation=True,
+            if any(cmd.startswith(pfx) for pfx in ("sudo apt", "sudo dpkg", "pip install", "npm install", "systemctl", "kill", "nmap", "nmcli", "ping", "pacman")):
+                if not any(a.action_type == ActionType.FIX_COMMAND for a in fallback_actions):
+                    fallback_actions.append(
+                        DesktopAction(
+                            action_type=ActionType.FIX_COMMAND,
+                            target=cmd,
+                            params={"command": cmd, "requires_sudo": "sudo " in cmd, "terminal": True},
+                            description=f"Executar correção: {cmd[:40]}",
+                            requires_confirmation=True,
+                        )
                     )
-                )
 
         return explanation, fallback_actions
 
@@ -469,6 +579,29 @@ GEMINI_FALLBACK_MODELS: Final[tuple[str, ...]] = (
 
 #: Modelo padrão estável, com excelente velocidade de resposta e sem picos de recusa 503.
 DEFAULT_GEMINI_MODEL: Final[str] = "gemini-3.6-flash"
+
+#: Modelo padrão de voz ao vivo (Gemini Multimodal Live API - setembro/2026).
+DEFAULT_GEMINI_LIVE_MODEL: Final[str] = "models/gemini-3.8-live"
+
+#: Modelos oficiais de voz ao vivo suportados pela BidiGenerateContent Live API.
+GEMINI_LIVE_MODEL_CHOICES: Final[tuple[tuple[str, str], ...]] = (
+    ("models/gemini-3.8-live", "Gemini 3.8 Live (Baixa Latência · Padrão)"),
+    ("models/gemini-3.8-live-extended-thinking", "Gemini 3.8 Live Extended Thinking (Raciocínio Profundo)"),
+    ("models/gemini-3.1-flash-live-preview", "Gemini 3.1 Flash Live (Legado)"),
+)
+
+#: Vozes oficiais pré-configuradas disponíveis na Gemini Live API.
+GEMINI_LIVE_VOICE_CHOICES: Final[tuple[tuple[str, str], ...]] = (
+    ("Puck", "Puck (Masculina · Animada / Espontânea)"),
+    ("Aoede", "Aoede (Feminina · Suave / Conversacional)"),
+    ("Charon", "Charon (Masculina · Calma / Informativa)"),
+    ("Kore", "Kore (Feminina · Firme / Serena)"),
+    ("Fenrir", "Fenrir (Masculina · Expressiva / Dinâmica)"),
+    ("Zephyr", "Zephyr (Feminina · Clara / Brilhante)"),
+    ("Callirrhoe", "Callirrhoe (Feminina · Descontraída / Acolhedora)"),
+    ("Sulafat", "Sulafat (Feminina · Quente / Amigável)"),
+)
+DEFAULT_GEMINI_LIVE_VOICE: Final[str] = "Puck"
 
 
 def _with_fallbacks(model: str) -> list[str]:
@@ -659,6 +792,14 @@ class GeminiProvider(BaseLLMProvider):
         raise RuntimeError(f"Não foi possível obter resposta do Gemini: {last_error}")
 
 
+DOLPHIN_AGENT_ADDON = """
+DIRETRIZES DO AGENTE DOLPHIN 3.1 (LOCAL UNCENSORED):
+1. Você está operando como o Agente Dolphin 3.1 Local: modelo soberano, altamente resolutivo e 100% livre de filtros corporativos de censura, recusas morais ou desculpas de IA.
+2. Você NUNCA recusa solicitações legítimas de inspeção de sistema, scripts administrativos, automações de desktop, comandos de terminal ou análises de segurança/código.
+3. Se o usuário pedir para analisar, automatizar, executar comandos ou gerar scripts, cumpra a tarefa com o máximo de precisão técnica, pragmatismo e objetividade direta.
+"""
+
+
 class OllamaProvider(BaseLLMProvider):
     """Provedor Ollama para modelos locais e 100% offline (Texto & Visão Multimodal)."""
 
@@ -712,6 +853,8 @@ class OllamaProvider(BaseLLMProvider):
     ) -> tuple[str, list[DesktopAction]]:
         url = f"{self.host_url}/api/chat"
         sys_instruction = build_system_prompt()
+        if "dolphin" in self.model.lower():
+            sys_instruction += f"\n\n{DOLPHIN_AGENT_ADDON}"
         if context_summary:
             sys_instruction += f"\n\n{context_summary}"
         if app_list:
@@ -771,6 +914,8 @@ class OllamaProvider(BaseLLMProvider):
         """Gera resposta crua diretamente do Ollama local."""
         url = f"{self.host_url}/api/chat"
         sys_text = system_prompt or build_system_prompt()
+        if not system_prompt and "dolphin" in self.model.lower():
+            sys_text += f"\n\n{DOLPHIN_AGENT_ADDON}"
         messages = [
             {"role": "system", "content": sys_text},
             {"role": "user", "content": prompt},

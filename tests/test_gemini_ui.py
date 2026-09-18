@@ -15,7 +15,9 @@ Adw.init()
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
 from zorin_copilot.ai.actions import ActionPlan, ActionType, DesktopAction
+from zorin_copilot.core.fence import FenceMode
 from zorin_copilot.core.session import ChatTurn
+from zorin_copilot.core.window_manager import WindowInfo
 from zorin_copilot.ui.app import CopilotWindow
 
 
@@ -157,6 +159,25 @@ class GeminiUILayoutTest(unittest.TestCase):
         # Destrava Kill Switch
         self.win._on_toggle_kill_switch(popover)
         self.assertFalse(self.win.fence.is_emergency_stopped)
+
+        # Alterna para Janela Ativa (Dinâmica)
+        self.win._on_select_active_window_mode(popover)
+        self.assertEqual(self.win.fence_lbl.get_text(), "⚡ Janela Ativa")
+        self.assertEqual(self.win.fence.mode, FenceMode.ACTIVE_WINDOW)
+
+        # Alterna para Janela Escolhida
+        sample_win = WindowInfo(
+            id="0x777",
+            app="calc",
+            title="Calculadora",
+            x=100,
+            y=100,
+            width=400,
+            height=500,
+        )
+        self.win._on_select_window(sample_win, popover)
+        self.assertEqual(self.win.fence_lbl.get_text(), "🪟 Calc")
+        self.assertEqual(self.win.fence.mode, FenceMode.CHOSEN_WINDOW)
 
 
 class TurnPlanRebuildTest(unittest.TestCase):

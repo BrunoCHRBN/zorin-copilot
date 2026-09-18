@@ -28,7 +28,7 @@ class LiveVoiceClientTest(unittest.TestCase):
         for expected in [
             "launch_app", "system_control", "capture_screen", "open_url",
             "get_system_info", "web_search", "academic_search", "media_control", "write_document",
-            "organize_directory"
+            "organize_directory", "move_window_to_monitor", "vscode_workspace", "click_and_type",
         ]:
             self.assertIn(expected, func_names)
 
@@ -135,6 +135,105 @@ class LiveVoiceClientTest(unittest.TestCase):
         self.assertIn("Imagens", res["stats"])
         mock_org.assert_called_once_with(directory="~/Downloads", dry_run=False)
 
+    @patch("zorin_copilot.core.window_manager.WindowManager.move_windows")
+    def test_dispatch_tool_move_window_to_monitor(self, mock_move):
+        """Testa o despacho de mover janelas entre monitores via voz/vídeo ao vivo."""
+        mock_move.return_value = {
+            "success": True,
+            "message": "Janela 'Firefox' movida para o monitor 'HDMI-A-2'.",
+            "window": "firefox",
+            "target_monitor": "HDMI-A-2",
+        }
+        res = self.client._dispatch_tool(
+            "move_window_to_monitor",
+            {"window": "firefox", "target_monitor": "secundario"},
+        )
+        self.assertTrue(res["success"])
+        self.assertIn("HDMI-A-2", res["message"])
+        mock_move.assert_called_once_with("firefox", "secundario", drag_visual=True)
+
+    def test_dispatch_tool_vscode_workspace(self):
+        """Testa o despacho de ações de desenvolvimento com VS Code via voz ao vivo."""
+        from pathlib import Path
+        from zorin_copilot.core.vscode import VSCodeManager
+
+        # 1. get_active_project
+        with patch.object(VSCodeManager, "get_active_workspace", return_value=Path("/home/user/meu_projeto")):
+            res = self.client._dispatch_tool("vscode_workspace", {"action": "get_active_project"})
+            self.assertTrue(res["success"])
+            self.assertEqual(res["project_name"], "meu_projeto")
+
+        # 2. create_project
+        with patch.object(
+            VSCodeManager,
+            "create_project",
+            return_value={"success": True, "message": "Criado com sucesso"},
+        ) as mock_create:
+            res = self.client._dispatch_tool(
+                "vscode_workspace",
+                {"action": "create_project", "project_name": "api_loja", "template": "fastapi"},
+            )
+            self.assertTrue(res["success"])
+            mock_create.assert_called_once_with("api_loja", template="fastapi", base_dir=None)
+
+        # 3. write_code
+        with patch.object(
+            VSCodeManager,
+            "write_code_file",
+            return_value={"success": True, "message": "Código salvo", "lines": 10},
+        ) as mock_write:
+            res = self.client._dispatch_tool(
+                "vscode_workspace",
+                {"action": "write_code", "file_path": "main.py", "code_content": "print('ok')", "line_number": 5},
+            )
+            self.assertTrue(res["success"])
+            mock_write.assert_called_once_with("main.py", "print('ok')", line=5)
+
+        # 4. read_file
+        with patch.object(
+            VSCodeManager,
+            "read_code_file",
+            return_value={"success": True, "content": "code content"},
+        ) as mock_read:
+            res = self.client._dispatch_tool(
+                "vscode_workspace",
+                {"action": "read_file", "file_path": "src/utils.py"},
+            )
+            self.assertTrue(res["success"])
+            mock_read.assert_called_once_with("src/utils.py")
+
+        # 5. get_structure
+        with patch.object(
+            VSCodeManager,
+            "read_workspace_structure",
+            return_value={"success": True, "tree": "📁 src/"},
+        ) as mock_struct:
+            res = self.client._dispatch_tool("vscode_workspace", {"action": "get_structure"})
+            self.assertTrue(res["success"])
+            mock_struct.assert_called_once_with(None)
+
+        # 6. patch_code
+        with patch.object(
+            VSCodeManager,
+            "patch_code_file",
+            return_value={"success": True, "message": "Código modificado", "line": 8},
+        ) as mock_patch:
+            res = self.client._dispatch_tool(
+                "vscode_workspace",
+                {
+                    "action": "patch_code",
+                    "file_path": "main.py",
+                    "target_code": "print('velho')",
+                    "replacement_code": "print('novo')",
+                },
+            )
+            self.assertTrue(res["success"])
+            mock_patch.assert_called_once_with("main.py", "print('velho')", "print('novo')")
+
+        # 7. Ação inválida
+        res_err = self.client._dispatch_tool("vscode_workspace", {"action": "acao_invalida_xyz"})
+        self.assertFalse(res_err["success"])
+
     def test_video_streaming_toggle_and_state(self):
         """Testa início, interrupção e alternância de streaming de vídeo de tela."""
         # Se cliente não estiver rodando, start_video_stream retorna False
@@ -203,6 +302,48 @@ class LiveVoiceClientTest(unittest.TestCase):
             res_hotkey = self.client._dispatch_tool("keyboard_hotkey", {"keys": ["ctrl", "c"]})
             self.assertTrue(res_hotkey["success"])
 
+    def test_resolve_screen_coordinates_calibration(self):
+        """Verifica a conversão precisa de coordenadas 0..1000 e 0..1 calibradas ao recorte do vídeo."""
+        # 1. Calibração ao frame de vídeo transmitido (crop de janela ou monitor)
+        self.client._last_streamed_crop_rect = (200, 150, 1000, 600)
+
+        # 50% horizontal, 50% vertical na escala 0..1000 do Gemini
+        abs_x, abs_y, desc = self.client._resolve_screen_coordinates(500, 500)
+        self.assertEqual(abs_x, 700)  # 200 + 0.5 * 1000
+        self.assertEqual(abs_y, 450)  # 150 + 0.5 * 600
+        self.assertIn("frame de vídeo", desc)
+
+        # Fração 0.0..1.0
+        abs_x2, abs_y2, _ = self.client._resolve_screen_coordinates(0.1, 0.2)
+        self.assertEqual(abs_x2, 300)  # 200 + 0.1 * 1000
+        self.assertEqual(abs_y2, 270)  # 150 + 0.2 * 600
+
+        # Pixels absolutos explícitos
+        abs_x3, abs_y3, desc3 = self.client._resolve_screen_coordinates(1920, 1080, is_rel=False)
+        self.assertEqual(abs_x3, 1920)
+        self.assertEqual(abs_y3, 1080)
+        self.assertIn("explícito", desc3)
+
+    def test_dispatch_tool_click_and_type(self):
+        """Testa a ferramenta atômica click_and_type na chamada de vídeo/voz."""
+        self.client.input_driver.ydotool_bin = "/usr/bin/ydotool"
+        active_m = self.client.fence.get_active_monitor()
+        ox = getattr(active_m, "x", 0) if active_m else 0
+        oy = getattr(active_m, "y", 0) if active_m else 0
+        self.client._last_streamed_crop_rect = (ox + 100, oy + 100, 800, 600)
+        ok_proc = Mock(returncode=0, stderr="", stdout="")
+
+        with patch("subprocess.run", return_value=ok_proc):
+            res = self.client._dispatch_tool(
+                "click_and_type",
+                {"x": 500, "y": 500, "text": "tocando no spotify", "clear_first": True, "press_enter": True},
+            )
+            self.assertTrue(res["success"])
+            self.assertIn("digitado", res["message"])
+            self.assertEqual(res["x"], ox + 500)  # ox + 100 + 0.5 * 800
+            self.assertEqual(res["y"], oy + 400)  # oy + 100 + 0.5 * 600
+
+
     def test_dispatch_tool_contacts(self):
         """Testa salvamento e consulta de contato via Live API."""
         res_save = self.client._dispatch_tool(
@@ -216,7 +357,11 @@ class LiveVoiceClientTest(unittest.TestCase):
         self.assertEqual(len(res_lookup["contacts"]), 1)
         self.assertEqual(res_lookup["contacts"][0]["email"], "lucas@dev.com")
 
-    def test_dispatch_tool_email_compose(self):
+    @patch(
+        "zorin_copilot.core.email.EmailManager.compose",
+        return_value=(True, "Rascunho aberto para carlos@contabilidade.com", {"client": "xdg-email"}),
+    )
+    def test_dispatch_tool_email_compose(self, mock_compose):
         """Composição de e-mail é ação de risco: exige confirmação antes de executar."""
         self.client.memory.save_contact("Carlos Contador", "carlos@contabilidade.com", aliases=["contador"])
         blocked = self.client._dispatch_tool(
@@ -230,6 +375,7 @@ class LiveVoiceClientTest(unittest.TestCase):
         )
         self.assertTrue(res["success"])
         self.assertIn("carlos@contabilidade.com", res["message"])
+        mock_compose.assert_called_once()
 
     def test_dispatch_tool_calendar_event(self):
         """Testa agendamento e listagem de evento no calendário via Live API."""
@@ -244,7 +390,8 @@ class LiveVoiceClientTest(unittest.TestCase):
         self.assertTrue(res_list["success"])
         self.assertGreaterEqual(res_list["count"], 1)
 
-    def test_dispatch_tool_browser_search(self):
+    @patch("zorin_copilot.core.browser.BrowserManager.search", return_value=(True, "Pesquisa aberta", "https://google.com/search?q=Python+3.12+novidades"))
+    def test_dispatch_tool_browser_search(self, mock_search):
         """Testa pesquisa direta no navegador via Live API."""
         res = self.client._dispatch_tool("browser_search", {"query": "Python 3.12 novidades", "engine": "google"})
         self.assertTrue(res["success"])
@@ -296,11 +443,12 @@ class LiveVoiceClientTest(unittest.TestCase):
             self.assertIn("450.000", res_read["content"])
 
             # 3. open_document_file
-            res_open = self.client._dispatch_tool(
-                "open_document_file",
-                {"file_path": str(sample_file), "page_number": 1},
-            )
-            self.assertTrue(res_open["success"])
+            with patch.object(self.client.rag, "open_document", return_value=(True, "Aberto com sucesso")):
+                res_open = self.client._dispatch_tool(
+                    "open_document_file",
+                    {"file_path": str(sample_file), "page_number": 1},
+                )
+                self.assertTrue(res_open["success"])
 
 
 class LiveModelLabelTest(unittest.TestCase):
@@ -319,16 +467,21 @@ class LiveModelLabelTest(unittest.TestCase):
         self.assertEqual(live_model_label(""), "Gemini")
         self.assertEqual(live_model_label(None), "Gemini")
 
-    def test_default_config_produces_3_1(self):
-        # O default acompanha o modelo de voz atual do Google (março/2026).
-        # Se o projeto voltar para o 2.5, este teste precisa ser revertido.
-        self.assertEqual(live_model_label(CopilotConfig().gemini_live_model), "Gemini 3.1")
+    def test_default_config_produces_3_8_live(self):
+        # O default acompanha o modelo de voz atual do Google (setembro/2026).
+        self.assertEqual(live_model_label(CopilotConfig().gemini_live_model), "Gemini 3.8 Live")
+
+    def test_extended_thinking_label(self):
+        self.assertEqual(live_model_label("models/gemini-3.8-live-extended-thinking"), "Gemini 3.8 Thinking")
+
+    def test_legacy_3_1_label(self):
+        self.assertEqual(live_model_label("models/gemini-3.1-flash-live-preview"), "Gemini 3.1")
 
 
 
 
 class LiveAudioPlayerTest(unittest.TestCase):
-    """Garante que a reprodução e gravação PipeWire usam --raw para evitar rejeição por libsndfile."""
+    """Garante que a reprodução e gravação PipeWire usam --raw, latência e papéis corretos."""
 
     @patch("shutil.which")
     @patch("subprocess.Popen")
@@ -341,6 +494,50 @@ class LiveAudioPlayerTest(unittest.TestCase):
         cmd = mock_popen.call_args[0][0]
         self.assertIn("--raw", cmd)
         self.assertIn("pw-play", cmd[0])
+        self.assertIn("--latency", cmd)
+        self.assertIn("150ms", cmd)
+        self.assertIn("--media-role", cmd)
+        self.assertIn("Communication", cmd)
+
+    def test_play_audio_chunk_enqueues_to_jitter_buffer(self):
+        """Verifica se _play_audio_chunk enfileira dados sem bloquear."""
+        client = GeminiLiveClient()
+        client._is_running = True
+        test_data = b"\x01\x02\x03\x04"
+        client._play_audio_chunk(test_data)
+        self.assertFalse(client._audio_play_queue.empty())
+        self.assertEqual(client._audio_play_queue.get_nowait(), test_data)
+
+    def test_stop_player_clears_jitter_buffer_and_resets_prebuffering(self):
+        """Testa se o stop_player limpa a fila de áudio e restaura prebuffering (barge-in)."""
+        client = GeminiLiveClient()
+        client._audio_play_queue.put(b"chunk1")
+        client._audio_play_queue.put(b"chunk2")
+        client._prebuffer_bytes.extend(b"lingering_bytes")
+        client._is_prebuffering = False
+
+        client._stop_player()
+
+        self.assertTrue(client._audio_play_queue.empty())
+        self.assertEqual(len(client._prebuffer_bytes), 0)
+        self.assertTrue(client._is_prebuffering)
+
+    def test_set_state_deduplication(self):
+        """Evita disparo excessivo de eventos on_state_change quando o estado não muda."""
+        client = GeminiLiveClient()
+        callback = MagicMock()
+        client.on_state_change = callback
+
+        client._set_state(LiveVoiceState.SPEAKING, "Falando...")
+        self.assertEqual(callback.call_count, 1)
+
+        # Mesma chamada não deve redisparar o callback
+        client._set_state(LiveVoiceState.SPEAKING, "Falando...")
+        self.assertEqual(callback.call_count, 1)
+
+        # Estado diferente redispara
+        client._set_state(LiveVoiceState.LISTENING, "Ouvindo...")
+        self.assertEqual(callback.call_count, 2)
 
 
 class LiveErrorHandlingTest(unittest.TestCase):
@@ -372,6 +569,89 @@ class LiveErrorHandlingTest(unittest.TestCase):
         fr = sent_payload["toolResponse"]["functionResponses"][0]
         self.assertEqual(fr["id"], "call-123")
         self.assertEqual(fr["name"], "launch_app")
+
+
+class LiveExtendedThinkingTest(unittest.TestCase):
+    """Testes do protocolo Gemini 3.8 Live Extended Thinking (interaction_status e turnComplete)."""
+
+    def test_in_progress_status_keeps_thinking_state_on_turn_complete(self):
+        client = GeminiLiveClient(config=CopilotConfig(gemini_api_key="fake-key"))
+        client.state = LiveVoiceState.SPEAKING
+        client._interaction_status = "IN_PROGRESS"
+
+        # Simula finalização de chunk com interação em andamento
+        if getattr(client, "_interaction_status", "IDLE") == "IN_PROGRESS":
+            client._set_state(LiveVoiceState.THINKING, "Raciocinando em segundo plano...")
+        else:
+            client._set_state(LiveVoiceState.LISTENING, "Ouvindo você...")
+
+        self.assertEqual(client.state, LiveVoiceState.THINKING)
+        self.assertEqual(client._last_state_msg, "Raciocinando em segundo plano...")
+
+    def test_idle_status_transitions_to_listening(self):
+        client = GeminiLiveClient(config=CopilotConfig(gemini_api_key="fake-key"))
+        client.state = LiveVoiceState.SPEAKING
+        client._interaction_status = "IDLE"
+
+        if getattr(client, "_interaction_status", "IDLE") == "IN_PROGRESS":
+            client._set_state(LiveVoiceState.THINKING, "Raciocinando em segundo plano...")
+        else:
+            client._set_state(LiveVoiceState.LISTENING, "Ouvindo você...")
+
+        self.assertEqual(client.state, LiveVoiceState.LISTENING)
+        self.assertEqual(client._last_state_msg, "Ouvindo você...")
+
+
+class LiveSetupAndVoiceTest(unittest.TestCase):
+    """Testes para o payload de setup e gerenciamento de modelo/voz no GeminiLiveClient."""
+
+    def test_build_setup_payload_standard_3_8_live(self):
+        client = GeminiLiveClient(config=CopilotConfig(gemini_api_key="fake-key"))
+        payload = client._build_setup_payload(
+            model_name="models/gemini-3.8-live",
+            voice_name="Puck",
+            system_prompt_text="Você é o Zorin Copilot.",
+        )
+        setup = payload["setup"]
+        self.assertEqual(setup["model"], "models/gemini-3.8-live")
+        gen_cfg = setup["generationConfig"]
+        self.assertEqual(gen_cfg["responseModalities"], ["AUDIO"])
+        self.assertEqual(
+            gen_cfg["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"],
+            "Puck",
+        )
+        self.assertNotIn("thinkingConfig", gen_cfg)
+        self.assertEqual(setup["systemInstruction"]["parts"][0]["text"], "Você é o Zorin Copilot.")
+        self.assertTrue(len(setup["tools"]) > 0)
+
+    def test_build_setup_payload_extended_thinking(self):
+        client = GeminiLiveClient(config=CopilotConfig(gemini_api_key="fake-key"))
+        payload = client._build_setup_payload(
+            model_name="models/gemini-3.8-live-extended-thinking",
+            voice_name="Aoede",
+            system_prompt_text="Instrução do sistema",
+        )
+        setup = payload["setup"]
+        self.assertEqual(setup["model"], "models/gemini-3.8-live-extended-thinking")
+        gen_cfg = setup["generationConfig"]
+        self.assertEqual(
+            gen_cfg["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"],
+            "Aoede",
+        )
+        self.assertIn("thinkingConfig", gen_cfg)
+        self.assertEqual(gen_cfg["thinkingConfig"]["thinkingBudget"], 2048)
+
+    @patch.object(CopilotConfig, "save")
+    def test_set_voice_and_set_model(self, mock_save):
+        cfg = CopilotConfig(gemini_api_key="fake-key", gemini_live_model="models/gemini-3.8-live", gemini_live_voice="Puck")
+        client = GeminiLiveClient(config=cfg)
+
+        client.set_voice("Zephyr")
+        self.assertEqual(client.config.gemini_live_voice, "Zephyr")
+        mock_save.assert_called()
+
+        client.set_model("models/gemini-3.8-live-extended-thinking")
+        self.assertEqual(client.config.gemini_live_model, "models/gemini-3.8-live-extended-thinking")
 
 
 if __name__ == "__main__":

@@ -128,6 +128,7 @@ class VoicePillWindow(Gtk.Window):
         # Indicadores
         self._video_streaming: bool = False
         self._privacy_shielded: bool = False
+        self._details_popover: Gtk.Popover | None = None
 
         # "Preparando...": mostrado no instante em que a wake word/atalho
         # invoca o Copilot, antes de o WebSocket conectar. Sem isso a pílula só
@@ -283,6 +284,8 @@ class VoicePillWindow(Gtk.Window):
         self.rec_dot.add_css_class("pill-rec-dot")
         self.rec_dot.set_halign(Gtk.Align.END)
         self.rec_dot.set_valign(Gtk.Align.START)
+        self.rec_dot.set_can_target(False)
+        self.rec_dot.set_focusable(False)
         self.rec_dot.set_visible(False)
         avatar_overlay.add_overlay(self.rec_dot)
         self.container.append(avatar_overlay)
@@ -355,6 +358,14 @@ class VoicePillWindow(Gtk.Window):
         self.mute_btn.connect("clicked", self._on_toggle_mute)
         controls_box.append(self.mute_btn)
 
+        self.details_btn = Gtk.Button.new_from_icon_name("dialog-information-symbolic")
+        self.details_btn.add_css_class("flat")
+        self.details_btn.add_css_class("circular")
+        self.details_btn.add_css_class("voice-pill-btn")
+        self.details_btn.set_tooltip_text("Detalhes da chamada e compartilhamento de tela")
+        self.details_btn.connect("clicked", self._on_details_clicked)
+        controls_box.append(self.details_btn)
+
         self.expand_btn = Gtk.Button.new_from_icon_name("view-fullscreen-symbolic")
         self.expand_btn.add_css_class("flat")
         self.expand_btn.add_css_class("circular")
@@ -387,6 +398,10 @@ class VoicePillWindow(Gtk.Window):
             probe.add_css_class(f"pill-probe-{css_suffix}")
             # Não usar set_visible(False): zera o estilo resolvido. set_opacity(0) preserva.
             probe.set_opacity(0.0)
+            probe.set_can_target(False)
+            probe.set_focusable(False)
+            probe.set_halign(Gtk.Align.START)
+            probe.set_valign(Gtk.Align.START)
             probe.set_size_request(1, 1)
             self._overlay.add_overlay(probe)
             self._probes[state] = probe
@@ -585,12 +600,15 @@ class VoicePillWindow(Gtk.Window):
         if not self.get_visible():
             self.present()
         self.place_smart()
-        # Blur real da pílula (Hyprland): aplica uma vez por sessão, se suportado.
+        # Blur e regras da pílula (Hyprland): aplica uma vez por sessão, se suportado.
         # Solto originalmente — se o hyprctl falhar, não deve derrubar o handler.
         try:
-            hyprland_effects.ensure_layer_blur(self._blur_namespace)
+            if self._layer_shell:
+                hyprland_effects.ensure_layer_blur(self._blur_namespace)
+            else:
+                hyprland_effects.ensure_pill_window_rules()
         except Exception as exc:  # never let compositor IPC break the pill
-            logger.debug("blur da pílula não aplicado: %s", exc)
+            logger.debug("regras Hyprland da pílula não aplicadas: %s", exc)
         self.drawing_area.queue_draw()
 
     def _ui_on_state_change(self, state: LiveVoiceState, msg: str) -> bool:
@@ -794,15 +812,278 @@ class VoicePillWindow(Gtk.Window):
                 if not self._chip_active:
                     self.status_lbl.set_text("Ouvindo você...")
 
+    def _on_details_clicked(self, _btn: Any = None) -> None:
+        if self._details_popover is None:
+            self._details_popover = Gtk.Popover()
+            self._details_popover.add_css_class("pill-popover")
+            self._details_popover.set_parent(self.details_btn)
+
+        self._refresh_details_popover(self._details_popover)
+        self._details_popover.popup()
+
+    def _on_toggle_video_stream(self) -> None:
+        """Alterna a transmissão contínua de tela (Live Video) no cliente."""
+        if hasattr(self.live_client, "toggle_video_stream"):
+            now_on = self.live_client.toggle_video_stream(fps=1.0)
+            self._video_streaming = bool(now_on)
+            self.rec_dot.set_visible(self._video_streaming)
+            msg = "Transmissão de tela iniciada (1 FPS)" if now_on else "Transmissão de tela pausada"
+            self._show_chip(msg, ok=now_on)
+
+    def _refresh_details_popover(self, popover: Gtk.Popover) -> None:
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        root.set_margin_top(12)
+        root.set_margin_bottom(12)
+        root.set_margin_start(14)
+        root.set_margin_end(14)
+        root.set_size_request(290, -1)
+
+        # 1. Header: Status da Chamada
+        header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        header_box.set_valign(Gtk.Align.CENTER)
+        call_icon = Gtk.Image.new_from_icon_name("call-start-symbolic")
+        call_icon.set_pixel_size(18)
+        header_box.append(call_icon)
+
+        title_vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        title_lbl = Gtk.Label(label="<b>Chamada de Voz Ativa</b>", use_markup=True, xalign=0)
+        title_lbl.add_css_class("heading")
+        title_vbox.append(title_lbl)
+
+        timer_txt = self.timer_lbl.get_text() if self.timer_lbl.get_visible() else "0:00"
+        dur_lbl = Gtk.Label(label=f"Duração: {timer_txt}", xalign=0)
+        dur_lbl.add_css_class("caption")
+        dur_lbl.add_css_class("dim-label")
+        title_vbox.append(dur_lbl)
+        header_box.append(title_vbox)
+        root.append(header_box)
+
+        root.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+
+        # 2. Seção: Compartilhamento de Tela & Janela
+        screen_sec = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        screen_sec_lbl = Gtk.Label(label="<b>COMPARTILHAMENTO DE TELA</b>", use_markup=True, xalign=0)
+        screen_sec_lbl.add_css_class("caption")
+        screen_sec.append(screen_sec_lbl)
+
+        is_streaming = getattr(self.live_client, "is_video_streaming", lambda: self._video_streaming)()
+        status_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        status_dot = Gtk.Label(label="●" if is_streaming else "○")
+        if is_streaming:
+            status_dot.add_css_class("pill-rec-dot")
+        status_txt = "Transmitindo para a IA (1 FPS)" if is_streaming else "Compartilhamento pausado"
+        status_row.append(status_dot)
+        status_row.append(Gtk.Label(label=status_txt, xalign=0))
+        screen_sec.append(status_row)
+
+        target_name = "Desktop Completo"
+        fence = getattr(self.live_client, "fence", None)
+        if fence:
+            target_win = fence.get_target_window() if hasattr(fence, "get_target_window") else None
+            if target_win:
+                target_name = f"Janela: {target_win.display_name(26)}"
+            else:
+                active_mon = fence.get_active_monitor() if hasattr(fence, "get_active_monitor") else None
+                if active_mon:
+                    target_name = f"Monitor: {active_mon.name}"
+        else:
+            try:
+                from ..core.window_manager import WindowManager
+                w = WindowManager.get_active_or_last_window()
+                if w:
+                    target_name = f"Janela: {w.display_name(26)}"
+            except Exception:
+                pass
+
+        target_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        target_icon = Gtk.Image.new_from_icon_name("video-display-symbolic")
+        target_icon.set_pixel_size(14)
+        target_lbl = Gtk.Label(label=target_name, xalign=0)
+        target_lbl.add_css_class("caption")
+        target_lbl.add_css_class("dim-label")
+        target_row.append(target_icon)
+        target_row.append(target_lbl)
+        screen_sec.append(target_row)
+
+        if hasattr(self.live_client, "toggle_video_stream"):
+            btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            toggle_vid_btn = Gtk.Button()
+            toggle_vid_btn.add_css_class("pill")
+            toggle_vid_btn.add_css_class("glass-pill")
+            btn_lbl_txt = "Pausar Tela" if is_streaming else "Transmitir Tela"
+            toggle_vid_btn.set_child(Gtk.Label(label=btn_lbl_txt))
+            def _on_toggle_vid(_b):
+                self._on_toggle_video_stream()
+                self._refresh_details_popover(popover)
+            toggle_vid_btn.connect("clicked", _on_toggle_vid)
+            btn_box.append(toggle_vid_btn)
+
+            vid_mode = getattr(self.live_client, "video_mode", "active_window")
+            mode_btn = Gtk.Button()
+            mode_btn.add_css_class("pill")
+            mode_btn.add_css_class("flat")
+            mode_txt = "Janela" if vid_mode == "active_window" else "Tela Cheia"
+            mode_btn.set_child(Gtk.Label(label=mode_txt))
+            def _on_toggle_mode(_b):
+                new_mode = "fullscreen" if vid_mode == "active_window" else "active_window"
+                if hasattr(self.live_client, "set_video_mode"):
+                    self.live_client.set_video_mode(new_mode)
+                self._refresh_details_popover(popover)
+            mode_btn.connect("clicked", _on_toggle_mode)
+            btn_box.append(mode_btn)
+            screen_sec.append(btn_box)
+
+        root.append(screen_sec)
+        root.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+
+        # 3. Seção: Recursos e Dispositivos Ativos
+        res_sec = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        res_sec_lbl = Gtk.Label(label="<b>RECURSOS EM USO</b>", use_markup=True, xalign=0)
+        res_sec_lbl.add_css_class("caption")
+        res_sec.append(res_sec_lbl)
+
+        mic_muted = getattr(self.live_client, "is_muted", lambda: False)()
+        mic_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        mic_icon = Gtk.Image.new_from_icon_name("audio-input-microphone-symbolic")
+        mic_icon.set_pixel_size(14)
+        mic_lbl = Gtk.Label(label=f"Microfone: {'Mudo' if mic_muted else 'Ativo (ouvindo)'}", xalign=0)
+        mic_lbl.add_css_class("caption")
+        mic_row.append(mic_icon)
+        mic_row.append(mic_lbl)
+        res_sec.append(mic_row)
+
+        model_name = getattr(self.live_client, "model", "") or getattr(self.config, "gemini_live_model", "Gemini 2.0 Flash Live")
+        from .live_view import live_model_label
+        model_display = live_model_label(model_name)
+        model_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        model_icon = Gtk.Image.new_from_icon_name("starred-symbolic")
+        model_icon.set_pixel_size(14)
+        model_lbl = Gtk.Label(label=f"Modelo: {model_display}", xalign=0)
+        model_lbl.add_css_class("caption")
+        model_row.append(model_icon)
+        model_row.append(model_lbl)
+        res_sec.append(model_row)
+
+        cur_voice = getattr(self.config, "gemini_live_voice", "Puck")
+        voice_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        voice_icon = Gtk.Image.new_from_icon_name("audio-volume-high-symbolic")
+        voice_icon.set_pixel_size(14)
+        voice_lbl = Gtk.Label(label=f"Voz: {cur_voice}", xalign=0)
+        voice_lbl.add_css_class("caption")
+        voice_row.append(voice_icon)
+        voice_row.append(voice_lbl)
+        res_sec.append(voice_row)
+
+        fence_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        fence_icon = Gtk.Image.new_from_icon_name("security-high-symbolic")
+        fence_icon.set_pixel_size(14)
+        fence_lbl = Gtk.Label(label="Cerca Espacial & Cursor Fantasma ativos", xalign=0)
+        fence_lbl.add_css_class("caption")
+        fence_row.append(fence_icon)
+        fence_row.append(fence_lbl)
+        res_sec.append(fence_row)
+
+        root.append(res_sec)
+        root.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+
+        # 4. Seção: Seletor Rápido de Voz
+        voice_sec = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        voice_sec_lbl = Gtk.Label(label="<b>VOZ DO ASSISTENTE</b>", use_markup=True, xalign=0)
+        voice_sec_lbl.add_css_class("caption")
+        voice_sec.append(voice_sec_lbl)
+
+        from ..ai.providers import GEMINI_LIVE_VOICE_CHOICES
+        voice_names = [v[0] for v in GEMINI_LIVE_VOICE_CHOICES]
+        voice_displays = [f"{v[0]} ({v[1].split('(')[1].split(')')[0] if '(' in v[1] else v[1]})" for v in GEMINI_LIVE_VOICE_CHOICES]
+        cur_voice = getattr(self.config, "gemini_live_voice", "Puck")
+        cur_idx = voice_names.index(cur_voice) if cur_voice in voice_names else 0
+
+        voice_string_list = Gtk.StringList.new(voice_displays)
+        voice_dd = Gtk.DropDown(model=voice_string_list)
+        voice_dd.set_selected(cur_idx)
+        voice_dd.add_css_class("pill")
+        voice_dd.set_hexpand(True)
+
+        voice_row_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        voice_row_box.append(voice_dd)
+
+        voice_prev_btn = Gtk.Button.new_from_icon_name("media-playback-start-symbolic")
+        voice_prev_btn.add_css_class("flat")
+        voice_prev_btn.add_css_class("circular")
+        voice_prev_btn.set_valign(Gtk.Align.CENTER)
+        voice_prev_btn.set_tooltip_text("Ouvir demonstração da voz selecionada")
+
+        def _on_pill_preview_clicked(_btn):
+            from ..ai.voice_preview import VoicePreviewService
+            service = VoicePreviewService.get_default()
+            sel = voice_dd.get_selected()
+            v_name = voice_names[sel] if 0 <= sel < len(voice_names) else "Puck"
+            if service.is_playing(v_name):
+                service.stop()
+                voice_prev_btn.set_icon_name("media-playback-start-symbolic")
+                return
+
+            service.stop()
+            voice_prev_btn.set_icon_name("media-playback-stop-symbolic")
+
+            def _done():
+                voice_prev_btn.set_icon_name("media-playback-start-symbolic")
+
+            service.play_voice(v_name, on_finished=_done)
+
+        voice_prev_btn.connect("clicked", _on_pill_preview_clicked)
+        voice_row_box.append(voice_prev_btn)
+
+        def _on_pill_voice_changed(dd, _pspec):
+            from ..ai.voice_preview import VoicePreviewService
+            VoicePreviewService.get_default().stop()
+            voice_prev_btn.set_icon_name("media-playback-start-symbolic")
+
+            selected = dd.get_selected()
+            if 0 <= selected < len(voice_names):
+                new_v = voice_names[selected]
+                if new_v == getattr(self.config, "gemini_live_voice", ""):
+                    return
+                self.config.gemini_live_voice = new_v
+                try:
+                    self.config.save()
+                except Exception:
+                    pass
+                if hasattr(self.live_client, "set_voice"):
+                    self.live_client.set_voice(new_v)
+                self._show_chip(f"Voz: {new_v}", ok=True)
+                self._refresh_details_popover(popover)
+
+        voice_dd.connect("notify::selected", _on_pill_voice_changed)
+        voice_sec.append(voice_row_box)
+        root.append(voice_sec)
+
+        def _on_popover_closed(_p):
+            from ..ai.voice_preview import VoicePreviewService
+            VoicePreviewService.get_default().stop()
+            voice_prev_btn.set_icon_name("media-playback-start-symbolic")
+
+        popover.connect("closed", _on_popover_closed)
+        popover.set_child(root)
+
     def _on_expand_clicked(self, _btn: Gtk.Button) -> None:
+        if self._details_popover:
+            try:
+                self._details_popover.popdown()
+            except Exception:
+                pass
+        self._release_sources()
         self.set_visible(False)
         if self.on_expand_cb:
             self.on_expand_cb()
 
     def _on_close_clicked(self, _btn: Gtk.Button | None = None) -> None:
-        self.set_visible(False)
-        if self.on_close_cb:
-            self.on_close_cb()
+        if self._details_popover:
+            try:
+                self._details_popover.popdown()
+            except Exception:
+                pass
+        self.do_close_request()
 
     def _on_interrupt_action(self, *_args) -> None:
         """Interrompe o agente (barge-in) — usado por menu, tecla 'i' e long-press."""
@@ -896,6 +1177,7 @@ class VoicePillWindow(Gtk.Window):
     def _build_popover_menu(self) -> Gtk.PopoverMenu:
         menu = Gio.Menu()
 
+        menu.append("Detalhes da chamada e tela...", "pill.show-details")
         menu.append("Interromper agente (i)", "pill.interrupt")
         menu.append("Pressionar-para-falar (segure Space)", "pill.ptt-info")
         menu.append("Mutar / Desmutar (Ctrl+M)", "pill.toggle-mute")
@@ -920,6 +1202,7 @@ class VoicePillWindow(Gtk.Window):
 
         action_group = Gio.SimpleActionGroup()
         for name, cb in (
+            ("show-details", lambda *_: self._on_details_clicked(self.details_btn)),
             ("interrupt", self._on_interrupt_action),
             ("toggle-mute", lambda *_: self._on_toggle_mute(self.mute_btn)),
             ("toggle-pinned", self._on_set_pinned),

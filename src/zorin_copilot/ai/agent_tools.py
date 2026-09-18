@@ -82,6 +82,10 @@ def _num(desc: str) -> dict[str, str]:
     return {"type": "NUMBER", "description": desc}
 
 
+def _int(desc: str) -> dict[str, str]:
+    return {"type": "INTEGER", "description": desc}
+
+
 def _bool(desc: str) -> dict[str, str]:
     return {"type": "BOOLEAN", "description": desc}
 
@@ -546,6 +550,28 @@ class ToolRegistry:
             )
         )
 
+        self.mutate(
+            ToolSpec(
+                name="click_and_type",
+                description=(
+                    "Clica em um elemento ou coordenada para focar e digita o texto solicitado. "
+                    "Ação atômica recomendada para preencher campos em navegadores, Spotify e aplicativos."
+                ),
+                parameters=_param(
+                    {
+                        "x": _num("Coordenada horizontal (fração [0,1], escala 0-1000 ou pixels)."),
+                        "y": _num("Coordenada vertical (fração [0,1], escala 0-1000 ou pixels)."),
+                        "text": _str("Texto a ser digitado no campo focado."),
+                        "press_enter": _bool("Pressiona Enter após digitar o texto (padrão false)."),
+                        "clear_first": _bool("Limpa o campo selecionando tudo e apagando antes de digitar (padrão false)."),
+                        "is_relative": _bool("Se true, x e y são fração da tela ou escala 0-1000 (padrão true)."),
+                    },
+                    required=["x", "y", "text"],
+                ),
+                handler=self._tool_click_and_type,
+            )
+        )
+
         self.register(
             ToolSpec(
                 name="find_on_screen",
@@ -581,6 +607,23 @@ class ToolRegistry:
             )
         )
 
+        self.mutate(
+            ToolSpec(
+                name="scroll_page",
+                description=(
+                    "Rola a página ou janela ativa para baixo ('down') ou para cima ('up'). "
+                    "Use isto para revelar botões, filtros, textos ou produtos que estejam abaixo ou acima do corte visível da tela."
+                ),
+                parameters=_param(
+                    {
+                        "direction": _str("Direção do scroll: 'down' (baixo, padrão) ou 'up' (cima)."),
+                        "amount": _int("Quantidade de passos de scroll (padrão 3)."),
+                    },
+                ),
+                handler=self._tool_scroll_page,
+            )
+        )
+
         self.register(
             ToolSpec(
                 name="read_screen_text",
@@ -601,6 +644,33 @@ class ToolRegistry:
                     required=["query"],
                 ),
                 handler=self._tool_launch_app,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="list_open_windows",
+                description=(
+                    "Lista todas as janelas abertas atualmente no desktop com seus nomes de aplicativo, títulos e coordenadas. "
+                    "Útil para inspecionar o que está aberto e decidir qual janela focar ou interagir."
+                ),
+                parameters=_param({}),
+                handler=self._tool_list_open_windows,
+            )
+        )
+
+        self.mutate(
+            ToolSpec(
+                name="focus_window",
+                description=(
+                    "Muda o foco do sistema operacional para uma janela aberta específica (pelo nome do app, trecho do título ou endereço). "
+                    "Se a cerca espacial estiver em modo janela, também redireciona a cerca e o OCR para ela."
+                ),
+                parameters=_param(
+                    {"query": _str("Nome do aplicativo, trecho do título ou endereço hexadecimal da janela.")},
+                    required=["query"],
+                ),
+                handler=self._tool_focus_window,
             )
         )
 
@@ -729,6 +799,7 @@ class ToolRegistry:
                 parameters=_param(
                     {
                         "query": _str("Tema, conceitos ou termos-chave acadêmicos/estatísticos a pesquisar."),
+                        "scope": _str("Escopo de busca: 'auto' (padrão), 'local' (trabalhos/anotações) ou 'web' (artigos científicos)."),
                         "source": _str("Fonte alvo opcional: 'all' (padrão), 'scielo', 'ibge', 'sebrae', 'ipea', 'scholar', 'internacional'."),
                         "limit": _num("Máximo de artigos/resultados (padrão 5)."),
                     },
@@ -830,6 +901,124 @@ class ToolRegistry:
                 ),
                 handler=self._tool_git_status,
                 timeout=8.0,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="media_control",
+                description=(
+                    "Controla tocadores de música e reprodutores de mídia como Spotify, VLC e navegadores. "
+                    "Permite dar play, pausar, avançar, retroceder, ou buscar e reproduzir uma música/artista específico "
+                    "(ex: 'Bohemian Rhapsody', 'Queen')."
+                ),
+                parameters=_param(
+                    {
+                        "action": _str("Ação de mídia: play, pause, play_pause, next, previous, get_status, search ou play_song."),
+                        "query": _str("Nome da música, artista, banda ou playlist para buscar e tocar (ex: 'Bohemian Rhapsody', 'Queen', 'Daft Punk')."),
+                        "player": _str("Nome opcional do reprodutor (padrão 'spotify')."),
+                    },
+                    required=["action"],
+                ),
+                handler=self._tool_media_control,
+            )
+        )
+
+        self.mutate(
+            ToolSpec(
+                name="vscode_workspace",
+                description=(
+                    "Interage diretamente com o Visual Studio Code (VS Code) para fluxos completos de desenvolvimento: "
+                    "detecta o projeto/workspace atualmente aberto, abre pastas no editor, cria projetos estruturados "
+                    "(FastAPI, Flask, Node/Express, React, Python, Web) com .gitignore e .vscode/settings.json, "
+                    "cria e atualiza arquivos de código abrindo-os diretamente em abas no editor na linha exata, "
+                    "e lê a estrutura de arquivos do projeto com proteção de segredos (.env)."
+                ),
+                parameters=_param(
+                    {
+                        "action": {
+                            "type": "STRING",
+                            "enum": [
+                                "get_active_project",
+                                "open_workspace",
+                                "create_project",
+                                "write_code",
+                                "patch_code",
+                                "read_file",
+                                "get_structure",
+                                "open_file",
+                            ],
+                            "description": "Ação de desenvolvimento a realizar com o VS Code.",
+                        },
+                        "project_name": _str("Nome do novo projeto ou pasta (para 'create_project')."),
+                        "folder_path": _str("Caminho da pasta a abrir como workspace (para 'open_workspace')."),
+                        "file_path": _str("Caminho relativo ou absoluto do arquivo de código (para 'write_code', 'patch_code', 'read_file', 'open_file')."),
+                        "code_content": _str("Código-fonte completo a ser gravado no arquivo (para 'write_code')."),
+                        "target_code": _str("Trecho exato de código a ser substituído no arquivo (para 'patch_code')."),
+                        "replacement_code": _str("Novo trecho de código que substituirá o target_code (para 'patch_code')."),
+                        "template": {
+                            "type": "STRING",
+                            "enum": ["python", "fastapi", "flask", "node", "express", "react", "web", "empty"],
+                            "description": "Template do projeto (padrão 'python' ou 'fastapi').",
+                        },
+                        "line_number": _int("Linha do arquivo para focar o cursor no editor (padrão 1)."),
+                    },
+                    required=["action"],
+                ),
+                handler=self._tool_vscode_workspace,
+            )
+        )
+
+        self.mutate(
+            ToolSpec(
+                name="smart_home_control",
+                description=(
+                    "Controla dispositivos inteligentes da casa via Home Assistant (lâmpadas Avant Neo, "
+                    "luzes, ar-condicionado, tomadas e interruptores). Permite ligar, desligar, ajustar brilho (1..100%), "
+                    "temperatura de cor em Kelvin (2700K quente / 4000K neutro / 6500K frio), cores RGB e temperatura do ar."
+                ),
+                parameters=_param(
+                    {
+                        "action": {
+                            "type": "STRING",
+                            "description": "Ação a executar: 'turn_on', 'turn_off', 'toggle', 'set_temperature' ou 'set_hvac_mode'.",
+                        },
+                        "device_type": {
+                            "type": "STRING",
+                            "enum": ["light", "climate", "switch"],
+                            "description": "Tipo de aparelho: 'light' (lâmpada), 'climate' (ar-condicionado) ou 'switch' (tomada/interruptor). Padrão 'light'.",
+                        },
+                        "entity": _str("Nome ou ID do aparelho (ex.: 'quarto', 'escritorio', 'avant neo'). Opcional se houver apenas um do tipo."),
+                        "brightness": _int("Brilho da lâmpada de 1 a 100%."),
+                        "color_temp": _str("Temperatura de cor em Kelvin ('2700', '4000', '6500') ou descrição ('quente', 'frio', 'neutro')."),
+                        "color": _str("Nome da cor em português ('azul', 'vermelho', 'verde', 'amarelo', 'roxo', 'laranja', 'rosa')."),
+                        "temperature": {
+                            "type": "NUMBER",
+                            "description": "Temperatura desejada em graus Celsius para o ar-condicionado.",
+                        },
+                        "hvac_mode": _str("Modo de climatização ('cool', 'heat', 'fan_only', 'off')."),
+                    },
+                    required=["action"],
+                ),
+                handler=self._tool_smart_home_control,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="smart_home_status",
+                description="Consulta o estado atual dos dispositivos inteligentes da casa (se as lâmpadas estão acesas, ar ligado, temperaturas, etc.).",
+                parameters=_param(
+                    {
+                        "query": _str("Nome do aparelho ou cômodo específico a consultar (opcional)."),
+                        "device_type": {
+                            "type": "STRING",
+                            "enum": ["light", "climate", "switch", "all"],
+                            "description": "Filtro por tipo de aparelho.",
+                        },
+                    }
+                ),
+                handler=self._tool_smart_home_status,
             )
         )
 
@@ -1046,14 +1235,31 @@ class ToolRegistry:
         if driver is None:
             return {"ok": False, "error": "Driver de entrada indisponível (ydotool/uinput ausentes)."}
 
-        if is_relative:
+        # 1. Escala relativa explícita [0.0..1.0 ou 0..1000] ou fração [0.0, 1.0] sem flag
+        is_rel = args.get("is_relative")
+        is_norm = is_rel is True or (is_rel is not False and 0.0 <= x <= 1.0 and 0.0 <= y <= 1.0)
+        if is_norm:
+            norm_x = x / 1000.0 if x > 1.0 else x
+            norm_y = y / 1000.0 if y > 1.0 else y
             ok, message = driver.click_relative(
-                x,
-                y,
+                norm_x,
+                norm_y,
                 button=str(args.get("button") or "left"),
                 double=bool(args.get("double")),
             )
             return {"ok": bool(ok), "message": message}
+
+        fence = getattr(driver, "fence", None) or getattr(self, "fence", None)
+        active_m = fence.get_active_monitor() if (fence and hasattr(fence, "get_active_monitor")) else None
+        # 2. Pixel relativo ao monitor ativo (com offset espacial se o monitor começar em x > 0)
+        if active_m and getattr(active_m, "x", 0) > 0:
+            contains_fn = getattr(active_m, "contains", None)
+            if contains_fn and not contains_fn(int(x), int(y)):
+                w = getattr(active_m, "width", 0)
+                h = getattr(active_m, "height", 0)
+                if 0 <= x <= w and 0 <= y <= h:
+                    x = active_m.x + int(x)
+                    y = getattr(active_m, "y", 0) + int(y)
 
         abs_x, abs_y = int(x), int(y)
         allowed, reason = self.check_coordinate(abs_x, abs_y)
@@ -1072,6 +1278,52 @@ class ToolRegistry:
             double=bool(args.get("double")),
         )
         return {"ok": bool(ok), "message": message, "x": abs_x, "y": abs_y}
+
+    def _tool_click_and_type(self, args: dict[str, Any]) -> dict[str, Any]:
+        try:
+            x = float(args.get("x"))
+            y = float(args.get("y"))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "x e y precisam ser números."}
+        text = str(args.get("text") or "")
+        if not text:
+            return {"ok": False, "error": "`text` é obrigatório."}
+
+        driver = self.input_driver
+        if driver is None:
+            return {"ok": False, "error": "Driver de entrada indisponível (ydotool/uinput ausentes)."}
+
+        is_rel = args.get("is_relative")
+        is_norm = is_rel is True or (is_rel is not False and 0.0 <= x <= 1.0 and 0.0 <= y <= 1.0)
+
+        if is_norm:
+            norm_x = x / 1000.0 if x > 1.0 else x
+            norm_y = y / 1000.0 if y > 1.0 else y
+            click_ok, click_msg = driver.click_relative(norm_x, norm_y, button="left")
+        else:
+            abs_x, abs_y = int(x), int(y)
+            allowed, reason = self.check_coordinate(abs_x, abs_y)
+            if not allowed:
+                return {
+                    "ok": False,
+                    "error": f"Clique bloqueado pela cerca digital: {reason}",
+                    "blocked_by": "fence",
+                }
+            click_ok, click_msg = driver.click(abs_x, abs_y, button="left")
+
+        if not click_ok:
+            return {"ok": False, "error": f"Falha ao focar o campo: {click_msg}"}
+
+        time.sleep(0.08)
+
+        if bool(args.get("clear_first")):
+            driver.hotkey("ctrl", "a")
+            time.sleep(0.02)
+            driver.hotkey("backspace")
+            time.sleep(0.02)
+
+        type_ok, type_msg = driver.type_text(text, press_enter=bool(args.get("press_enter")))
+        return {"ok": bool(type_ok), "message": f"Campo focado e texto digitado: {type_msg}"}
 
     def _tool_find_on_screen(self, args: dict[str, Any]) -> dict[str, Any]:
         query = str(args.get("query") or "").strip()
@@ -1115,6 +1367,25 @@ class ToolRegistry:
         except Exception as exc:
             return {"ok": False, "error": f"Falha ao clicar visualmente: {exc}"}
 
+    def _tool_scroll_page(self, args: dict[str, Any]) -> dict[str, Any]:
+        direction = str(args.get("direction") or "down").lower().strip()
+        amount = int(args.get("amount") or 3)
+        driver = self.input_driver
+        if driver is None:
+            return {"ok": False, "error": "Driver de entrada indisponível."}
+        try:
+            cx, cy = None, None
+            if self._fence:
+                bounds = self._fence.get_effective_bounds()
+                if bounds:
+                    cx = bounds[0] + bounds[2] // 2
+                    cy = bounds[1] + bounds[3] // 2
+            lbl = f"Rolando ({'para baixo' if direction == 'down' else 'para cima'})"
+            ok, msg = driver.scroll(x=cx, y=cy, direction=direction, amount=amount, label=lbl)
+            return {"ok": ok, "message": msg, "direction": direction, "amount": amount}
+        except Exception as exc:
+            return {"ok": False, "error": f"Falha ao rolar página: {exc}"}
+
     def _tool_read_screen_text(self, args: dict[str, Any]) -> dict[str, Any]:
         try:
             from ..core.ui_grounding import UIGroundingService
@@ -1147,12 +1418,54 @@ class ToolRegistry:
                 import subprocess
 
                 subprocess.Popen([binary], start_new_session=True)  # noqa: S603 - launch pedido pelo usuário
+                self._focus_app_window(query)
                 return {"ok": True, "message": f"'{query}' iniciado via '{binary}'.", "binary": binary}
             except Exception as exc:
                 return {"ok": False, "error": f"Falha ao iniciar '{binary}': {exc}"}
 
         ok, launch_message = AppManager.launch(app)
+        if ok:
+            self._focus_app_window(query)
         return {"ok": bool(ok), "message": launch_message, "app": app.get_name() if hasattr(app, "get_name") else query}
+
+    def _tool_list_open_windows(self, _args: dict[str, Any]) -> dict[str, Any]:
+        try:
+            from ..core.window_manager import WindowManager
+
+            windows = WindowManager.list_windows(exclude_copilot=True)
+            entries = [
+                {
+                    "id": w.id,
+                    "app": w.app,
+                    "title": w.title,
+                    "bounds": {"x": w.x, "y": w.y, "width": w.width, "height": w.height},
+                    "is_active": w.is_active,
+                    "display_name": w.display_name(),
+                }
+                for w in windows
+            ]
+            return {"ok": True, "count": len(entries), "windows": entries}
+        except Exception as exc:
+            return {"ok": False, "error": f"Falha ao listar janelas abertas: {exc}"}
+
+    def _tool_focus_window(self, args: dict[str, Any]) -> dict[str, Any]:
+        query = str(args.get("query") or "").strip()
+        if not query:
+            return {"ok": False, "error": "`query` é obrigatório."}
+        try:
+            from ..core.window_manager import WindowManager
+
+            win = WindowManager.find_window(query)
+            target_id = win.id if win else query
+            ok = WindowManager.focus_window(target_id)
+            if win and self._fence is not None and hasattr(self._fence, "set_chosen_window"):
+                self._fence.set_chosen_window(win)
+            if ok:
+                name = win.display_name() if win else query
+                return {"ok": True, "message": f"Janela '{name}' focada com sucesso.", "window": name}
+            return {"ok": False, "error": f"Não foi possível focar a janela '{query}'. Verifique se está aberta."}
+        except Exception as exc:
+            return {"ok": False, "error": f"Falha ao focar janela: {exc}"}
 
     # -- arquivos ----------------------------------------------------------- #
 
@@ -1289,19 +1602,31 @@ class ToolRegistry:
         if not query:
             return {"ok": False, "error": "`query` é obrigatório."}
         source = str(args.get("source") or "all").strip()
+        scope = str(args.get("scope") or "auto").strip()
         limit = int(args.get("limit") or 5)
         try:
-            from ..core.web_search import WebSearchClient
+            from ..core.academic_hub import AcademicHub
 
-            client = WebSearchClient()
-            results = client.academic_search(query, source=source, max_results=limit)
+            hub = AcademicHub()
+            docs = hub.search(query, scope=scope, source=source, limit=limit)
             entries = [
-                {"title": r.title, "url": r.url, "snippet": r.snippet}
-                for r in results
+                {
+                    "title": d.title,
+                    "source": d.source,
+                    "year": d.year,
+                    "authors": d.authors,
+                    "abstract": d.abstract,
+                    "abnt_citation": d.abnt_citation,
+                    "file_path_or_url": d.file_path_or_url,
+                    "is_local": d.is_local,
+                    "page_number": d.page_number,
+                }
+                for d in docs
             ]
             return {
                 "ok": True,
                 "count": len(entries),
+                "scope": scope,
                 "source": source,
                 "query": query,
                 "results": entries,
@@ -1352,6 +1677,63 @@ class ToolRegistry:
         except Exception as exc:
             return {"ok": False, "error": f"Falha ao ler página web: {exc}"}
 
+    def _focus_browser_window(self) -> None:
+        """Tenta trazer a janela do navegador para o foco (Wayland/X11)."""
+        time.sleep(0.3)
+        try:
+            from ..core.window_manager import WindowManager
+
+            for b in ("Google-chrome", "chrome", "firefox", "brave", "chromium"):
+                win = WindowManager.find_window(b)
+                if win and WindowManager.focus_window(win.id):
+                    if self._fence is not None and hasattr(self._fence, "set_chosen_window"):
+                        self._fence.set_chosen_window(win)
+                    return
+        except Exception:
+            pass
+        if shutil.which("hyprctl"):
+            try:
+                for cls_name in ("class:Google-chrome", "class:firefox", "class:Brave-browser", "class:chromium"):
+                    proc = subprocess.run(
+                        ["hyprctl", "dispatch", "focuswindow", cls_name],
+                        capture_output=True,
+                        text=True,
+                        timeout=0.4,
+                        check=False,
+                    )
+                    if proc.returncode == 0:
+                        break
+            except Exception as exc:
+                logger.debug("hyprctl focuswindow browser falhou: %s", exc)
+
+    def _focus_app_window(self, query: str) -> None:
+        """Tenta focar a janela do aplicativo recém-aberto no Wayland/X11."""
+        if not query:
+            return
+        try:
+            from ..core.window_manager import WindowManager
+
+            win = WindowManager.find_window(query)
+            if win and WindowManager.focus_window(win.id):
+                if self._fence is not None and hasattr(self._fence, "set_chosen_window"):
+                    self._fence.set_chosen_window(win)
+                return
+        except Exception:
+            pass
+        if shutil.which("hyprctl"):
+            try:
+                clean = re.sub(r"[^\w\-]", "", query)
+                if clean:
+                    subprocess.run(
+                        ["hyprctl", "dispatch", "focuswindow", f"class:{clean}"],
+                        capture_output=True,
+                        text=True,
+                        timeout=0.4,
+                        check=False,
+                    )
+            except Exception:
+                pass
+
     def _tool_open_url(self, args: dict[str, Any]) -> dict[str, Any]:
         url = str(args.get("url") or "").strip()
         if not url:
@@ -1363,6 +1745,7 @@ class ToolRegistry:
 
             ok = Gio.AppInfo.launch_default_for_uri(url, None)
             if ok:
+                self._focus_browser_window()
                 return {"ok": True, "message": f"URL '{url}' aberta no navegador.", "url": url}
         except Exception:
             pass
@@ -1370,6 +1753,7 @@ class ToolRegistry:
             import subprocess
 
             subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self._focus_browser_window()
             return {"ok": True, "message": f"URL '{url}' aberta com xdg-open.", "url": url}
         except Exception as exc:
             return {"ok": False, "error": f"Falha ao abrir URL '{url}': {exc}"}
@@ -1519,6 +1903,179 @@ class ToolRegistry:
             "path": work_dir,
             "status": output or "## (working tree clean, sem alterações pendentes)",
         }
+
+    def _tool_media_control(self, args: dict[str, Any]) -> dict[str, Any]:
+        from ..core.media import MediaPlayerManager
+        act = str(args.get("action", "play_pause"))
+        player = args.get("player")
+        query = args.get("query")
+        ok, msg = MediaPlayerManager.control(act, player_name=player, query=query)
+        return {"ok": ok, "message": msg}
+
+    def _tool_vscode_workspace(self, args: dict[str, Any]) -> dict[str, Any]:
+        action = str(args.get("action", "")).strip().lower()
+        if self.dry_run and action in ("create_project", "write_code", "patch_code"):
+            return {
+                "ok": True,
+                "dry_run": True,
+                "tool": "vscode_workspace",
+                "would_do": f"Executaria ação '{action}' no VS Code com argumentos: {args}",
+            }
+
+        try:
+            from ..core.vscode import VSCodeManager
+            from pathlib import Path
+
+            if action == "get_active_project":
+                ws = VSCodeManager.get_active_workspace()
+                if ws:
+                    return {
+                        "ok": True,
+                        "success": True,
+                        "workspace_path": str(ws),
+                        "project_name": ws.name,
+                        "message": f"Projeto ativo no VS Code: '{ws.name}' ({ws}).",
+                    }
+                return {
+                    "ok": False,
+                    "success": False,
+                    "error": "Nenhum workspace ativo encontrado no VS Code.",
+                    "message": "Nenhum workspace ativo encontrado no VS Code.",
+                }
+
+            elif action == "open_workspace":
+                path = args.get("folder_path") or args.get("project_name", "")
+                res = VSCodeManager.open_workspace(path)
+                res["ok"] = bool(res.get("success", False))
+                return res
+
+            elif action == "create_project":
+                pname = args.get("project_name", "novo_projeto")
+                tmpl = args.get("template", "python")
+                bdir = args.get("folder_path")
+                res = VSCodeManager.create_project(pname, template=tmpl, base_dir=bdir)
+                res["ok"] = bool(res.get("success", False))
+                return res
+
+            elif action == "write_code":
+                fpath = args.get("file_path", "")
+                content = args.get("code_content", "")
+                line = int(args.get("line_number", 1))
+                if fpath:
+                    try:
+                        self._push_file_snapshot(fpath)
+                    except Exception:
+                        pass
+                res = VSCodeManager.write_code_file(fpath, content, line=line)
+                res["ok"] = bool(res.get("success", False))
+                return res
+
+            elif action == "patch_code":
+                fpath = args.get("file_path", "")
+                target = args.get("target_code", "")
+                replacement = args.get("replacement_code", "")
+                if fpath:
+                    try:
+                        self._push_file_snapshot(fpath)
+                    except Exception:
+                        pass
+                res = VSCodeManager.patch_code_file(fpath, target, replacement)
+                res["ok"] = bool(res.get("success", False))
+                return res
+
+            elif action == "read_file":
+                fpath = args.get("file_path", "")
+                res = VSCodeManager.read_code_file(fpath)
+                res["ok"] = bool(res.get("success", False))
+                return res
+
+            elif action == "get_structure":
+                wpath = args.get("folder_path")
+                res = VSCodeManager.read_workspace_structure(Path(wpath) if wpath else None)
+                res["ok"] = bool(res.get("success", False))
+                return res
+
+            elif action == "open_file":
+                fpath = args.get("file_path", "")
+                line = int(args.get("line_number", 1))
+                res = VSCodeManager.open_file(fpath, line=line)
+                res["ok"] = bool(res.get("success", False))
+                return res
+
+            return {
+                "ok": False,
+                "success": False,
+                "error": f"Ação de desenvolvimento desconhecida: '{action}'",
+                "message": f"Ação de desenvolvimento desconhecida: '{action}'",
+            }
+        except Exception as exc:
+            logger.exception("Falha ao executar vscode_workspace: %s", exc)
+            return {
+                "ok": False,
+                "success": False,
+                "error": f"Erro interno ao operar VS Code: {exc}",
+                "message": f"Erro interno ao operar VS Code: {exc}",
+            }
+
+    def _tool_smart_home_control(self, args: dict[str, Any]) -> dict[str, Any]:
+        action = str(args.get("action") or "turn_on").strip().lower()
+        dev_type = str(args.get("device_type") or "").strip().lower()
+        entity = str(args.get("entity") or "").strip()
+
+        if self.dry_run:
+            return {
+                "ok": True,
+                "dry_run": True,
+                "tool": "smart_home_control",
+                "would_do": f"Executaria ação '{action}' no dispositivo '{entity or 'padrão'}' ({dev_type or 'light'}).",
+            }
+
+        try:
+            from ..core.home_assistant import HomeAssistantManager
+
+            ha = HomeAssistantManager.get_default()
+
+            is_light = dev_type == "light" or any(w in entity.lower() for w in ("luz", "lampada", "lâmpada", "iluminação", "avant", "led"))
+            is_climate = dev_type == "climate" or any(w in entity.lower() for w in ("ar", "clima", "temperatura", "ar condicionado"))
+
+            if is_light or (not dev_type and not is_climate):
+                res = ha.control_light(
+                    entity=entity,
+                    action=action,
+                    brightness=args.get("brightness"),
+                    color_temp=args.get("color_temp"),
+                    color=args.get("color"),
+                )
+            elif is_climate:
+                res = ha.control_climate(
+                    entity=entity,
+                    action=action,
+                    temperature=args.get("temperature"),
+                    hvac_mode=args.get("hvac_mode"),
+                )
+            else:
+                res = ha.control_switch(entity=entity, action=action)
+
+            res["ok"] = bool(res.get("success", False))
+            return res
+        except Exception as exc:
+            logger.exception("Falha ao controlar casa inteligente: %s", exc)
+            return {"ok": False, "error": f"Falha ao comunicar com Home Assistant: {exc}"}
+
+    def _tool_smart_home_status(self, args: dict[str, Any]) -> dict[str, Any]:
+        try:
+            from ..core.home_assistant import HomeAssistantManager
+
+            ha = HomeAssistantManager.get_default()
+            query = str(args.get("query") or "").strip()
+            dev_type = args.get("device_type")
+            domain = None if dev_type in (None, "all", "") else dev_type
+            res = ha.get_status(entity_or_query=query, domain=domain)
+            res["ok"] = bool(res.get("success", False))
+            return res
+        except Exception as exc:
+            logger.exception("Falha ao consultar estado da casa inteligente: %s", exc)
+            return {"ok": False, "error": f"Falha ao consultar Home Assistant: {exc}"}
 
     def _tool_done(self, args: dict[str, Any]) -> dict[str, Any]:
         return {"ok": True, "answer": str(args.get("answer") or ""), "finished": True}

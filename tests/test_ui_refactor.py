@@ -229,7 +229,9 @@ class AppShortcutsTest(unittest.TestCase):
                 installed.add(trigger.to_string())
 
         for shortcut in APP_SHORTCUTS:
-            self.assertIn(shortcut.accelerator, installed)
+            parsed = Gtk.ShortcutTrigger.parse_string(shortcut.accelerator)
+            norm = parsed.to_string() if parsed is not None else shortcut.accelerator
+            self.assertIn(norm, installed)
 
 
 class PackagingTest(unittest.TestCase):
@@ -362,6 +364,26 @@ class TimerLeakRegressionTest(unittest.TestCase):
         finally:
             for janela in janelas:
                 janela.destroy()
+
+
+class WindowContentInitializationTest(unittest.TestCase):
+    """Regressão: a janela não pode inicializar com conteúdo nulo (tela vazia)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = Adw.Application(application_id="org.zorin.copilot.test.content")
+
+    def test_window_has_content_after_init(self):
+        win = CopilotWindow(self.app)
+        self.assertIsNotNone(win.get_content(), "A janela principal foi criada sem conteúdo!")
+        win.destroy()
+
+    def test_is_test_environment_safe_without_env_vars(self):
+        from zorin_copilot.ui.app import _is_test_environment
+        with patch.dict(os.environ, {}, clear=True):
+            # Não pode levantar NameError (ex.: missing import sys)
+            result = _is_test_environment()
+            self.assertIsInstance(result, bool)
 
 
 if __name__ == "__main__":

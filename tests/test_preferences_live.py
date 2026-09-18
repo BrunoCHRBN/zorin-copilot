@@ -66,6 +66,16 @@ class ProviderSelectorTest(unittest.TestCase):
         self.assertEqual(self.dialog.gemini_key_row.get_text(), "CHAVE-TESTE")
         self.assertEqual(self.dialog._collect_current_config().gemini_api_key, "CHAVE-TESTE")
 
+    def test_gemini_live_voice_row_and_preview_button(self):
+        """Verifica a presença da linha de voz do Gemini Live e do botão de preview."""
+        self.assertIsNotNone(self.dialog.gemini_live_voice_row)
+        self.assertIsNotNone(self.dialog.gemini_live_voice_prev_btn)
+        self.assertEqual(len(self.dialog.gemini_live_voices_list), 8)
+
+        with unittest.mock.patch("zorin_copilot.ai.voice_preview.VoicePreviewService.play_voice") as mock_play:
+            self.dialog._on_preview_live_voice_clicked(self.dialog.gemini_live_voice_prev_btn)
+            mock_play.assert_called_once()
+
 
 class LiveSessionLogTest(unittest.TestCase):
     """A sessão de voz deve acumular ações e transcrição em lista rolável."""

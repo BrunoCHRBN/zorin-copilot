@@ -223,7 +223,7 @@ class VirtualInputDriver:
 
         try:
             if self.ydotool_bin:
-                # Move para a coordenada absoluta
+                # 1. Emite mousemove via ydotool (prepara dispositivo uinput)
                 mv = subprocess.run(
                     [self.ydotool_bin, "mousemove", "-a", "-x", str(x), "-y", str(y)],
                     capture_output=True, text=True, timeout=1.5, check=False,
@@ -232,6 +232,34 @@ class VirtualInputDriver:
                     msg = _backend_error("ydotool", "mover o mouse", mv.returncode, mv.stderr or mv.stdout or "")
                     logger.error(msg)
                     return False, msg
+
+                # 2. Refinamento pixel-perfect via despachante nativo do compositor
+                # Necessário porque em Wayland e múltiplos monitores o ydotool -a
+                # costuma mapear as coordenadas absolutas de forma distorcida
+                if shutil.which("hyprctl"):
+                    try:
+                        subprocess.run(
+                            ["hyprctl", "dispatch", "movecursor", str(x), str(y)],
+                            capture_output=True, text=True, timeout=0.8, check=False,
+                        )
+                    except Exception as exc:
+                        logger.debug("hyprctl movecursor falhou: %s", exc)
+                elif shutil.which("swaymsg"):
+                    try:
+                        subprocess.run(
+                            ["swaymsg", "seat", "-", "cursor", "set", str(x), str(y)],
+                            capture_output=True, text=True, timeout=0.8, check=False,
+                        )
+                    except Exception as exc:
+                        logger.debug("swaymsg cursor set falhou: %s", exc)
+                elif shutil.which("xdotool"):
+                    try:
+                        subprocess.run(
+                            ["xdotool", "mousemove", "--", str(x), str(y)],
+                            capture_output=True, text=True, timeout=0.8, check=False,
+                        )
+                    except Exception as exc:
+                        logger.debug("xdotool mousemove falhou: %s", exc)
                 time.sleep(0.04)
                 # Dispara clique (down e up)
                 ck = subprocess.run(
@@ -275,6 +303,60 @@ class VirtualInputDriver:
         """Converte coordenadas relativas da IA [0.0, 1.0] para o monitor ativo e clica."""
         abs_x, abs_y = self.fence.convert_relative_point(rel_x, rel_y)
         return self.click(abs_x, abs_y, button=button, double=double, label=label)
+
+    def scroll(
+        self,
+        x: int | None = None,
+        y: int | None = None,
+        direction: str = "down",
+        amount: int = 3,
+        label: str = "",
+    ) -> tuple[bool, str]:
+        """Rola a página ou elemento na direção indicada ('down', 'up') pela quantidade de passos."""
+        if self.fence.is_emergency_stopped:
+            return False, "Operação cancelada: Parada de emergência (Kill Switch) está ativa."
+
+        if x is not None and y is not None:
+            allowed, reason = self.fence.is_coordinate_allowed(x, y)
+            if not allowed:
+                return False, f"Rolagem bloqueada pela cerca: {reason}"
+            if shutil.which("hyprctl"):
+                try:
+                    subprocess.run(["hyprctl", "dispatch", "movecursor", str(x), str(y)], timeout=0.5, check=False)
+                except Exception:
+                    pass
+
+        try:
+            from ..ui.ghost_cursor import GhostCursorOverlay
+            lbl = label or f"Rolando ({'para baixo' if direction.lower() == 'down' else 'para cima'})"
+            GhostCursorOverlay.get_default().show_action(lbl, x=x, y=y)
+        except Exception:
+            pass
+
+        self._ensure_backend()
+        direction_clean = direction.lower().strip()
+        steps = max(1, min(20, int(amount)))
+
+        if shutil.which("xdotool"):
+            btn = "5" if direction_clean == "down" else "4"
+            cmd = ["xdotool", "click", "--repeat", str(steps), btn]
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=2.0, check=False)
+            if res.returncode == 0:
+                msg = f"Rolagem ({direction_clean}, {steps}x) executada via xdotool."
+                logger.info(msg)
+                return True, msg
+
+        if self.ydotool_bin:
+            wheel_code = "0x08" if direction_clean == "down" else "0x10"
+            for _ in range(steps):
+                subprocess.run([self.ydotool_bin, "click", wheel_code], timeout=0.5, check=False)
+                time.sleep(0.02)
+            msg = f"Rolagem ({direction_clean}, {steps}x) executada via ydotool."
+            logger.info(msg)
+            return True, msg
+
+        key = "Page_Down" if direction_clean == "down" else "Page_Up"
+        return self.hotkey(key)
 
     def type_text(self, text: str, press_enter: bool = False) -> tuple[bool, str]:
         """Digita texto simulando eventos de teclado de hardware na janela com foco ativo."""

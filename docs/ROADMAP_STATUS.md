@@ -68,8 +68,30 @@ O Zorin Copilot é um assistente de inteligência artificial nativo para Linux (
   - Heurística automática de classificação de risco (mutante vs. leitura).
   - Exposição da ferramenta segura `mcp__read_resource` (`RiskLevel.SAFE`) para anexar contexto técnico a prompts.
 
-### 2.4 Qualidade, Testes e Estabilidade
-- **1.398 testes unitários e de integração aprovados (100% pass)** cobrindo todos os módulos: ações, segurança, OCR, memória, RAG, rollback, MCP, UI GTK4 e cliente de voz.
+### 2.4 Módulos Operacionais Avançados
+- **Casa Inteligente & IoT (`core/home_assistant.py`):**
+  - Cliente REST assíncrono para Home Assistant com controle de lâmpadas (Avant Neo / Tuya), dimerização (0-100%), Kelvin (2000K-6500K), cores RGB e palavras-chave em português.
+  - Controle de ar-condicionado (temperatura em °C, modos frio/calor/ventilação/auto) e tomadas inteligentes.
+  - Aba dedicada nas Configurações Libadwaita com teste de conexão e gerador de comando Docker.
+  - Ferramentas `smart_home_control` e `smart_home_status` integradas ao Modo Agente e ao Gemini Live por voz.
+- **VS Code Workspace & Desenvolvimento (`core/vscode.py`):**
+  - Detecção automática do projeto ativo no VS Code.
+  - Abertura de workspaces, criação de novos projetos a partir de templates (Python, Rust, Node/JS).
+  - Leitura, escrita e aplicação de patches atômicos em arquivos de código com histórico de reversão.
+- **Academic Hub (`core/academic_hub.py`):**
+  - Pesquisa unificada em repositórios acadêmicos e científicos (arXiv, OpenAlex, PubMed, Semantic Scholar).
+  - Formatação e renderização de cartões acadêmicos com referências bibliográficas e links diretos.
+- **Gerenciador de Janelas & Multitarefa (`core/window_manager.py`):**
+  - Controle de foco, fechamento, minimização, maximização e organização de janelas no Hyprland, Wayland e X11.
+- **Seletor de Modelos em Tempo Real (`ui/widgets/model_selector.py`) & Demonstração de Voz (`ai/voice_preview.py`):**
+  - Popover integrado ao cabeçalho para alternância instantânea entre Gemini, Ollama e OpenAI.
+  - Pré-escuta de vozes do Gemini Live diretamente na interface de preferências com reprodução local.
+- **Gemini Live 3.8 Extended Thinking & Enquadramento Inteligente (`ai/live.py`):**
+  - Suporte ao raciocínio contínuo assíncrono (`thinkingBudget: 2048`).
+  - Streaming de vídeo com recorte automático da janela em foco ou monitor ativo delimitado pelo `ScreenFence`.
+
+### 2.5 Qualidade, Testes e Estabilidade
+- **1.563 testes unitários e de integração aprovados (100% pass, 5 skipped)** cobrindo todos os módulos do sistema: ações, segurança, OCR, memória, RAG, rollback, MCP, UI GTK4, Gemini Live, Home Assistant e drivers de janela.
 
 ---
 

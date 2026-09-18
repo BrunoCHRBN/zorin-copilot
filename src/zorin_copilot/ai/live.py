@@ -12,6 +12,7 @@ import json
 import logging
 import math
 import os
+import queue
 import shutil
 import struct
 import subprocess
@@ -27,7 +28,6 @@ except ImportError:
 
 from ..core.a11y import DesktopInspector
 from ..core.apps import AppManager, is_terminal_request
-from ..core.a11y import DesktopInspector
 from ..core.browser import BrowserManager
 from ..core.calendar import CalendarManager
 from ..core.config import CopilotConfig
@@ -228,14 +228,18 @@ LIVE_TOOLS_DECLARATION = [
             },
             {
                 "name": "media_control",
-                "description": "Controla tocadores de música e reprodutores de mídia como Spotify, VLC e navegadores (tocar, pausar, avançar faixa, retroceder, ou consultar que música está tocando).",
+                "description": "Controla tocadores de música e reprodutores de mídia como Spotify, VLC e navegadores (tocar, pausar, avançar faixa, retroceder, buscar e reproduzir músicas/artistas específicos ou consultar que música está tocando).",
                 "parameters": {
                     "type": "OBJECT",
                     "properties": {
                         "action": {
                             "type": "STRING",
-                            "enum": ["play", "pause", "play_pause", "next", "previous", "get_status"],
-                            "description": "Ação de controle de mídia",
+                            "enum": ["play", "pause", "play_pause", "next", "previous", "get_status", "search", "play_song"],
+                            "description": "Ação de controle de mídia. Use 'search' ou 'play_song' junto com o parâmetro 'query' para tocar uma música, artista ou playlist específica no Spotify.",
+                        },
+                        "query": {
+                            "type": "STRING",
+                            "description": "Nome da música, artista, álbum, playlist ou termo a buscar e tocar (ex: 'Bohemian Rhapsody', 'Daft Punk Get Lucky', 'lofi beats').",
                         },
                         "player": {
                             "type": "STRING",
@@ -306,22 +310,113 @@ LIVE_TOOLS_DECLARATION = [
                 },
             },
             {
+                "name": "move_window_to_monitor",
+                "description": (
+                    "Move ou arrasta uma janela aberta específica, a janela ativa atual, ou múltiplas/todas as janelas "
+                    "de um monitor para outro (ex: 'passa o Firefox pro outro monitor', 'arrasta essa janela pra tela da direita', "
+                    "'move todas as janelas pro monitor principal')."
+                ),
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "window": {
+                            "type": "STRING",
+                            "description": (
+                                "Nome do aplicativo, classe ou título da janela a mover (ex: 'firefox', 'terminal', 'code', 'spotify'), "
+                                "'current' ou 'active' para a janela ativa em foco, ou 'all'/'todas' para mover todas as janelas."
+                            ),
+                        },
+                        "target_monitor": {
+                            "type": "STRING",
+                            "description": (
+                                "Monitor de destino: 'principal'/'main', 'secundario'/'secondary', 'direita'/'right', 'esquerda'/'left', "
+                                "'outro'/'other' (o monitor oposto ao atual), número do monitor ('0', '1') ou nome físico ('DP-2', 'HDMI-A-2')."
+                            ),
+                        },
+                    },
+                    "required": ["target_monitor"],
+                },
+            },
+            {
+                "name": "vscode_workspace",
+                "description": (
+                    "Interage diretamente com o Visual Studio Code (VS Code) para fluxos completos de desenvolvimento: "
+                    "detecta o projeto/workspace atualmente aberto, abre pastas no editor, cria projetos estruturados "
+                    "(FastAPI, Flask, Node/Express, React, Python, Web) com .gitignore e .vscode/settings.json, "
+                    "cria e atualiza arquivos de código abrindo-os diretamente em abas no editor na linha exata, "
+                    "e lê a estrutura de arquivos do projeto com proteção de segredos (.env)."
+                ),
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "action": {
+                            "type": "STRING",
+                            "enum": [
+                                "get_active_project",
+                                "open_workspace",
+                                "create_project",
+                                "write_code",
+                                "patch_code",
+                                "read_file",
+                                "get_structure",
+                                "open_file",
+                            ],
+                            "description": "Ação de desenvolvimento a realizar com o VS Code.",
+                        },
+                        "project_name": {
+                            "type": "STRING",
+                            "description": "Nome do novo projeto ou pasta (para 'create_project').",
+                        },
+                        "folder_path": {
+                            "type": "STRING",
+                            "description": "Caminho da pasta a abrir como workspace (para 'open_workspace').",
+                        },
+                        "file_path": {
+                            "type": "STRING",
+                            "description": "Caminho relativo ou absoluto do arquivo de código (para 'write_code', 'patch_code', 'read_file', 'open_file').",
+                        },
+                        "code_content": {
+                            "type": "STRING",
+                            "description": "Código-fonte completo a ser gravado no arquivo (para 'write_code') ou código substituto (para 'patch_code').",
+                        },
+                        "target_code": {
+                            "type": "STRING",
+                            "description": "Trecho exato do código existente a ser substituído (para 'patch_code').",
+                        },
+                        "replacement_code": {
+                            "type": "STRING",
+                            "description": "Novo trecho de código a ser inserido no lugar de target_code (para 'patch_code').",
+                        },
+                        "template": {
+                            "type": "STRING",
+                            "enum": ["python", "fastapi", "flask", "node", "express", "react", "web", "empty"],
+                            "description": "Template do projeto (padrão 'python' ou 'fastapi').",
+                        },
+                        "line_number": {
+                            "type": "INTEGER",
+                            "description": "Linha do arquivo para focar o cursor no editor (padrão 1).",
+                        },
+                    },
+                    "required": ["action"],
+                },
+            },
+            {
                 "name": "mouse_click",
-                "description": "Executa um clique de mouse virtual na tela. As coordenadas são estritamente validadas pela cerca espacial do monitor ativo.",
+                "description": "Executa um clique de mouse virtual na tela no monitor autorizado ativo. Suporta escala normalizada da visão (0.0 a 1.0 ou 0 a 1000 do Gemini), pixels relativos ao monitor ou coordenadas absolutas.",
                 "parameters": {
                     "type": "OBJECT",
                     "properties": {
                         "x": {
                             "type": "NUMBER",
-                            "description": "Coordenada horizontal (em porcentagem relativa de 0.0 a 1.0 ou pixels absolutos)",
+                            "description": "Coordenada horizontal (em porcentagem 0.0-1.0, escala 0-1000 da visão Gemini, ou pixels)",
                         },
                         "y": {
                             "type": "NUMBER",
-                            "description": "Coordenada vertical (em porcentagem relativa de 0.0 a 1.0 ou pixels absolutos)",
+                            "description": "Coordenada vertical (em porcentagem 0.0-1.0, escala 0-1000 da visão Gemini, ou pixels)",
                         },
                         "is_relative": {
                             "type": "BOOLEAN",
-                            "description": "Se true, x e y são porcentagens [0.0, 1.0] do frame visual do vídeo; se false, pixels absolutos",
+                            "description": "Se true, x e y são porcentagens/escala relativa [0.0, 1.0] ou [0, 1000] do frame visual do vídeo/monitor (recomendado)",
                         },
                         "button": {
                             "type": "STRING",
@@ -334,6 +429,44 @@ LIVE_TOOLS_DECLARATION = [
                         },
                     },
                     "required": ["x", "y"],
+                },
+            },
+            {
+                "name": "click_and_type",
+                "description": (
+                    "Ação atômica recomendada para interagir com campos de texto em navegadores, Spotify e apps: "
+                    "clica no ponto visual para garantir foco, aguarda ativação do cursor e digita o texto com precisão. "
+                    "Evita perda de foco ou digitação no vácuo."
+                ),
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "x": {
+                            "type": "NUMBER",
+                            "description": "Coordenada horizontal (escala 0-1000 da visão Gemini ou 0.0-1.0)",
+                        },
+                        "y": {
+                            "type": "NUMBER",
+                            "description": "Coordenada vertical (escala 0-1000 da visão Gemini ou 0.0-1.0)",
+                        },
+                        "text": {
+                            "type": "STRING",
+                            "description": "Texto a ser digitado no campo focado",
+                        },
+                        "press_enter": {
+                            "type": "BOOLEAN",
+                            "description": "Se true, pressiona Enter após digitar o texto (padrão false)",
+                        },
+                        "clear_first": {
+                            "type": "BOOLEAN",
+                            "description": "Se true, seleciona tudo e apaga antes de digitar (padrão false)",
+                        },
+                        "is_relative": {
+                            "type": "BOOLEAN",
+                            "description": "Se true (padrão), x e y são porcentagens ou escala 0-1000 da visão do Gemini",
+                        },
+                    },
+                    "required": ["x", "y", "text"],
                 },
             },
             {
@@ -766,6 +899,75 @@ LIVE_TOOLS_DECLARATION = [
                 },
             },
             {
+                "name": "smart_home_control",
+                "description": (
+                    "Controla dispositivos inteligentes da casa (lâmpadas como Avant Neo, ar-condicionado, "
+                    "tomadas e interruptores integrados ao Home Assistant). Permite ligar, desligar, "
+                    "ajustar brilho (1..100%), temperatura de cor em Kelvin (2700K quente / 4000K neutro / 6500K frio), "
+                    "cores RGB, e climatização/temperatura do ar-condicionado."
+                ),
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "device_type": {
+                            "type": "STRING",
+                            "enum": ["light", "climate", "switch"],
+                            "description": "Tipo de aparelho: 'light' (lâmpada/iluminação), 'climate' (ar-condicionado) ou 'switch' (tomada/interruptor). Padrão: 'light'.",
+                        },
+                        "action": {
+                            "type": "STRING",
+                            "description": "Ação a executar: 'turn_on', 'turn_off', 'toggle', 'set_temperature' ou 'set_hvac_mode'.",
+                        },
+                        "entity": {
+                            "type": "STRING",
+                            "description": "Nome ou ID do aparelho (ex.: 'quarto', 'escritorio', 'sala', 'avant neo'). Opcional se houver apenas um aparelho do tipo.",
+                        },
+                        "brightness": {
+                            "type": "INTEGER",
+                            "description": "Nível de brilho de 1 a 100% para lâmpadas.",
+                        },
+                        "color_temp": {
+                            "type": "STRING",
+                            "description": "Temperatura de cor em Kelvin (ex.: '2700', '4000', '6500') ou termos ('quente', 'frio', 'neutro', 'âmbar', 'relax', 'foco').",
+                        },
+                        "color": {
+                            "type": "STRING",
+                            "description": "Nome da cor em português (ex.: 'azul', 'vermelho', 'verde', 'amarelo', 'roxo', 'laranja', 'rosa') para lâmpadas RGB.",
+                        },
+                        "temperature": {
+                            "type": "NUMBER",
+                            "description": "Temperatura desejada em graus Celsius para o ar-condicionado (ex.: 22.0).",
+                        },
+                        "hvac_mode": {
+                            "type": "STRING",
+                            "description": "Modo de climatização: 'cool' (refrigerar/frio), 'heat' (aquecer/quente), 'fan_only' (ventilação) ou 'off'.",
+                        },
+                    },
+                    "required": ["action"],
+                },
+            },
+            {
+                "name": "smart_home_status",
+                "description": (
+                    "Consulta o estado atual dos dispositivos inteligentes da casa (se a lâmpada está acesa, "
+                    "nível de brilho atual, temperatura ambiente, modo do ar-condicionado, etc.)."
+                ),
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "query": {
+                            "type": "STRING",
+                            "description": "Aparelho ou cômodo específico a consultar (ex.: 'lâmpada', 'quarto', 'ar condicionado'). Se vazio, resume os aparelhos da casa.",
+                        },
+                        "device_type": {
+                            "type": "STRING",
+                            "enum": ["light", "climate", "switch", "all"],
+                            "description": "Filtro por tipo de dispositivo ('light', 'climate', 'switch' ou 'all').",
+                        },
+                    },
+                },
+            },
+            {
                 "name": "confirm_action",
                 "description": "Confirma ou cancela uma ação de risco previamente solicitada (ex: enviar e-mail, sobrescrever arquivo, atalho destrutivo, digitar em senha). Chamada apenas após o usuário aprovar verbalmente.",
                 "parameters": {
@@ -842,6 +1044,7 @@ class GeminiLiveClient:
         self.on_end_session: Callable[[str, str], None] | None = None
 
         self._is_running = False
+        self._stopped_by_user = False
         self._is_muted = False
         self._is_video_streaming = False
         self.video_mode: str = "active_window"  # "active_window" (padrão) ou "fullscreen"
@@ -850,6 +1053,8 @@ class GeminiLiveClient:
         self._unchanged_frames_count: int = 0
         self._is_privacy_shielded: bool = False
         self._last_focused_window_title: str = ""
+        self._last_streamed_crop_rect: tuple[int, int, int, int] | None = None
+        self._last_streamed_window_info: tuple[str, str] | None = None
         self._video_thread: threading.Thread | None = None
         self._video_frames_count: int = 0
         self._thread: threading.Thread | None = None
@@ -860,13 +1065,26 @@ class GeminiLiveClient:
         self._record_proc: subprocess.Popen | None = None
         self._play_proc: subprocess.Popen | None = None
 
+        # Pipeline desacoplado de reprodução de áudio com Jitter Buffer
+        self._audio_play_queue: queue.Queue[bytes | None] = queue.Queue()
+        self._player_thread: threading.Thread | None = None
+        self._player_stop_event = threading.Event()
+        self._is_prebuffering: bool = True
+        self._prebuffer_bytes: bytearray = bytearray()
+        self._echo_cooldown_until: float = 0.0
+        self._last_state_msg: str = ""
+        self._interaction_status: str = "IDLE"
+
         # Rastreamento de ações e transcrições para persistência no chat da demanda
         self._session_start_time: float = 0.0
         self._executed_actions_log: list[dict[str, Any]] = []
         self._transcripts_log: list[tuple[str, str]] = []
 
     def _set_state(self, state: LiveVoiceState, message: str = "") -> None:
+        if getattr(self, "state", None) == state and getattr(self, "_last_state_msg", None) == message:
+            return
         self.state = state
+        self._last_state_msg = message
         if self.on_state_change:
             try:
                 self.on_state_change(state, message)
@@ -903,6 +1121,7 @@ class GeminiLiveClient:
             return
 
         self._is_running = True
+        self._stopped_by_user = False
         self._is_muted = False
         self._last_error = None
         self._video_frames_count = 0
@@ -912,6 +1131,26 @@ class GeminiLiveClient:
         # Fase 4B: descarta confirmações de risco pendentes da sessão anterior —
         # um confirmation_id nunca deve sobreviver ao fim da chamada.
         self._pending_actions.clear()
+
+        # Inicia thread consumidora dedicada do player de áudio (com jitter buffer)
+        if hasattr(self, "_player_stop_event"):
+            self._player_stop_event.clear()
+        if hasattr(self, "_audio_play_queue"):
+            while not self._audio_play_queue.empty():
+                try:
+                    self._audio_play_queue.get_nowait()
+                except Exception:
+                    break
+        self._is_prebuffering = True
+        if hasattr(self, "_prebuffer_bytes"):
+            self._prebuffer_bytes.clear()
+        self._player_thread = threading.Thread(
+            target=self._audio_playback_worker,
+            daemon=True,
+            name="GeminiLiveAudioPlayer",
+        )
+        self._player_thread.start()
+
         self._thread = threading.Thread(target=self._run_loop, daemon=True, name="GeminiLiveWorker")
         self._thread.start()
 
@@ -919,12 +1158,23 @@ class GeminiLiveClient:
         """Finaliza a conexão de voz e interrompe os fluxos de áudio e vídeo."""
         self.stop_video_stream()
         self._is_running = False
+        self._stopped_by_user = True
         self._terminate_audio_processes()
         # Fase 4B: nenhuma ação de risco pode ficar armada após o encerramento.
         self._pending_actions.clear()
 
+        ws = getattr(self, "_ws", None)
+        if ws and self._loop and self._loop.is_running():
+            try:
+                asyncio.run_coroutine_threadsafe(ws.close(), self._loop)
+            except Exception:
+                pass
+
         if self._loop and self._loop.is_running():
-            self._loop.call_soon_threadsafe(self._loop.stop)
+            def _cancel_all():
+                for task in asyncio.all_tasks(self._loop):
+                    task.cancel()
+            self._loop.call_soon_threadsafe(_cancel_all)
 
         self._set_state(LiveVoiceState.DISCONNECTED, "Chamada encerrada.")
 
@@ -946,7 +1196,17 @@ class GeminiLiveClient:
         }
 
     def _terminate_audio_processes(self) -> None:
-        """Fecha subprocessos de gravação e reprodução de áudio."""
+        """Fecha subprocessos de gravação e reprodução de áudio e desliga a thread do tocador."""
+        if hasattr(self, "_player_stop_event") and self._player_stop_event:
+            self._player_stop_event.set()
+        self._stop_player()
+        if hasattr(self, "_player_thread") and self._player_thread and self._player_thread.is_alive():
+            try:
+                self._player_thread.join(timeout=0.2)
+            except Exception:
+                pass
+            self._player_thread = None
+
         if self._record_proc:
             try:
                 self._record_proc.terminate()
@@ -969,13 +1229,128 @@ class GeminiLiveClient:
                     pass
             self._play_proc = None
 
+    def _audio_playback_worker(self) -> None:
+        """Worker thread dedicado à reprodução de áudio com Jitter Buffer.
+
+        Desacopla totalmente a recepção de rede via WebSocket do pipe de áudio do sistema,
+        eliminando buffer underruns causados por oscilações na transmissão ou na síntese do modelo.
+        """
+        jitter_ms = getattr(getattr(self, "config", None), "live_voice_jitter_buffer_ms", 180)
+        # Taxa de 24.000 Hz, 16-bit (2 bytes), mono = 48.000 bytes por segundo
+        target_prebuffer_bytes = max(2400, int(48000 * (jitter_ms / 1000.0)))
+
+        while getattr(self, "_is_running", False) and not (
+            hasattr(self, "_player_stop_event") and self._player_stop_event.is_set()
+        ):
+            try:
+                chunk = self._audio_play_queue.get(timeout=0.04)
+            except (queue.Empty, AttributeError):
+                # Se passou timeout (40ms sem novos chunks) e tínhamos bytes retidos no pré-buffer,
+                # libera imediatamente para não reter fala curta ou resposta pausada
+                if getattr(self, "_is_prebuffering", False) and getattr(self, "_prebuffer_bytes", None):
+                    self._flush_prebuffer()
+                continue
+
+            if chunk is None:
+                # Marcador sentinela de término de turno do assistente
+                if getattr(self, "_prebuffer_bytes", None):
+                    self._flush_prebuffer()
+
+                if self._play_proc and self._play_proc.stdin:
+                    try:
+                        self._play_proc.stdin.flush()
+                    except Exception:
+                        pass
+                    # Folga acústica para o hardware de som PipeWire esvaziar o buffer (150ms buffer + DAC)
+                    time.sleep(0.35)
+
+                # Cooldown pós-fala para absorver reverberação ambiente antes de reabrir o microfone
+                self._echo_cooldown_until = time.monotonic() + 0.40
+
+                # Só transita para LISTENING após o áudio físico ter sido concluído.
+                # No Gemini 3.8 Live Extended Thinking, se o status for IN_PROGRESS,
+                # o modelo ainda está raciocinando em segundo plano após falar o filler inicial.
+                if self.state in (LiveVoiceState.SPEAKING, LiveVoiceState.THINKING, LiveVoiceState.EXECUTING):
+                    if getattr(self, "_interaction_status", "IDLE") == "IN_PROGRESS":
+                        self._set_state(LiveVoiceState.THINKING, "Raciocinando em segundo plano...")
+                    else:
+                        self._set_state(LiveVoiceState.LISTENING, "Ouvindo você...")
+
+                self._is_prebuffering = True
+                if hasattr(self, "_prebuffer_bytes"):
+                    self._prebuffer_bytes.clear()
+                continue
+
+            # Chunk de áudio real recebido
+            if getattr(self, "_is_prebuffering", False):
+                self._prebuffer_bytes.extend(chunk)
+                if len(self._prebuffer_bytes) >= target_prebuffer_bytes:
+                    self._flush_prebuffer()
+            else:
+                self._write_chunk_to_player(chunk)
+
+    def _flush_prebuffer(self) -> None:
+        """Descarrega os bytes acumulados no jitter buffer para o subprocesso de áudio."""
+        if not getattr(self, "_prebuffer_bytes", None):
+            return
+        data = bytes(self._prebuffer_bytes)
+        self._prebuffer_bytes.clear()
+        self._is_prebuffering = False
+        self._ensure_player_started()
+        self._write_chunk_to_player(data)
+
+    def _ensure_player_started(self) -> subprocess.Popen | None:
+        """Garante que o processo tocador (pw-play ou aplay) está ativo."""
+        if not self._play_proc or self._play_proc.poll() is not None:
+            self._start_player()
+        return self._play_proc
+
+    def _write_chunk_to_player(self, chunk: bytes) -> None:
+        """Escreve um bloco PCM no stdin do tocador e atualiza estado se necessário."""
+        proc = self._ensure_player_started()
+        if proc and proc.stdin:
+            try:
+                proc.stdin.write(chunk)
+                proc.stdin.flush()
+                if self.state != LiveVoiceState.SPEAKING:
+                    self._set_state(LiveVoiceState.SPEAKING, "Falando...")
+            except (BrokenPipeError, OSError) as exc:
+                logger.debug(f"Pipe do player de áudio quebrou: {exc}")
+                self._play_proc = None
+
     def _start_player(self) -> subprocess.Popen | None:
-        """Inicia processo de reprodução PipeWire para PCM 24kHz 16-bit mono."""
-        self._stop_player()
+        """Inicia processo de reprodução PipeWire para PCM 24kHz 16-bit mono com latência protegida."""
+        if self._play_proc:
+            try:
+                self._play_proc.terminate()
+                self._play_proc.wait(timeout=0.2)
+            except Exception:
+                try:
+                    self._play_proc.kill()
+                except Exception:
+                    pass
+            self._play_proc = None
+
         if shutil.which("pw-play"):
-            cmd = ["pw-play", "--raw", "--rate", "24000", "--channels", "1", "--format", "s16", "-"]
+            cmd = [
+                "pw-play",
+                "--raw",
+                "--rate", "24000",
+                "--channels", "1",
+                "--format", "s16",
+                "--latency", "150ms",
+                "--media-role", "Communication",
+                "-",
+            ]
         elif shutil.which("aplay"):
-            cmd = ["aplay", "-r", "24000", "-f", "S16_LE", "-c", "1", "-"]
+            cmd = [
+                "aplay",
+                "-r", "24000",
+                "-f", "S16_LE",
+                "-c", "1",
+                "--buffer-time=200000",
+                "-",
+            ]
         else:
             logger.error("Nenhum player de áudio (pw-play ou aplay) encontrado.")
             return None
@@ -993,7 +1368,20 @@ class GeminiLiveClient:
             return None
 
     def _stop_player(self) -> None:
-        """Interrompe a reprodução de áudio imediatamente (barge-in)."""
+        """Interrompe a reprodução de áudio imediatamente (barge-in / parada)."""
+        if hasattr(self, "_audio_play_queue") and self._audio_play_queue is not None:
+            while not self._audio_play_queue.empty():
+                try:
+                    self._audio_play_queue.get_nowait()
+                except Exception:
+                    break
+        if hasattr(self, "_prebuffer_bytes"):
+            self._prebuffer_bytes.clear()
+        if hasattr(self, "_is_prebuffering"):
+            self._is_prebuffering = True
+
+        self._echo_cooldown_until = 0.0
+
         if self._play_proc:
             try:
                 self._play_proc.terminate()
@@ -1011,17 +1399,22 @@ class GeminiLiveClient:
         asyncio.set_event_loop(self._loop)
         try:
             self._loop.run_until_complete(self._live_session())
-        except Exception as exc:
-            logger.error(f"Exceção no loop live: {exc}", exc_info=True)
-            self._last_error = str(exc)
-            self._set_state(LiveVoiceState.ERROR, str(exc))
-            if self.on_error:
-                self.on_error(str(exc))
+        except (asyncio.CancelledError, Exception) as exc:
+            if getattr(self, "_stopped_by_user", False) or isinstance(exc, asyncio.CancelledError):
+                logger.debug("Loop live finalizado após solicitação de encerramento.")
+            else:
+                logger.error(f"Exceção no loop live: {exc}", exc_info=True)
+                self._last_error = str(exc)
+                self._set_state(LiveVoiceState.ERROR, str(exc))
+                if self.on_error:
+                    self.on_error(str(exc))
         finally:
             self._terminate_audio_processes()
-            if self.state == LiveVoiceState.ERROR:
+            if getattr(self, "_stopped_by_user", False):
+                self._set_state(LiveVoiceState.DISCONNECTED, "Desconectado.")
+            elif self.state == LiveVoiceState.ERROR:
                 pass  # Preserva o estado de erro e a mensagem para a UI
-            elif self._last_error and self._is_running:
+            elif self._last_error:
                 self._set_state(LiveVoiceState.ERROR, self._last_error)
                 if self.on_error:
                     self.on_error(self._last_error)
@@ -1088,33 +1481,43 @@ class GeminiLiveClient:
                     return
                 await asyncio.sleep(0.1)
 
-    def _a11y_unavailable_msg(self) -> str:
-        """Explica por que a árvore AT-SPI voltou vazia, em vez de só 'indisponível'.
-
-        O caso mais comum NÃO é AT-SPI ausente: os daemons estão de pé e há
-        apps registrados, mas nenhum tem foco — porque o foco está numa
-        superfície layer-shell (o próprio popup do copilot) ou numa janela
-        que não se registra como aplicação. Sem essa distinção o usuário
-        reinstala o at-spi à toa.
-        """
+    def _a11y_unavailable_msg(self, app_name: str | None = None) -> str:
+        """Explica por que a árvore AT-SPI voltou vazia, orientando ações visuais de fallback."""
+        if app_name and isinstance(app_name, str) and app_name.strip():
+            return (
+                f"Árvore AT-SPI indisponível para o app '{app_name.strip()}' "
+                "(aplicações web, Electron ou jogos não costumam expor nós semânticos). "
+                "Use 'mouse_click' nas coordenadas visuais observadas no vídeo "
+                "ou 'keyboard_type'/'keyboard_hotkey' para interagir diretamente."
+            )
         insp = getattr(self, "inspector", None)
         apps: list[str] = []
         if insp is not None:
             try:
-                apps = list(insp.list_applications() or [])
+                raw_apps = insp.list_applications()
+                if isinstance(raw_apps, (list, tuple)):
+                    apps = [str(a) for a in raw_apps if isinstance(a, str)]
             except Exception:
                 apps = []
+        if app_name and "spotify" in app_name.lower():
+            return (
+                "O Spotify é controlado diretamente via MPRIS. "
+                "Use a ferramenta 'media_control(action=...)' para reproduzir/pausar, "
+                "ou 'launch_app(app_name=\"spotify\")' para iniciá-lo."
+            )
         if apps:
             return (
                 "Árvore AT-SPI indisponível: os daemons estão de pé e há apps "
                 f"registrados ({', '.join(apps[:5])}), mas nenhum tem foco agora. "
                 "Foque a janela de destino e repita — superfícies layer-shell "
-                "(como o próprio popup do copilot) não aparecem como aplicação."
+                "(como o próprio popup do copilot) não aparecem como aplicação. "
+                "Use 'mouse_click' com base nas coordenadas visuais do vídeo ou comandos de teclado como fallback."
             )
         return (
             "Árvore AT-SPI indisponível: o inspetor não alcançou o bus de "
             "acessibilidade. Confira se o copilot roda na mesma sessão D-Bus do "
-            "compositor (DBUS_SESSION_BUS_ADDRESS) e se 'at-spi-bus-launcher' está ativo."
+            "compositor (DBUS_SESSION_BUS_ADDRESS) e se 'at-spi-bus-launcher' está ativo. "
+            "Use mouse_click ou comandos de teclado como fallback."
         )
 
     def _input_capabilities_prompt(self) -> str:
@@ -1158,7 +1561,7 @@ class GeminiLiveClient:
         api_key = self.config.gemini_api_key.strip()
         # Mantido em sincronia com CopilotConfig.gemini_live_model. Nunca voltar
         # para um alias '-latest': a Live API rejeita e fecha com código 1007.
-        model_name = getattr(self.config, "gemini_live_model", "models/gemini-3.1-flash-live-preview")
+        model_name = getattr(self.config, "gemini_live_model", "models/gemini-3.8-live")
         voice_name = getattr(self.config, "gemini_live_voice", "Puck")
         uri = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key={api_key}"
 
@@ -1187,13 +1590,21 @@ class GeminiLiveClient:
                     "\n\nCONTROLE DO DESKTOP E FERRAMENTAS:\n"
                     f"- Monitores conectados: [{monitors_desc}]. Monitor autorizado ativo: '{active_mon_name}'. "
                     "- Para alternar a tela autorizada de trabalho, use 'screen_fence_control'. "
-                    "- Para interagir com a interface de um aplicativo específico de forma precisa e semântica, prefira primeiro 'get_ui_tree' para obter os elementos com UIDs [n.n] e geometria (@x,y w×h). Para agir em algo que você VÊ no vídeo mas só conhece pela aparência, use 'locate_element(x, y)' para converter o ponto visto em um UID semântico, e então 'click_element(uid)' / 'type_element(uid, text)'. Use 'mouse_click'/'keyboard_type' e 'keyboard_hotkey' apenas como fallback ou quando não houver UID (validadas pela cerca espacial). "
+                    "- Para mover ou arrastar janelas entre monitores (ex: 'passa o Firefox pro outro monitor', 'arrasta essa janela pra tela da direita', 'move todas as janelas pro monitor principal'), use 'move_window_to_monitor(window=..., target_monitor=...)'. Se o usuário não especificar a janela, use window='current'. "
+                    "- DESENVOLVIMENTO E VS CODE: Para criar novos projetos, abrir pastas no editor, gerar código e criar arquivos ou inspecionar o workspace aberto, use 'vscode_workspace'. Se o usuário pedir para criar um projeto (ex: 'cria um projeto FastAPI chamado vendas'), use action='create_project', project_name='vendas', template='fastapi'. Para gerar código completo, use action='write_code', file_path='...', code_content='...'. Para substituições cirúrgicas em arquivos existentes, use action='patch_code', file_path='...', target_code='...', replacement_code='...'. Para inspecionar a arquitetura da pasta aberta, use action='get_structure'. Para ler um arquivo existente, use action='read_file'. "
+                    "- Para abrir aplicativos ou navegadores (ou caso um aplicativo não esteja aberto), use 'launch_app(app_name=...)'. "
+                    "- CHROME E NAVEGADORES: Para buscar na web ou digitar uma URL no Chrome ou qualquer navegador, use SEMPRE o atalho nativo 'keyboard_hotkey(keys=[\"ctrl\", \"l\"])' seguido de 'keyboard_type(text=\"...\", press_enter=true)'. Isso foca a barra de endereços instantaneamente com 100% de precisão e sem depender do mouse! Para clicar em botões de texto ou links em páginas web, prefira 'find_on_screen(query=\"...\")' ou use 'click_and_type(x, y, text)'. "
+                    "- CONTROLE DE MÍDIA E SPOTIFY: Para tocar uma música, banda, playlist ou artista específico, use SEMPRE a ferramenta 'media_control(action=\"search\", query=\"<nome da música ou artista>\", player=\"spotify\")' — o Spotify abrirá e começará a tocar automaticamente a música pesquisada! Para pausar, despausar, avançar ou retroceder, use action='pause', 'play', 'next', 'previous'. Para focar a barra de pesquisa do Spotify pela interface, use 'keyboard_hotkey(keys=[\"ctrl\", \"l\"])' ou 'keyboard_hotkey(keys=[\"/\"])' e depois 'keyboard_type'. Para clicar em itens visuais na tela, use 'find_on_screen(query=\"...\")' ou 'click_and_type'. "
+                    "- INTERAÇÃO VISUAL, CLIQUE E DIGITAÇÃO (ANTI-LOOP): Para clicar e digitar em um campo na tela, use SEMPRE a ação atômica 'click_and_type(x, y, text)'. Para clicar em botões, use 'mouse_click(x, y)' (escala 0..1000 da visão Gemini). REGRA ANTI-LOOP: Se o usuário disser que você clicou ou digitou no lugar errado, NUNCA repita a mesma coordenada visual anterior! Mude imediatamente de estratégia: use o atalho de teclado do aplicativo (ex: Ctrl+L para busca), use 'find_on_screen' para localizar o texto por OCR ou recalibre o clique. "
                     "- Ao redigir ou iniciar e-mails, use 'email_compose'. Não adivinhe e-mails; se não souber, use 'contact_lookup' ou pergunte ao usuário. "
                     "- Quando o usuário pedir para lembrar de algo ('lembre-se que...'), use 'memory_remember' — o fato fica disponível imediatamente nesta sessão e nas futuras. "
                     "- Para compromissos e agenda, use 'calendar_event'. "
                     "- Para pesquisas na web, use 'browser_search', 'web_search', 'academic_search' ou 'deep_web_search'. Para estudos, projetos e TCC, prefira 'academic_search' (SciELO, IBGE, Sebrae, IPEA, Scholar). "
                     "- Para ler páginas abertas no navegador, use 'read_open_webpage'. "
-                    "- Para documentos locais (PDFs, relatórios), use 'search_documents', 'read_document_page' e 'open_document_file'. "
+                    "- CASA INTELIGENTE E IOT (HOME ASSISTANT / AVANT NEO): Para controlar lâmpadas, luzes, ar-condicionado, tomadas e interruptores, use 'smart_home_control'. "
+                    "Para lâmpadas (como Avant Neo ou luzes Tuya), você pode ligar/desligar ('turn_on'/'turn_off'/'toggle'), ajustar brilho de 1 a 100% ('brightness'), temperatura de cor em Kelvin ('color_temp'='2700' para branco quente/relaxante, '4000' para neutro, '6500' para branco frio/foco), ou cores RGB ('color'='azul', 'vermelho', etc.). Se o usuário não especificar a lâmpada (ex: 'acende a luz', 'apaga a lâmpada'), chame sem 'entity' que o sistema seleciona automaticamente a lâmpada configurada. "
+                    "Para ar-condicionado, use 'smart_home_control' com device_type='climate', action='set_temperature' e temperature=22.0, ou hvac_mode='cool'/'heat'/'fan_only'. "
+                    "Para saber se os aparelhos da casa estão ligados ou checar o estado, use 'smart_home_status'. "
                     "- Ações de risco (enviar e-mail, sobrescrever arquivo, atalho destrutivo como Alt+F4, ou digitar em campo de senha) NÃO são executadas de imediato: você receberá um 'confirmation_id' e deve pedir confirmação verbal ao usuário; se aprovada, chame 'confirm_action(confirmation_id, approve=true)'. Se o usuário recusar, chame com approve=false."
                     f"\n\n{self._input_capabilities_prompt()}\n"
                     "\n\nENCERRAMENTO DA SESSÃO (autonomia):\n"
@@ -1216,29 +1627,7 @@ class GeminiLiveClient:
                     "Trate o usuário com carinho, eficiência e naturalidade. Sempre que ele pedir algo, use imediatamente a ferramenta certa e confirme com um toque leve de voz!"
                 )
 
-                setup_payload = {
-                    "setup": {
-                        "model": model_name,
-                        "generationConfig": {
-                            "responseModalities": ["AUDIO"],
-                            "speechConfig": {
-                                "voiceConfig": {
-                                    "prebuiltVoiceConfig": {
-                                        "voiceName": voice_name,
-                                    }
-                                }
-                            },
-                        },
-                        "systemInstruction": {
-                            "parts": [
-                                {
-                                    "text": system_prompt_text,
-                                }
-                            ]
-                        },
-                        "tools": self._live_tools_payload(),
-                    }
-                }
+                setup_payload = self._build_setup_payload(model_name, voice_name, system_prompt_text)
 
                 await ws.send(json.dumps(setup_payload))
                 setup_resp_raw = await ws.recv()
@@ -1305,7 +1694,16 @@ class GeminiLiveClient:
     async def _mic_recorder_loop(self, ws: Any) -> None:
         """Lê áudio em tempo real do microfone via pw-record e transmite para o Gemini."""
         if shutil.which("pw-record"):
-            cmd = ["pw-record", "--raw", "--rate", "16000", "--channels", "1", "--format", "s16", "-"]
+            cmd = [
+                "pw-record",
+                "--raw",
+                "--rate", "16000",
+                "--channels", "1",
+                "--format", "s16",
+                "--latency", "50ms",
+                "--media-role", "Communication",
+                "-",
+            ]
         elif shutil.which("arecord"):
             cmd = ["arecord", "-r", "16000", "-f", "S16_LE", "-c", "1", "-"]
         else:
@@ -1333,30 +1731,74 @@ class GeminiLiveClient:
                 continue
 
             # Calcula volume / nível de amplitude RMS para o visualizador de onda da interface
-            if self.on_audio_level:
+            norm_level = 0.0
+            rms = 0.0
+            num_samples = len(pcm_bytes) // 2
+            if num_samples > 0:
                 try:
-                    num_samples = len(pcm_bytes) // 2
-                    if num_samples > 0:
-                        samples = struct.unpack(f"<{num_samples}h", pcm_bytes)
-                        rms = math.sqrt(sum(s * s for s in samples) / num_samples)
-                        if rms > 70.0:
-                            norm_level = min(1.0, ((rms - 70.0) / 1800.0) ** 0.7)
-                        else:
-                            norm_level = 0.0
-                        self.on_audio_level(norm_level)
+                    samples = struct.unpack(f"<{num_samples}h", pcm_bytes)
+                    rms = math.sqrt(sum(s * s for s in samples) / num_samples)
+                    if rms > 70.0:
+                        norm_level = min(1.0, ((rms - 70.0) / 1800.0) ** 0.7)
+                    else:
+                        norm_level = 0.0
                 except Exception:
                     pass
 
-            # Se não estiver mutado, envia chunk de áudio em base64 para o WebSocket
-            if not self._is_muted:
-                b64_audio = base64.b64encode(pcm_bytes).decode("utf-8")
-                msg = build_realtime_audio_msg(b64_audio)
+            if self.on_audio_level:
                 try:
-                    await ws.send(json.dumps(msg))
-                except Exception as exc:
-                    if self._is_running:
-                        logger.warning(f"Erro ao enviar chunk de áudio: {exc}")
-                    break
+                    self.on_audio_level(norm_level)
+                except Exception:
+                    pass
+
+            # Se não estiver mutado, avalia transmissão
+            if not self._is_muted:
+                should_send = True
+                ducking_enabled = getattr(getattr(self, "config", None), "live_voice_ducking_enabled", True)
+                interrupt_threshold = getattr(getattr(self, "config", None), "live_voice_interrupt_threshold_rms", 2800.0)
+
+                # 1. Detecta se o assistente está reproduzindo som, acumulando buffer inicial ou em janela de eco
+                is_assistant_speaking = (
+                    self.state == LiveVoiceState.SPEAKING
+                    or (getattr(self, "_is_prebuffering", False) and bool(getattr(self, "_prebuffer_bytes", None)))
+                    or (hasattr(self, "_audio_play_queue") and not self._audio_play_queue.empty())
+                    or (time.monotonic() < getattr(self, "_echo_cooldown_until", 0.0))
+                )
+
+                # 2. Detecta se o assistente está executando ferramentas ou formulando a resposta
+                is_assistant_processing = self.state in (LiveVoiceState.EXECUTING, LiveVoiceState.THINKING)
+
+                if ducking_enabled:
+                    if is_assistant_speaking:
+                        # Durante a fala do assistente, suprime o vazamento do alto-falante para evitar
+                        # auto-interrupção (falso barge-in). Só permite envio se o usuário interromper
+                        # intencionalmente falando alto próximo ao microfone.
+                        if rms < interrupt_threshold:
+                            should_send = False
+                        else:
+                            logger.info(
+                                "Interrupção voluntária (barge-in): RMS %.1f >= %.1f. Interrompendo player.",
+                                rms, interrupt_threshold,
+                            )
+                            self._stop_player()
+                            self._echo_cooldown_until = 0.0
+                            self._set_state(LiveVoiceState.LISTENING, "Ouvindo você...")
+                            should_send = True
+                    elif is_assistant_processing:
+                        # Durante a execução ou raciocínio pós-ferramenta, bloqueia ruídos de ambiente/cliques/janelas
+                        silence_threshold = max(1800.0, interrupt_threshold * 0.70)
+                        if rms < silence_threshold:
+                            should_send = False
+
+                if should_send:
+                    b64_audio = base64.b64encode(pcm_bytes).decode("utf-8")
+                    msg = build_realtime_audio_msg(b64_audio)
+                    try:
+                        await ws.send(json.dumps(msg))
+                    except Exception as exc:
+                        if self._is_running:
+                            logger.warning(f"Erro ao enviar chunk de áudio: {exc}")
+                        break
 
         if self._is_running and self._record_proc and self._record_proc.poll() is not None:
             code = self._record_proc.poll()
@@ -1390,7 +1832,7 @@ class GeminiLiveClient:
                             + "). Verifique o valor de `gemini_live_model` em "
                             "~/.config/zorin-copilot/config.json — o esperado é "
                             "um model code válido (ex: "
-                            "gemini-3.1-flash-live-preview), "
+                            "models/gemini-3.8-live ou models/gemini-3.8-live-extended-thinking), "
                             "não um alias '-latest'."
                         )
                     else:
@@ -1456,10 +1898,29 @@ class GeminiLiveClient:
             if "serverContent" in data:
                 sc = data["serverContent"]
 
+                # Suporte a Gemini 3.8 Live Extended Thinking:
+                # Detecta interaction_status ("IN_PROGRESS" ou "IDLE")
+                raw_status = (
+                    data.get("interactionStatus")
+                    or data.get("interaction_status")
+                    or sc.get("interactionStatus")
+                    or sc.get("interaction_status")
+                )
+                if raw_status:
+                    self._interaction_status = str(raw_status).upper()
+                    if self._interaction_status == "IN_PROGRESS" and self.state != LiveVoiceState.SPEAKING:
+                        self._set_state(LiveVoiceState.THINKING, "Raciocinando em segundo plano...")
+                    elif self._interaction_status == "IDLE":
+                        if self.state in (LiveVoiceState.THINKING, LiveVoiceState.EXECUTING) and (
+                            not hasattr(self, "_audio_play_queue") or self._audio_play_queue.empty()
+                        ):
+                            self._set_state(LiveVoiceState.LISTENING, "Ouvindo você...")
+
                 # Detecção de interrupção (Barge-In)
                 if sc.get("interrupted"):
                     logger.info("Usuário interrompeu a fala da IA. Interrompendo player.")
                     self._stop_player()
+                    self._interaction_status = "IDLE"
                     self._set_state(LiveVoiceState.LISTENING, "Ouvindo você...")
                     continue
 
@@ -1473,7 +1934,6 @@ class GeminiLiveClient:
                         if b64_data:
                             audio_bytes = base64.b64decode(b64_data)
                             self._play_audio_chunk(audio_bytes)
-                            self._set_state(LiveVoiceState.SPEAKING, "Falando...")
 
                     # Transcrição textual (se enviada pelo modelo)
                     if "text" in p:
@@ -1482,19 +1942,30 @@ class GeminiLiveClient:
                             self.on_transcript("assistant", p["text"])
 
                 if sc.get("turnComplete"):
-                    self._set_state(LiveVoiceState.LISTENING, "Ouvindo você...")
+                    if hasattr(self, "_audio_play_queue") and self._audio_play_queue is not None:
+                        self._audio_play_queue.put(None)
+                    else:
+                        if getattr(self, "_interaction_status", "IDLE") == "IN_PROGRESS":
+                            self._set_state(LiveVoiceState.THINKING, "Raciocinando em segundo plano...")
+                        else:
+                            self._set_state(LiveVoiceState.LISTENING, "Ouvindo você...")
 
     def _play_audio_chunk(self, audio_bytes: bytes) -> None:
-        """Escreve dados PCM no stdin do processo de reprodução PipeWire."""
-        if not self._play_proc or self._play_proc.poll() is not None:
-            self._start_player()
-
-        if self._play_proc and self._play_proc.stdin:
-            try:
-                self._play_proc.stdin.write(audio_bytes)
-                self._play_proc.stdin.flush()
-            except Exception as exc:
-                logger.debug(f"Erro ao escrever áudio no player: {exc}")
+        """Enfileira dados PCM no jitter buffer da thread de reprodução sem bloquear o WebSocket."""
+        if not audio_bytes or not getattr(self, "_is_running", True):
+            return
+        if hasattr(self, "_audio_play_queue") and self._audio_play_queue is not None:
+            self._audio_play_queue.put(audio_bytes)
+        else:
+            # Fallback direto caso worker não esteja ativo (ex: testes unitários isolados)
+            if not self._play_proc or self._play_proc.poll() is not None:
+                self._start_player()
+            if self._play_proc and self._play_proc.stdin:
+                try:
+                    self._play_proc.stdin.write(audio_bytes)
+                    self._play_proc.stdin.flush()
+                except Exception as exc:
+                    logger.debug(f"Erro ao escrever áudio no player: {exc}")
 
     async def _execute_tool_call(self, ws: Any, tool_call_data: dict[str, Any]) -> None:
         """Executa ferramenta local solicitada pela IA e devolve toolResponse."""
@@ -1545,6 +2016,30 @@ class GeminiLiveClient:
             }
         }
         await ws.send(json.dumps(tool_response_msg))
+
+        # Transita para THINKING aguardando a resposta verbal do Gemini
+        self._set_state(LiveVoiceState.THINKING, "Processando resposta...")
+
+        # Janela de proteção acústica (1.2s): impede que ruído de abertura de app,
+        # cliques de mouse ou sons do sistema cancelem a fala da IA antes de começar
+        self._echo_cooldown_until = max(getattr(self, "_echo_cooldown_until", 0.0), time.monotonic() + 1.2)
+
+        # Watchdog de resiliência: se o modelo não gerar fala ou responder silenciosamente,
+        # restaura para LISTENING após 7 segundos para não manter a interface presa em THINKING
+        async def _thinking_timeout_watchdog():
+            await asyncio.sleep(7.0)
+            if (
+                getattr(self, "_is_running", False)
+                and self.state == LiveVoiceState.THINKING
+                and (not hasattr(self, "_audio_play_queue") or self._audio_play_queue.empty())
+            ):
+                logger.debug("Watchdog: timeout em THINKING após toolResponse, restaurando LISTENING.")
+                self._set_state(LiveVoiceState.LISTENING, "Ouvindo você...")
+
+        try:
+            asyncio.create_task(_thinking_timeout_watchdog())
+        except Exception:
+            pass
 
     def _wait_for_app_focus(self, app_name: str, timeout: float = 3.0) -> bool:
         """Espera a janela do app recém-aberto subir e receber foco (AT-SPI2).
@@ -1631,6 +2126,53 @@ class GeminiLiveClient:
         except Exception:  # sugestão é cortesia, nunca deve derrubar o despacho
             hint = ""
         return {"success": False, "message": f"Aplicativo '{app_name}' não encontrado no sistema.{hint}"}
+
+    def _resolve_screen_coordinates(self, x: float, y: float, is_rel: bool | None = None) -> tuple[int, int, str]:
+        """Converte coordenadas do modelo (0..1, 0..1000 ou absolutas) com calibração ao frame de vídeo."""
+        # Se o chamador explicitamente definiu is_relative=False com valores em pixels
+        if is_rel is False and (x > 1.0 or y > 1.0):
+            return int(x), int(y), "pixels absolutos (explícito)"
+
+        # Escala normalizada da visão do Gemini Live (0..1000 ou 0.0..1.0)
+        is_norm = is_rel is True or (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0) or (0.0 <= x <= 1000.0 and 0.0 <= y <= 1000.0)
+
+        if is_norm:
+            norm_x = x / 1000.0 if x > 1.0 else x
+            norm_y = y / 1000.0 if y > 1.0 else y
+            norm_x = max(0.0, min(1.0, float(norm_x)))
+            norm_y = max(0.0, min(1.0, float(norm_y)))
+
+            # 1. Se temos o retângulo do último frame transmitido no vídeo (janela ativa ou recorte de monitor)
+            if getattr(self, "_last_streamed_crop_rect", None):
+                cx, cy, cw, ch = self._last_streamed_crop_rect
+                abs_x = cx + int(norm_x * cw)
+                abs_y = cy + int(norm_y * ch)
+                desc = f"frame de vídeo ({cw}x{ch} em +{cx}+{cy})"
+                return abs_x, abs_y, desc
+
+            # 2. Se a cerca estiver configurada para a janela ativa ou escolhida
+            if getattr(self, "fence", None) and hasattr(self.fence, "mode"):
+                from ..core.fence import FenceMode
+                if self.fence.mode in (FenceMode.ACTIVE_WINDOW, FenceMode.CHOSEN_WINDOW):
+                    target_w = self.fence.get_target_window()
+                    if target_w:
+                        abs_x = target_w.x + int(norm_x * target_w.width)
+                        abs_y = target_w.y + int(norm_y * target_w.height)
+                        desc = f"janela '{target_w.display_name()}'"
+                        return abs_x, abs_y, desc
+
+            # 3. Monitor ativo autorizado
+            active_m = self.fence.get_active_monitor() if getattr(self, "fence", None) else None
+            if active_m:
+                abs_x = active_m.x + int(norm_x * active_m.width)
+                abs_y = active_m.y + int(norm_y * active_m.height)
+                desc = f"monitor '{active_m.name}' ({active_m.width}x{active_m.height})"
+                return abs_x, abs_y, desc
+
+            return int(norm_x * 1920), int(norm_y * 1080), "tela padrão 1920x1080"
+
+        # Coordenadas já em pixels absolutos (> 1000)
+        return int(x), int(y), "pixels absolutos"
 
     def _dispatch_tool(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         """Despacha a execução concreta para os subsistemas do Zorin Copilot."""
@@ -1759,7 +2301,11 @@ class GeminiLiveClient:
                 from ..core.media import MediaPlayerManager
                 act = args.get("action", "play_pause")
                 player = args.get("player")
-                ok, msg = MediaPlayerManager.control(act, player_name=player)
+                query = args.get("query")
+                if query is not None:
+                    ok, msg = MediaPlayerManager.control(act, player_name=player, query=query)
+                else:
+                    ok, msg = MediaPlayerManager.control(act, player_name=player)
                 return {"success": ok, "message": msg}
 
             elif name == "write_document":
@@ -1791,19 +2337,115 @@ class GeminiLiveClient:
                     "message": f"Cerca de tela definida para '{name_str}'." if ok else f"Monitor '{target}' não localizado.",
                 }
 
+            elif name == "move_window_to_monitor":
+                target_mon = args.get("target_monitor", "outro")
+                window_query = args.get("window", "current")
+                from ..core.window_manager import WindowManager
+                res = WindowManager.move_windows(window_query, target_mon, drag_visual=True)
+                return res
+
+            elif name == "vscode_workspace":
+                action = str(args.get("action", "")).strip().lower()
+                from ..core.vscode import VSCodeManager
+                from pathlib import Path
+
+                if action == "get_active_project":
+                    ws = VSCodeManager.get_active_workspace()
+                    if ws:
+                        return {
+                            "success": True,
+                            "workspace_path": str(ws),
+                            "project_name": ws.name,
+                            "message": f"Projeto ativo no VS Code: '{ws.name}' ({ws}).",
+                        }
+                    return {"success": False, "message": "Nenhum workspace ativo encontrado no VS Code."}
+
+                elif action == "open_workspace":
+                    path = args.get("folder_path") or args.get("project_name", "")
+                    return VSCodeManager.open_workspace(path)
+
+                elif action == "create_project":
+                    pname = args.get("project_name", "novo_projeto")
+                    tmpl = args.get("template", "python")
+                    bdir = args.get("folder_path")
+                    return VSCodeManager.create_project(pname, template=tmpl, base_dir=bdir)
+
+                elif action == "write_code":
+                    fpath = args.get("file_path", "")
+                    content = args.get("code_content", "")
+                    line = int(args.get("line_number", 1))
+                    return VSCodeManager.write_code_file(fpath, content, line=line)
+
+                elif action == "read_file":
+                    fpath = args.get("file_path", "")
+                    return VSCodeManager.read_code_file(fpath)
+
+                elif action == "get_structure":
+                    wpath = args.get("folder_path")
+                    return VSCodeManager.read_workspace_structure(Path(wpath) if wpath else None)
+
+                elif action == "open_file":
+                    fpath = args.get("file_path", "")
+                    line = int(args.get("line_number", 1))
+                    return VSCodeManager.open_file(fpath, line=line)
+
+                elif action == "patch_code":
+                    fpath = args.get("file_path", "")
+                    target_c = args.get("target_code", "")
+                    replace_c = args.get("replacement_code") or args.get("code_content", "")
+                    return VSCodeManager.patch_code_file(fpath, target_c, replace_c)
+
+                return {"success": False, "message": f"Ação de desenvolvimento desconhecida: '{action}'"}
+
             elif name == "mouse_click":
                 x = float(args.get("x", 0.0))
                 y = float(args.get("y", 0.0))
-                is_rel = bool(args.get("is_relative", False))
-                btn = args.get("button", "left")
+                is_rel = args.get("is_relative")
+                btn = str(args.get("button", "left"))
                 double = bool(args.get("double", False))
 
-                # Se for relativo ou se os valores estiverem entre 0.0 e 1.0
-                if is_rel or (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):
-                    ok, msg = self.input_driver.click_relative(x, y, button=btn, double=double)
-                else:
-                    ok, msg = self.input_driver.click(int(x), int(y), button=btn, double=double)
-                return {"success": ok, "message": msg}
+                abs_x, abs_y, mapping_desc = self._resolve_screen_coordinates(x, y, is_rel=is_rel)
+                ok, msg = self.input_driver.click(abs_x, abs_y, button=btn, double=double)
+                return {
+                    "success": ok,
+                    "x": abs_x,
+                    "y": abs_y,
+                    "message": f"{msg} (Mapeado: {mapping_desc})",
+                }
+
+            elif name == "click_and_type":
+                x = float(args.get("x", 0.0))
+                y = float(args.get("y", 0.0))
+                text = str(args.get("text", ""))
+                enter = bool(args.get("press_enter", False))
+                clear_first = bool(args.get("clear_first", False))
+                is_rel = args.get("is_relative")
+
+                abs_x, abs_y, mapping_desc = self._resolve_screen_coordinates(x, y, is_rel=is_rel)
+
+                # 1. Clique para focar o campo
+                click_ok, click_msg = self.input_driver.click(abs_x, abs_y, button="left")
+                if not click_ok:
+                    return {"success": False, "message": f"Falha ao clicar no elemento: {click_msg}"}
+
+                # 2. Aguarda ativação do foco e cursor de texto
+                time.sleep(0.08)
+
+                # 3. Limpeza prévia se solicitado
+                if clear_first:
+                    self.input_driver.hotkey("ctrl", "a")
+                    time.sleep(0.03)
+                    self.input_driver.hotkey("backspace")
+                    time.sleep(0.03)
+
+                # 4. Digitação do texto
+                type_ok, type_msg = self.input_driver.type_text(text, press_enter=enter)
+                return {
+                    "success": type_ok,
+                    "x": abs_x,
+                    "y": abs_y,
+                    "message": f"Campo focado em ({abs_x}, {abs_y}) [{mapping_desc}] e texto digitado. {type_msg}",
+                }
 
             elif name == "find_on_screen":
                 q = args.get("query", "").strip()
@@ -1863,11 +2505,20 @@ class GeminiLiveClient:
 
             elif name == "get_ui_tree":
                 app_name = args.get("app_name")
+                if app_name and "spotify" in app_name.lower():
+                    return {
+                        "success": False,
+                        "message": (
+                            "O Spotify não expõe árvore AT-SPI e é controlado diretamente via MPRIS. "
+                            "Para tocar, pausar ou passar faixas, use a ferramenta 'media_control'. "
+                            "Se o Spotify estiver fechado, use 'launch_app(app_name=\"spotify\")' para abri-lo primeiro."
+                        ),
+                    }
                 root = self.inspector.get_ui_tree(app_name)
                 if root is None:
                     return {
                         "success": False,
-                        "message": self._a11y_unavailable_msg() + " Use keyboard_type/keyboard_hotkey como fallback.",
+                        "message": self._a11y_unavailable_msg(app_name) + " Use mouse_click/keyboard_type como fallback.",
                     }
                 if is_blocked_app(root.name):
                     return {
@@ -1904,13 +2555,20 @@ class GeminiLiveClient:
                 if root is None:
                     return {
                         "success": False,
-                        "message": self._a11y_unavailable_msg(),
+                        "message": (
+                            f"Controle semântico não exposto via AT-SPI para o app '{app_name or 'em foco'}'. "
+                            f"Como você já tem as coordenadas ({int(x)}, {int(y)}), execute diretamente "
+                            f"'mouse_click(x={x}, y={y}, is_relative=false)' para interagir com o controle visual."
+                        ),
                     }
                 el = DesktopInspector.element_at_point(root, int(x), int(y))
                 if el is None:
                     return {
                         "success": False,
-                        "message": f"Nenhum elemento encontrado nas coordenadas ({int(x)}, {int(y)}).",
+                        "message": (
+                            f"Nenhum elemento encontrado nas coordenadas ({int(x)}, {int(y)}) via AT-SPI. "
+                            f"Use diretamente 'mouse_click(x={x}, y={y}, is_relative=false)' no ponto visual observado."
+                        ),
                     }
                 return {
                     "success": True,
@@ -2186,6 +2844,42 @@ class GeminiLiveClient:
                     "message": res.get("summary", "Falha na pesquisa profunda."),
                 }
 
+            elif name == "smart_home_control":
+                from ..core.home_assistant import HomeAssistantManager
+                ha = HomeAssistantManager.get_default()
+                dev_type = str(args.get("device_type") or "").strip().lower()
+                action = str(args.get("action") or "turn_on").strip().lower()
+                entity = str(args.get("entity") or "").strip()
+
+                is_light = dev_type == "light" or any(w in entity.lower() for w in ("luz", "lampada", "lâmpada", "iluminação", "avant", "led"))
+                is_climate = dev_type == "climate" or any(w in entity.lower() for w in ("ar", "clima", "temperatura", "ar condicionado"))
+
+                if is_light or (not dev_type and not is_climate):
+                    return ha.control_light(
+                        entity=entity,
+                        action=action,
+                        brightness=args.get("brightness"),
+                        color_temp=args.get("color_temp"),
+                        color=args.get("color"),
+                    )
+                elif is_climate:
+                    return ha.control_climate(
+                        entity=entity,
+                        action=action,
+                        temperature=args.get("temperature"),
+                        hvac_mode=args.get("hvac_mode"),
+                    )
+                else:
+                    return ha.control_switch(entity=entity, action=action)
+
+            elif name == "smart_home_status":
+                from ..core.home_assistant import HomeAssistantManager
+                ha = HomeAssistantManager.get_default()
+                query = str(args.get("query") or "").strip()
+                dev_type = args.get("device_type")
+                domain = None if dev_type in (None, "all", "") else dev_type
+                return ha.get_status(entity_or_query=query, domain=domain)
+
             if name == "end_session":
                 return self._tool_end_session(args)
 
@@ -2257,6 +2951,47 @@ class GeminiLiveClient:
                 ]
             }
         ]
+
+    def _build_setup_payload(
+        self,
+        model_name: str,
+        voice_name: str,
+        system_prompt_text: str,
+    ) -> dict[str, Any]:
+        """Constrói o payload BidiGenerateContentSetup enviado na inicialização da sessão WebSocket.
+
+        Suporta Gemini 3.8 Live e Gemini 3.8 Live Extended Thinking (incluindo
+        thinkingConfig para raciocínio contínuo e narração assíncrona de progresso).
+        """
+        generation_config: dict[str, Any] = {
+            "responseModalities": ["AUDIO"],
+            "speechConfig": {
+                "voiceConfig": {
+                    "prebuiltVoiceConfig": {
+                        "voiceName": voice_name,
+                    }
+                }
+            },
+        }
+        if "extended-thinking" in model_name:
+            generation_config["thinkingConfig"] = {
+                "thinkingBudget": 2048,
+            }
+
+        return {
+            "setup": {
+                "model": model_name,
+                "generationConfig": generation_config,
+                "systemInstruction": {
+                    "parts": [
+                        {
+                            "text": system_prompt_text,
+                        }
+                    ]
+                },
+                "tools": self._live_tools_payload(),
+            }
+        }
 
     def _tool_end_session(self, args: dict[str, Any]) -> dict[str, Any]:
         """Encerra a sessão (standby) ou o aplicativo (quit) a pedido do agente.
@@ -2399,6 +3134,26 @@ class GeminiLiveClient:
             self.video_mode = mode
             logger.info(f"Modo de captura de vídeo alterado para: {mode}")
 
+    def set_voice(self, voice_name: str) -> None:
+        """Altera a voz do assistente para a sessão ativa e salva nas configurações."""
+        if not voice_name:
+            return
+        self.config.gemini_live_voice = voice_name
+        try:
+            self.config.save()
+        except Exception as e:
+            logger.warning("Falha ao persistir gemini_live_voice: %s", e)
+
+    def set_model(self, model_name: str) -> None:
+        """Altera o modelo de voz ao vivo e salva nas configurações."""
+        if not model_name:
+            return
+        self.config.gemini_live_model = model_name
+        try:
+            self.config.save()
+        except Exception as e:
+            logger.warning("Falha ao persistir gemini_live_model: %s", e)
+
     def panic_stop_video(self) -> bool:
         """Interrompe imediatamente o streaming de vídeo da tela (Panic Button)."""
         logger.warning("Panic Button acionado: Interrompendo transmissão de tela imediatamente.")
@@ -2521,8 +3276,17 @@ class GeminiLiveClient:
                             self._ws.send(json.dumps(restore_ctx)), self._loop
                         )
 
-                    # 4. Captura com enquadramento (Crop na janela ativa ou tela inteira)
-                    crop_rect = rect if (self.video_mode == "active_window" and rect) else None
+                    # 4. Captura com enquadramento (Crop na janela ativa ou no monitor autorizado ativo)
+                    if self.video_mode == "active_window" and rect:
+                        crop_rect = rect
+                    elif getattr(self, "fence", None):
+                        active_m = self.fence.get_active_monitor()
+                        crop_rect = (active_m.x, active_m.y, active_m.width, active_m.height) if active_m else None
+                    else:
+                        crop_rect = None
+
+                    self._last_streamed_crop_rect = crop_rect
+                    self._last_streamed_window_info = (app_name, win_title)
                     ok, img_bytes, _ = ScreenCaptureService.capture(
                         interactive=False, max_size=1024, quality=75, crop_rect=crop_rect
                     )

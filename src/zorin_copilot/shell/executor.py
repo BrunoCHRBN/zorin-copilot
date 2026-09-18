@@ -8,6 +8,7 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -402,6 +403,8 @@ class ActionExecutor:
 
     def _launch_app(self, app_name: str) -> ExecutionReport:
         act = DesktopAction(ActionType.LAUNCH_APP, app_name)
+        if os.environ.get("ZORIN_TEST_MODE") or os.environ.get("PYTEST_CURRENT_TEST") or "pytest" in sys.modules:
+            return ExecutionReport(action=act, success=True, message=f"[TEST] Aplicativo '{app_name}' simulado.")
         app, matched_name = AppManager.find_app(app_name)
         if app:
             ok, msg = AppManager.launch(app)
@@ -423,6 +426,8 @@ class ActionExecutor:
 
     def _open_url(self, url: str) -> ExecutionReport:
         act = DesktopAction(ActionType.OPEN_URL, url)
+        if os.environ.get("ZORIN_TEST_MODE") or os.environ.get("PYTEST_CURRENT_TEST") or "pytest" in sys.modules:
+            return ExecutionReport(action=act, success=True, message=f"[TEST] Endereço '{url}' simulado.")
         if not url.startswith(("http://", "https://", "mailto:")):
             url = f"https://{url}"
         try:

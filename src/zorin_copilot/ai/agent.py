@@ -30,6 +30,7 @@ STOP_DONE = "done"
 STOP_MAX_STEPS = "max_steps"
 STOP_TIMEOUT = "timeout"
 STOP_REPEATED = "repeated_failure"
+STOP_LOOP = "loop_detected"
 STOP_ABORTED = "aborted"
 STOP_REJECTED = "rejected"
 STOP_ERROR = "error"
@@ -40,6 +41,7 @@ STOP_MESSAGES = {
     STOP_MAX_STEPS: "Limite de passos atingido.",
     STOP_TIMEOUT: "Tempo limite atingido.",
     STOP_REPEATED: "A mesma ação falhou repetidas vezes.",
+    STOP_LOOP: "Loop repetitivo de ações detectado (interrompido por segurança).",
     STOP_ABORTED: "Execução interrompida pelo usuário.",
     STOP_REJECTED: "Ação recusada pela política de risco/aprovação.",
     STOP_ERROR: "Falha irrecuperável do planejador.",
@@ -408,6 +410,12 @@ class AgentLoop:
                 repeated = self._repeated_failure(steps)
                 if repeated:
                     return self._finish(steps, objective, STOP_REPEATED, started, dry_run, error=repeated)
+
+                # Loop repetitivo de ações (mesma ferramenta ou alternância em ciclo)
+                if getattr(self.planner, "name", "") != "scripted":
+                    loop_msg = self._detected_loop(steps)
+                    if loop_msg:
+                        return self._finish(steps, objective, STOP_LOOP, started, dry_run, error=loop_msg)
         finally:
             self._running = False
 
@@ -530,6 +538,33 @@ class AgentLoop:
             return ""
         step = tail[-1]
         return f"'{step.tool}' falhou {self.max_repeats}x seguidas com os mesmos argumentos: {step.error}"
+
+    def _detected_loop(self, steps: list[Step]) -> str:
+        """Detecta ciclos de ações idênticas ou oscilantes para evitar travamentos em loop."""
+        if len(steps) < 4:
+            return ""
+
+        # 1. Quatro chamadas consecutivas idênticas (mesma ferramenta e mesmos argumentos)
+        tail4 = steps[-4:]
+        first_sig = (tail4[0].tool, json.dumps(tail4[0].args, sort_keys=True, default=str))
+        if all((s.tool, json.dumps(s.args, sort_keys=True, default=str)) == first_sig for s in tail4):
+            return f"Loop detectado: '{tail4[0].tool}' executou 4 vezes consecutivas com os mesmos argumentos."
+
+        # 2. Ciclo de 2 passos repetido 3 vezes consecutivas (A -> B -> A -> B -> A -> B)
+        if len(steps) >= 6:
+            tail6 = steps[-6:]
+            sig_a = (tail6[0].tool, json.dumps(tail6[0].args, sort_keys=True, default=str))
+            sig_b = (tail6[1].tool, json.dumps(tail6[1].args, sort_keys=True, default=str))
+            if (
+                sig_a != sig_b
+                and (tail6[2].tool, json.dumps(tail6[2].args, sort_keys=True, default=str)) == sig_a
+                and (tail6[3].tool, json.dumps(tail6[3].args, sort_keys=True, default=str)) == sig_b
+                and (tail6[4].tool, json.dumps(tail6[4].args, sort_keys=True, default=str)) == sig_a
+                and (tail6[5].tool, json.dumps(tail6[5].args, sort_keys=True, default=str)) == sig_b
+            ):
+                return f"Loop cíclico detectado: alternância repetitiva entre '{sig_a[0]}' e '{sig_b[0]}'."
+
+        return ""
 
     def _audit(self, objective: str, step: Step) -> None:
         """Registra o passo na auditoria. Best-effort: memória indisponível não para o loop."""
