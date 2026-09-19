@@ -124,63 +124,63 @@ class LiveVoiceWidget(Gtk.Box):
     # Construção
     # ------------------------------------------------------------------
     def _build_ui(self) -> None:
-        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
-        card.add_css_class("card")
-        card.add_css_class("glass-card")
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        card.add_css_class("live-session-card")
         card.set_margin_top(4)
         card.set_margin_bottom(4)
         card.set_margin_start(8)
         card.set_margin_end(8)
 
         card.append(self._build_header())
-        card.append(self._build_visualizer())
+
+        # Palco Acústico (moldura suave com fundo rebaixado para as ondas)
+        self.stage_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.stage_box.add_css_class("acoustic-stage")
+        self.stage_box.append(self._build_visualizer())
+        card.append(self.stage_box)
+
+        # Legendas Dinâmicas em Tempo Real (Live Captions)
+        card.append(self._build_live_caption())
+
+        # Registro rolável de histórico e ferramentas executadas
         card.append(self._build_session_log())
 
-        # Subtítulo com instrução e atalhos
-        self.subtitle_lbl = Gtk.Label(
-            label="Diga algo ou compartilhe sua tela. Pressione Esc para parar vídeo ou sair.",
-            xalign=0.5,
-        )
-        self.subtitle_lbl.add_css_class("caption")
-        self.subtitle_lbl.add_css_class("dim-label")
-        self.subtitle_lbl.set_wrap(True)
-        self.subtitle_lbl.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
-        self.subtitle_lbl.set_margin_start(20)
-        self.subtitle_lbl.set_margin_end(20)
-        self.subtitle_lbl.set_margin_top(4)
-        self.subtitle_lbl.set_margin_bottom(8)
-        card.append(self.subtitle_lbl)
-
+        # Dock Unificada de Controles de Chamada
         card.append(self._build_controls())
         self.append(card)
 
     def _build_header(self) -> Gtk.Box:
         header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        header_box.set_margin_top(14)
-        header_box.set_margin_start(16)
-        header_box.set_margin_end(16)
+        header_box.set_margin_top(6)
+        header_box.set_margin_bottom(4)
+        header_box.set_margin_start(6)
+        header_box.set_margin_end(6)
 
         self.status_dot = Gtk.Label(label="●", use_markup=True)
         self.status_dot.add_css_class("status-dot")
         header_box.append(self.status_dot)
 
         self.status_lbl = Gtk.Label(
-            label="<b>Zorin Copilot Live</b> • Conectando...", use_markup=True, xalign=0
+            label="<b>Zorin Copilot Live</b>", use_markup=True, xalign=0
         )
         self.status_lbl.set_hexpand(True)
         header_box.append(self.status_lbl)
 
-        # Cronômetro da chamada (só visível enquanto conectado)
-        self.timer_lbl = Gtk.Label(label="00:00", xalign=0)
-        self.timer_lbl.add_css_class("caption")
-        self.timer_lbl.add_css_class("dim-label")
+        # Badge com cronômetro tabular da chamada
+        self.badge_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
+        self.badge_box.add_css_class("live-status-badge")
+        self.badge_dot = Gtk.Label(label="●", use_markup=True)
+        self.badge_dot.set_markup("<span foreground='#3584e4'>●</span>")
+        self.badge_box.append(self.badge_dot)
+
+        self.timer_lbl = Gtk.Label(label="Ao Vivo · 00:00", xalign=0)
         self.timer_lbl.add_css_class("tabular-nums")
-        self.timer_lbl.add_css_class("timer-label")
-        self.timer_lbl.set_visible(False)
-        header_box.append(self.timer_lbl)
+        self.badge_box.append(self.timer_lbl)
+        self.badge_box.set_visible(False)
+        header_box.append(self.badge_box)
 
         self.video_badge = Gtk.Label(
-            label="<span foreground='#e01b24'><b>● TELA AO VIVO (1 FPS)</b></span>", use_markup=True
+            label="<span foreground='#2ec27e'><b>● TELA (1 FPS)</b></span>", use_markup=True
         )
         self.video_badge.add_css_class("caption")
         self.video_badge.set_visible(False)
@@ -202,7 +202,7 @@ class LiveVoiceWidget(Gtk.Box):
         header_box.append(self.style_btn)
 
         close_btn = Gtk.Button.new_from_icon_name("window-close-symbolic")
-        close_btn.set_tooltip_text("Encerrar conversa de voz")
+        close_btn.set_tooltip_text("Encerrar conversa de voz (Esc)")
         close_btn.add_css_class("flat")
         close_btn.add_css_class("circular")
         close_btn.connect("clicked", lambda _: self._on_end_call())
@@ -212,11 +212,11 @@ class LiveVoiceWidget(Gtk.Box):
     def _build_visualizer(self) -> Gtk.DrawingArea:
         self.drawing_area = Gtk.DrawingArea()
         self.drawing_area.set_content_width(280)
-        self.drawing_area.set_content_height(105)
+        self.drawing_area.set_content_height(85)
         self.drawing_area.set_draw_func(self._draw_audio_visualizer)
         self.drawing_area.add_css_class("audio-visualizer-area")
         self.drawing_area.set_focusable(True)
-        self.drawing_area.set_tooltip_text(f"Visualizador: {self._get_style_label()} (clique ou pressione Enter para alternar)")
+        self.drawing_area.set_tooltip_text(f"Visualizador: {self._get_style_label()} (clique ou Enter para alternar)")
 
         # Alternar estilo por clique na área
         click_gesture = Gtk.GestureClick.new()
@@ -243,14 +243,40 @@ class LiveVoiceWidget(Gtk.Box):
 
         return self.drawing_area
 
+    def _build_live_caption(self) -> Gtk.Box:
+        """Constrói a área de legendas dinâmicas em tempo real (Live Captions)."""
+        self.caption_container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        self.caption_container.add_css_class("live-caption-container")
+        self.caption_container.set_margin_start(4)
+        self.caption_container.set_margin_end(4)
+
+        self.caption_speaker_lbl = Gtk.Label(label="COPILOT", xalign=0)
+        self.caption_speaker_lbl.add_css_class("live-speaker-badge")
+        self.caption_container.append(self.caption_speaker_lbl)
+
+        self.caption_text_lbl = Gtk.Label(
+            label="Fale naturalmente com o assistente... ouvindo você.",
+            xalign=0,
+        )
+        self.caption_text_lbl.add_css_class("live-caption-text")
+        self.caption_text_lbl.set_wrap(True)
+        self.caption_text_lbl.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        self.caption_text_lbl.set_selectable(True)
+        self.caption_container.append(self.caption_text_lbl)
+
+        # Alias de compatibilidade obrigatório (testes e métodos legados acessam subtitle_lbl)
+        self.subtitle_lbl = self.caption_text_lbl
+
+        return self.caption_container
+
     def _build_session_log(self) -> Gtk.ScrolledWindow:
         """Área rolável que acumula ações executadas e a transcrição da chamada."""
         self.log_scrolled = Gtk.ScrolledWindow()
         self.log_scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        self.log_scrolled.set_min_content_height(90)
+        self.log_scrolled.set_min_content_height(70)
         self.log_scrolled.set_max_content_height(LOG_MAX_HEIGHT)
-        self.log_scrolled.set_margin_start(12)
-        self.log_scrolled.set_margin_end(12)
+        self.log_scrolled.set_margin_start(6)
+        self.log_scrolled.set_margin_end(6)
         self.log_scrolled.set_propagate_natural_height(True)
         self.log_scrolled.set_visible(False)
 
@@ -259,86 +285,92 @@ class LiveVoiceWidget(Gtk.Box):
         return self.log_scrolled
 
     def _build_controls(self) -> Gtk.Box:
-        controls_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        controls_box.set_halign(Gtk.Align.CENTER)
-        controls_box.set_margin_bottom(14)
+        """Constrói a dock unificada de controles de chamada (Call Control Dock)."""
+        dock = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        dock.add_css_class("call-control-dock")
+        dock.set_halign(Gtk.Align.CENTER)
+        dock.set_margin_top(4)
+        dock.set_margin_bottom(4)
 
         # Botão Mudo
         self.mute_btn = Gtk.Button()
-        self.mute_btn.add_css_class("pill")
-        self.mute_btn.add_css_class("glass-pill")
-        self.mute_btn.set_tooltip_text("Mutar / Desmutar microfone")
+        self.mute_btn.add_css_class("call-control-btn")
+        self.mute_btn.add_css_class("flat")
+        self.mute_btn.set_tooltip_text("Mutar / Desmutar microfone (Espaço)")
         self.mute_btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         self.mute_icon = Gtk.Image.new_from_icon_name("audio-input-microphone-symbolic")
         self.mute_icon.set_pixel_size(14)
         self.mute_lbl = Gtk.Label(label="Mutar")
-        self.mute_lbl.add_css_class("caption")
         self.mute_btn_box.append(self.mute_icon)
         self.mute_btn_box.append(self.mute_lbl)
         self.mute_btn.set_child(self.mute_btn_box)
         self.mute_btn.connect("clicked", self._on_toggle_mute)
-        controls_box.append(self.mute_btn)
+        dock.append(self.mute_btn)
 
-        # Botão Live Video (streaming contínuo de tela com consentimento)
+        # Botão Live Video
         self.video_btn = Gtk.Button()
-        self.video_btn.add_css_class("pill")
-        self.video_btn.add_css_class("glass-pill")
-        self.video_btn.set_tooltip_text(
-            "Transmitir tela ao vivo continuamente (1 FPS) para o Copilot visualizar suas janelas "
-            "enquanto conversam"
-        )
+        self.video_btn.add_css_class("call-control-btn")
+        self.video_btn.add_css_class("flat")
+        self.video_btn.set_tooltip_text("Transmitir tela ao vivo continuamente (Alt+V)")
         video_btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         self.video_icon = Gtk.Image.new_from_icon_name("video-display-symbolic")
         self.video_icon.set_pixel_size(14)
         self.video_lbl = Gtk.Label(label="Transmitir Tela")
-        self.video_lbl.add_css_class("caption")
         video_btn_box.append(self.video_icon)
         video_btn_box.append(self.video_lbl)
         self.video_btn.set_child(video_btn_box)
         self.video_btn.connect("clicked", self._on_toggle_video)
-        controls_box.append(self.video_btn)
+        dock.append(self.video_btn)
 
-        # Botão Seletor de Modo de Transmissão (Janela Ativa / Tela Inteira)
+        # Botão Modo Janela/Tela
         self.mode_btn = Gtk.Button()
-        self.mode_btn.add_css_class("pill")
-        self.mode_btn.add_css_class("glass-pill")
-        self.mode_btn.set_tooltip_text("Alternar modo de transmissão: Janela Ativa ou Tela Inteira")
+        self.mode_btn.add_css_class("call-control-btn")
+        self.mode_btn.add_css_class("flat")
+        self.mode_btn.set_tooltip_text("Alternar: Janela Ativa ou Tela Inteira")
         mode_btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         self.mode_icon = Gtk.Image.new_from_icon_name("window-restore-symbolic")
         self.mode_icon.set_pixel_size(14)
         self.mode_lbl = Gtk.Label(label="Janela")
-        self.mode_lbl.add_css_class("caption")
         mode_btn_box.append(self.mode_icon)
         mode_btn_box.append(self.mode_lbl)
         self.mode_btn.set_child(mode_btn_box)
         self.mode_btn.connect("clicked", self._on_toggle_mode)
-        controls_box.append(self.mode_btn)
+        dock.append(self.mode_btn)
 
-        # Botão Enviar Snapshot da Tela (foto única)
+        # Botão Snapshot
         self.screen_btn = Gtk.Button()
-        self.screen_btn.add_css_class("pill")
-        self.screen_btn.add_css_class("glass-pill")
-        self.screen_btn.set_tooltip_text(
-            "Captura uma imagem instantânea da tela atual e envia para a IA"
-        )
+        self.screen_btn.add_css_class("call-control-btn")
+        self.screen_btn.add_css_class("flat")
+        self.screen_btn.set_tooltip_text("Capturar e enviar imagem da tela (Alt+S)")
         screen_btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         screen_icon = Gtk.Image.new_from_icon_name("camera-photo-symbolic")
         screen_icon.set_pixel_size(14)
         screen_lbl = Gtk.Label(label="Snapshot")
-        screen_lbl.add_css_class("caption")
         screen_btn_box.append(screen_icon)
         screen_btn_box.append(screen_lbl)
         self.screen_btn.set_child(screen_btn_box)
         self.screen_btn.connect("clicked", self._on_send_screen)
-        controls_box.append(self.screen_btn)
+        dock.append(self.screen_btn)
 
         # Botão Encerrar
-        end_btn = Gtk.Button(label="Encerrar")
+        end_btn = Gtk.Button()
         end_btn.add_css_class("destructive-action")
-        end_btn.add_css_class("pill")
+        end_btn.add_css_class("call-end-btn")
+        end_btn.set_tooltip_text("Encerrar chamada de voz (Esc)")
+        end_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        end_icon = Gtk.Image.new_from_icon_name("call-stop-symbolic")
+        end_icon.set_pixel_size(14)
+        end_lbl = Gtk.Label(label="Encerrar")
+        end_box.append(end_icon)
+        end_box.append(end_lbl)
+        end_btn.set_child(end_box)
         end_btn.connect("clicked", lambda _: self._on_end_call())
-        controls_box.append(end_btn)
-        return controls_box
+        dock.append(end_btn)
+
+        wrapper = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        wrapper.set_halign(Gtk.Align.CENTER)
+        wrapper.append(dock)
+        return wrapper
 
     # ------------------------------------------------------------------
     # Registro da sessão
@@ -412,31 +444,48 @@ class LiveVoiceWidget(Gtk.Box):
             self.status_dot.set_markup("<span foreground='#e5a50a'>●</span>")
             self.status_lbl.set_markup("<b>Zorin Copilot Live</b> • Conectando...")
             model_label = live_model_label(getattr(self.live_client.config, "gemini_live_model", ""))
+            self.caption_speaker_lbl.set_text("SISTEMA")
             self.subtitle_lbl.set_text(f"Estabelecendo conexão segura com {model_label} Live...")
+            self.badge_box.set_visible(True)
+            self.badge_dot.set_markup("<span foreground='#e5a50a'>●</span>")
+            self.timer_lbl.set_text("Conectando...")
             self._start_timer()
         elif state == LiveVoiceState.LISTENING:
             self.status_dot.set_markup("<span foreground='#3584e4'>●</span>")
             self.status_lbl.set_markup("<b>Zorin Copilot Live</b> • Ouvindo você")
-            self.subtitle_lbl.set_text("Fale naturalmente... o Copilot está ouvindo.")
+            self.badge_box.set_visible(True)
+            self.badge_dot.set_markup("<span foreground='#3584e4'>●</span>")
             self._start_timer()
         elif state == LiveVoiceState.SPEAKING:
-            self.status_dot.set_markup("<span foreground='#9141ac'>●</span>")
+            self.status_dot.set_markup("<span foreground='#7856ff'>●</span>")
             self.status_lbl.set_markup("<b>Zorin Copilot Live</b> • Falando...")
+            self.badge_box.set_visible(True)
+            self.badge_dot.set_markup("<span foreground='#7856ff'>●</span>")
         elif state == LiveVoiceState.EXECUTING:
             self.status_dot.set_markup("<span foreground='#2ec27e'>●</span>")
             self.status_lbl.set_markup("<b>Zorin Copilot Live</b> • Executando no desktop...")
+            self.badge_box.set_visible(True)
+            self.badge_dot.set_markup("<span foreground='#2ec27e'>●</span>")
         elif state == LiveVoiceState.THINKING:
             self.status_dot.set_markup("<span foreground='#e5a50a'>●</span>")
             self.status_lbl.set_markup("<b>Zorin Copilot Live</b> • Processando...")
+            self.caption_speaker_lbl.set_text("PROCESSANDO")
             self.subtitle_lbl.set_text(msg or "Processando resposta...")
+            self.badge_box.set_visible(True)
+            self.badge_dot.set_markup("<span foreground='#e5a50a'>●</span>")
         elif state == LiveVoiceState.ERROR:
             self.status_dot.set_markup("<span foreground='#e01b24'>●</span>")
             self.status_lbl.set_markup("<b>Zorin Copilot Live</b> • Erro")
+            self.caption_speaker_lbl.set_text("ERRO")
             self.subtitle_lbl.set_text(msg or "Erro de conexão de voz.")
+            self.badge_box.set_visible(True)
+            self.badge_dot.set_markup("<span foreground='#e01b24'>●</span>")
+            self.timer_lbl.set_text("Falha")
             self._stop_timer()
         elif state == LiveVoiceState.DISCONNECTED:
             self.status_dot.set_markup("<span foreground='#77767b'>○</span>")
             self.status_lbl.set_markup("<b>Zorin Copilot Live</b> • Desconectado")
+            self.badge_box.set_visible(False)
             self._stop_timer()
         self.drawing_area.queue_draw()
         return GLib.SOURCE_REMOVE
@@ -486,7 +535,7 @@ class LiveVoiceWidget(Gtk.Box):
         return "emblem-ok-symbolic" if "ok" in name else "utilities-terminal-symbolic"
 
     def _ui_on_transcript(self, role: str, text: str) -> bool:
-        """Acumula a transcrição em vez de substituir a fala anterior."""
+        """Atualiza a legenda ativa em tempo real e acumula no log de histórico."""
         clean = text.strip()
         if not clean:
             return GLib.SOURCE_REMOVE
@@ -494,20 +543,24 @@ class LiveVoiceWidget(Gtk.Box):
         role_low = (role or "").lower()
         if role_low in ("user", "você", "voce"):
             display_role = "Você"
+            speaker_badge_text = "VOCÊ"
             icon = TRANSCRIPT_ROLE_ICONS["user"]
         else:
             display_role = "Copilot"
+            speaker_badge_text = "COPILOT"
             icon = TRANSCRIPT_ROLE_ICONS["assistant"]
+
+        self.caption_speaker_lbl.set_text(speaker_badge_text)
+        self.caption_text_lbl.set_text(clean)
 
         self._append_log_row(
             icon,
             f"<b>{display_role}:</b> {clean}  <span alpha='60%'>{self._timestamp()}</span>",
         )
-        # Mantém a última fala visível também no subtítulo (contexto imediato)
-        self.subtitle_lbl.set_text(clean)
         return GLib.SOURCE_REMOVE
 
     def _ui_on_error(self, err: str) -> bool:
+        self.caption_speaker_lbl.set_text("ERRO")
         self.subtitle_lbl.set_text(err)
         self._append_log_row("dialog-warning-symbolic", f"<b>Erro:</b> {err}")
         return GLib.SOURCE_REMOVE
@@ -535,7 +588,7 @@ class LiveVoiceWidget(Gtk.Box):
 
         self._elapsed_sec += 1
         minutes, seconds = divmod(self._elapsed_sec, 60)
-        self.timer_lbl.set_text(f"{minutes:02d}:{seconds:02d}")
+        self.timer_lbl.set_text(f"Ao Vivo · {minutes:02d}:{seconds:02d}")
         return GLib.SOURCE_CONTINUE
 
     @property
@@ -595,19 +648,19 @@ class LiveVoiceWidget(Gtk.Box):
             )
             lvl = max(0.25, min(0.95, speech_cadence))
 
-        # Cores contextuais com base no estado da conversação
+        # Cores contextuais com base no estado da conversação (Paleta sóbria Zorin/GNOME)
         if st == LiveVoiceState.SPEAKING:
-            r, g, b = (0.64, 0.35, 0.94)  # Roxo vibrante (IA falando)
+            r, g, b = (0.47, 0.34, 1.0)  # Roxo Zorin/GNOME (IA falando)
         elif st == LiveVoiceState.EXECUTING:
-            r, g, b = (0.18, 0.76, 0.49)  # Verde esmeralda (Ação do sistema)
+            r, g, b = (0.18, 0.76, 0.49)  # Verde esmeralda (Executando ferramenta)
         elif st == LiveVoiceState.THINKING:
-            r, g, b = (0.96, 0.76, 0.07)  # Dourado/Âmbar (Pensando/Processando)
+            r, g, b = (0.90, 0.65, 0.05)  # Âmbar/Dourado (Processando)
             if lvl < 0.2:
                 lvl = max(lvl, 0.22 + 0.10 * math.sin(t * 4.5))
         elif self.live_client.is_muted():
-            r, g, b = (0.95, 0.65, 0.12)  # Âmbar (Mudo)
+            r, g, b = (0.50, 0.50, 0.52)  # Cinza neutro sóbrio (Mudo)
         else:
-            r, g, b = (0.21, 0.52, 0.89)  # Azul celeste Zorin (Escutando usuário)
+            r, g, b = (0.11, 0.44, 0.85)  # Azul Zorin #1c71d8 (Ouvindo usuário)
 
         if self.visualizer_style == "waves":
             self._draw_style_waves(cr, width, height, cx, cy, t, lvl, r, g, b)
@@ -622,61 +675,71 @@ class LiveVoiceWidget(Gtk.Box):
         self, cr: Any, width: int, height: int, cx: float, cy: float,
         t: float, lvl: float, r: float, g: float, b: float
     ) -> None:
-        """Desenha ondas fluidas senoidais multicamadas inspiradas em fitas harmônicas."""
-        num_layers = 16
+        """Desenha ondas fluidas senoidais multicamadas com precisão acústica e atenuação suave."""
+        num_layers = 7
         pad_x = 16.0
         eff_w = max(10.0, width - 2.0 * pad_x)
 
-        base_amp = 4.5 + math.sin(t * 1.8) * 1.5
-        voice_amp = lvl * (height * 0.42)
+        # Repouso acústico: linha tênue central com leve respiração quando não há voz ativa
+        if lvl < 0.04:
+            cr.save()
+            cr.set_line_width(1.0)
+            cr.set_source_rgba(r, g, b, 0.25 + 0.10 * math.sin(t * 2.0))
+            cr.move_to(pad_x, cy)
+            cr.line_to(pad_x + eff_w, cy)
+            cr.stroke()
+            cr.restore()
+            return
+
+        base_amp = 3.0 + math.sin(t * 1.6) * 1.2
+        voice_amp = lvl * (height * 0.40)
         total_amp = base_amp + voice_amp
 
-        # Brilho de fundo sutil (aurora difusa)
-        if lvl > 0.05:
-            cr.save()
-            cr.new_sub_path()
-            cr.move_to(pad_x, cy)
-            for step_i in range(0, int(eff_w) + 1, 6):
-                x = pad_x + step_i
-                norm_x = step_i / eff_w
-                env = (math.sin(math.pi * norm_x)) ** 1.8
-                y = cy + env * total_amp * 0.7 * math.sin(2.4 * math.pi * norm_x + t * 2.5)
-                cr.line_to(x, y)
-            for step_i in range(int(eff_w), -1, -6):
-                x = pad_x + step_i
-                norm_x = step_i / eff_w
-                env = (math.sin(math.pi * norm_x)) ** 1.8
-                y = cy - env * total_amp * 0.7 * math.sin(2.4 * math.pi * norm_x + t * 2.5)
-                cr.line_to(x, y)
-            cr.close_path()
-            cr.set_source_rgba(r, g, b, 0.08 * lvl)
-            cr.fill()
-            cr.restore()
+        # Preenchimento translúcido sob a crista central (gradiente sutil de energia)
+        cr.save()
+        cr.new_sub_path()
+        cr.move_to(pad_x, cy)
+        step_px = 4
+        for step_i in range(0, int(eff_w) + 1, step_px):
+            x = pad_x + step_i
+            norm_x = step_i / eff_w
+            env = (math.sin(math.pi * norm_x)) ** 2.0
+            y = cy + env * total_amp * 0.65 * math.sin(2.4 * math.pi * norm_x + t * 2.5)
+            cr.line_to(x, y)
+        for step_i in range(int(eff_w), -1, -step_px):
+            x = pad_x + step_i
+            norm_x = step_i / eff_w
+            env = (math.sin(math.pi * norm_x)) ** 2.0
+            y = cy - env * total_amp * 0.65 * math.sin(2.4 * math.pi * norm_x + t * 2.5)
+            cr.line_to(x, y)
+        cr.close_path()
+        cr.set_source_rgba(r, g, b, 0.07 * min(1.0, lvl * 1.5))
+        cr.fill()
+        cr.restore()
 
-        # Renderização do feixe de fitas vetoriais
+        # Renderização das harmônicas vetoriais
         cr.save()
         for k in range(num_layers):
-            norm_k = (k - (num_layers - 1) / 2.0) / ((num_layers - 1) / 2.0)
-            phase = t * (2.2 + 0.3 * (k % 3)) + norm_k * 0.55
-            layer_amp = total_amp * (1.0 - 0.22 * abs(norm_k))
+            norm_k = (k - (num_layers - 1) / 2.0) / max(1.0, (num_layers - 1) / 2.0)
+            phase = t * (2.2 + 0.25 * (k % 3)) + norm_k * 0.6
+            layer_amp = total_amp * (1.0 - 0.25 * abs(norm_k))
 
-            alpha = max(0.12, (1.0 - abs(norm_k) * 0.65) * (0.35 + 0.65 * (0.3 + 0.7 * lvl)))
-            cr.set_line_width(1.1 + 0.4 * (1.0 - abs(norm_k)))
+            alpha = max(0.18, (1.0 - abs(norm_k) * 0.55) * (0.35 + 0.65 * (0.25 + 0.75 * lvl)))
+            cr.set_line_width(1.0 + 0.5 * (1.0 - abs(norm_k)))
             cr.set_source_rgba(
-                min(1.0, r + 0.15 * (1.0 - abs(norm_k))),
-                min(1.0, g + 0.15 * (1.0 - abs(norm_k))),
-                min(1.0, b + 0.15 * (1.0 - abs(norm_k))),
+                min(1.0, r + 0.10 * (1.0 - abs(norm_k))),
+                min(1.0, g + 0.10 * (1.0 - abs(norm_k))),
+                min(1.0, b + 0.10 * (1.0 - abs(norm_k))),
                 alpha,
             )
 
             cr.move_to(pad_x, cy)
-            step_px = 3
             for step_i in range(0, int(eff_w) + 1, step_px):
                 x = pad_x + step_i
                 norm_x = step_i / eff_w
-                env = (math.sin(math.pi * norm_x)) ** 1.6
-                w1 = 0.72 * math.sin(2.5 * math.pi * norm_x + phase)
-                w2 = 0.28 * math.sin(5.0 * math.pi * norm_x - phase * 0.85 + norm_k * 0.7)
+                env = (math.sin(math.pi * norm_x)) ** 2.0
+                w1 = 0.75 * math.sin(2.4 * math.pi * norm_x + phase)
+                w2 = 0.25 * math.sin(4.8 * math.pi * norm_x - phase * 0.8 + norm_k * 0.5)
                 y = cy + env * layer_amp * (w1 + w2)
                 cr.line_to(x, y)
 
@@ -822,11 +885,15 @@ class LiveVoiceWidget(Gtk.Box):
         if is_muted:
             self.mute_icon.set_from_icon_name("audio-input-microphone-muted-symbolic")
             self.mute_lbl.set_text("Desmutar")
-            self.mute_btn.add_css_class("destructive-action")
+            self.mute_btn.add_css_class("active-warning")
+            self.caption_speaker_lbl.set_text("MICROFONE MUTADO")
+            self.subtitle_lbl.set_text("Microfone em silêncio. Clique ou pressione Espaço para reativar.")
         else:
             self.mute_icon.set_from_icon_name("audio-input-microphone-symbolic")
             self.mute_lbl.set_text("Mutar")
-            self.mute_btn.remove_css_class("destructive-action")
+            self.mute_btn.remove_css_class("active-warning")
+            self.caption_speaker_lbl.set_text("COPILOT")
+            self.subtitle_lbl.set_text("Ouvindo você... fale naturalmente.")
 
     def _on_toggle_video(self, _btn: Gtk.Button) -> None:
         is_active = self.live_client.toggle_video_stream(fps=1.0)
@@ -842,7 +909,7 @@ class LiveVoiceWidget(Gtk.Box):
 
         if is_active:
             self.video_lbl.set_text("Pausar Tela")
-            self.video_btn.add_css_class("suggested-action")
+            self.video_btn.add_css_class("active-info")
             self.video_badge.set_markup(
                 f"<span foreground='#2ec27e'><b>● TELA AO VIVO ({mon_name})</b></span>"
             )
@@ -853,7 +920,7 @@ class LiveVoiceWidget(Gtk.Box):
             )
         else:
             self.video_lbl.set_text("Transmitir Tela")
-            self.video_btn.remove_css_class("suggested-action")
+            self.video_btn.remove_css_class("active-info")
             self.video_badge.set_visible(False)
             self.subtitle_lbl.set_text("Fale naturalmente com o assistente...")
         return False
@@ -882,7 +949,7 @@ class LiveVoiceWidget(Gtk.Box):
                 if hasattr(self, "mode_btn"):
                     self.mode_btn.set_tooltip_text("Modo Tela Inteira ativo. Clique para alternar para Janela Ativa.")
 
-    def _on_key_pressed(self, _ctrl: Gtk.EventControllerKey, keyval: int, _keycode: int, _state: Gdk.ModifierType) -> bool:
+    def _on_key_pressed(self, _ctrl: Gtk.EventControllerKey, keyval: int, _keycode: int, state: Gdk.ModifierType) -> bool:
         if keyval == Gdk.KEY_Escape:
             if getattr(self.live_client, "video_streaming", False):
                 if hasattr(self.live_client, "panic_stop_video"):
@@ -892,6 +959,26 @@ class LiveVoiceWidget(Gtk.Box):
                 return True
             self._on_end_call()
             return True
+
+        # Atalho Alt+V para alternar transmissão contínua de tela
+        is_alt = bool(state & Gdk.ModifierType.ALT_MASK)
+        if is_alt and keyval in (Gdk.KEY_v, Gdk.KEY_V):
+            self._on_toggle_video(self.video_btn)
+            return True
+
+        # Atalho Alt+S para enviar snapshot
+        if is_alt and keyval in (Gdk.KEY_s, Gdk.KEY_S):
+            self._on_send_screen(self.screen_btn)
+            return True
+
+        # Barra de espaço para mute/unmute rápido quando não estiver digitando
+        if keyval == Gdk.KEY_space:
+            root = self.get_root()
+            focus = root.get_focus() if root else None
+            if not isinstance(focus, (Gtk.Editable, Gtk.TextView)):
+                self._on_toggle_mute(self.mute_btn)
+                return True
+
         return False
 
     def _on_send_screen(self, _btn: Gtk.Button) -> None:

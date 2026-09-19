@@ -316,8 +316,10 @@ class TestVoicePillWindow(unittest.TestCase):
                 break
         self.assertIsNotNone(dropdown)
 
-        # Seleciona outro item no dropdown (índice 1)
-        dropdown.set_selected(1)
+        # Seleciona outro item no dropdown (índice diferente do atual)
+        cur = dropdown.get_selected()
+        new_idx = 0 if cur != 0 else 1
+        dropdown.set_selected(new_idx)
         self.mock_client.set_voice.assert_called()
 
     def test_overlay_probes_and_rec_dot_are_untargetable(self):
