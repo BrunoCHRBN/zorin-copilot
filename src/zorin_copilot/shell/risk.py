@@ -22,6 +22,10 @@ HIGH_RISK_TOOLS = {
     "email_compose",
     "write_document",
     "organize_directory",
+    "network_release_port",
+    "network_reconnect",
+    "docker_container_action",
+    "system_service_action",
 }
 
 # Descrição amigável exibida ao usuário quando a confirmação é exigida.
@@ -30,6 +34,10 @@ RISK_DESCRIPTION = {
     "write_document": "escrita/sobrescrita de arquivo",
     "organize_directory": "reorganização de arquivos",
     "end_session": "encerramento completo do aplicativo",
+    "network_release_port": "liberação de porta e encerramento de processo",
+    "network_reconnect": "reconexão da interface de rede",
+    "docker_container_action": "ação de ciclo de vida no container Docker (restart/stop)",
+    "system_service_action": "alteração de estado de serviço de sistema (systemd)",
 }
 
 # Atalhos cuja execução tipicamente fecha/encerra aplicativos ou perde estado.

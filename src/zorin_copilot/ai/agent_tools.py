@@ -244,6 +244,18 @@ class ToolRegistry:
 
         return self._component("_memory", build)
 
+    @property
+    def network_inspector(self) -> Any | None:
+        """Inspetor de infraestrutura de redes."""
+
+        def build() -> Any:
+            from ..core.network_inspector import NetworkInspector
+
+            return NetworkInspector()
+
+        return self._component("_network_inspector", build)
+
+
     # -- descrição para o modelo ------------------------------------------- #
 
     def schema(
@@ -1465,6 +1477,308 @@ class ToolRegistry:
                     required=["query"],
                 ),
                 handler=self._tool_deep_web_search,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="network_inspect",
+                description=(
+                    "Inspeciona a conectividade e integridade da rede do desktop: interface ativa, "
+                    "endereço IP local, gateway padrão, servidores DNS, sinal Wi-Fi (se aplicável) "
+                    "e latência de ping em tempo real."
+                ),
+                parameters=_param(
+                    {"target_host": _str("Host para testar conectividade (padrão 1.1.1.1).")},
+                    required=[],
+                ),
+                handler=self._tool_network_inspect,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="lan_devices_scan",
+                description=(
+                    "Descobre e lista os aparelhos conectados na sub-rede local (LAN), identificando "
+                    "endereço IP, fabricante da placa de rede (OUI), hostname e tipo de dispositivo "
+                    "(roteador, smartphone, TV, IoT, computador)."
+                ),
+                parameters=_param(
+                    {"active_only": _bool("Filtrar apenas aparelhos online/acessíveis recentemente.")},
+                    required=[],
+                ),
+                handler=self._tool_lan_devices_scan,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="local_services_list",
+                description=(
+                    "Lista portas de rede abertas e serviços em escuta no desktop (TCP/UDP), "
+                    "identificando número da porta, nome do processo e PID."
+                ),
+                parameters=_param(
+                    {"protocol": _str("Filtrar por protocolo ('tcp', 'udp' ou omitir para ambos).")},
+                    required=[],
+                ),
+                handler=self._tool_local_services_list,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="network_wake_on_lan",
+                description=(
+                    "Envia pacote Wake-on-LAN (Magic Packet) para acordar ou ligar um computador "
+                    "ou servidor na rede local a partir do seu endereço MAC."
+                ),
+                parameters=_param(
+                    {
+                        "mac": _str("Endereço MAC do dispositivo alvo."),
+                        "broadcast_ip": _str("IP de broadcast (padrão 255.255.255.255)."),
+                    },
+                    required=["mac"],
+                ),
+                handler=self._tool_network_wake_on_lan,
+                mutating=True,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="network_release_port",
+                description=(
+                    "Encerra com segurança o processo local que está ocupando uma porta de rede "
+                    "(TCP/UDP) para liberá-la. Possui proteção contra processos vitais do sistema."
+                ),
+                parameters=_param(
+                    {
+                        "port": _int("Número da porta a ser liberada (1-65535)."),
+                        "force": _bool("Se true, envia SIGKILL caso o processo recuse SIGTERM."),
+                    },
+                    required=["port"],
+                ),
+                handler=self._tool_network_release_port,
+                mutating=True,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="network_probe_service",
+                description=(
+                    "Testa conectividade direta (handshake TCP) com um serviço ou porta em um dispositivo "
+                    "da rede local ou internet (ex: Home Assistant na 8123, SSH na 22)."
+                ),
+                parameters=_param(
+                    {
+                        "host": _str("Endereço IP ou hostname do serviço alvo."),
+                        "port": _int("Porta de rede do serviço."),
+                    },
+                    required=["host", "port"],
+                ),
+                handler=self._tool_network_probe_service,
+                mutating=False,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="network_dns_benchmark",
+                description=(
+                    "Compara o tempo de resposta (latência em ms) entre o servidor DNS atual do sistema "
+                    "e provedores de alto desempenho (Cloudflare 1.1.1.1, Google 8.8.8.8, Quad9 9.9.9.9)."
+                ),
+                parameters=_param(
+                    {"domain": _str("Domínio opcional para teste de resolução.")},
+                    required=[],
+                ),
+                handler=self._tool_network_dns_benchmark,
+                mutating=False,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="network_reconnect",
+                description=(
+                    "Reconecta ou reaplica a conexão de rede ativa usando NetworkManager Polkit para "
+                    "recuperar conectividade em caso de travamento."
+                ),
+                parameters=_param(
+                    {"interface": _str("Nome da interface opcional (ex: enp4s0, wlan0).")},
+                    required=[],
+                ),
+                handler=self._tool_network_reconnect,
+                mutating=True,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="network_audit_exposure",
+                description=(
+                    "Audita todas as portas em escuta classificando-as entre Loopback Seguro (127.0.0.1) "
+                    "e Exposição na LAN (0.0.0.0 / ::), alertando sobre servidores dev ou bancos sem proteção."
+                ),
+                parameters=_param({}, required=[]),
+                handler=self._tool_network_audit_exposure,
+                mutating=False,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="network_throughput",
+                description=(
+                    "Mede a taxa instantânea de download e upload (KB/s e MB/s) na interface de rede "
+                    "lendo estatísticas de kernel sem overhead de CPU."
+                ),
+                parameters=_param(
+                    {
+                        "interface": _str("Nome opcional da interface (padrão: rota default)."),
+                        "sample_seconds": _num("Janela de amostragem em segundos (padrão: 0.4s)."),
+                    },
+                    required=[],
+                ),
+                handler=self._tool_network_throughput,
+                mutating=False,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="network_diagnose_path",
+                description=(
+                    "Executa diagnóstico de conexão em 3 etapas (Enlace local -> Roteador gateway -> "
+                    "Internet externa e DNS) apontando com precisão onde ocorreu a queda."
+                ),
+                parameters=_param(
+                    {"target": _str("Host externo de destino para teste (padrão: 1.1.1.1).")},
+                    required=[],
+                ),
+                handler=self._tool_network_diagnose_path,
+                mutating=False,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="network_ssl_check",
+                description=(
+                    "Inspeciona o certificado SSL/TLS de um domínio ou IP (porta 443), extraindo validade, "
+                    "dias restantes, emissor e versão TLS (com proteção anti-SYN-blackhole de 2.5s)."
+                ),
+                parameters=_param(
+                    {
+                        "host": _str("Nome de domínio ou endereço IP a verificar (ex: cloudflare.com)."),
+                        "port": _int("Porta HTTPS (padrão: 443)."),
+                    },
+                    required=["host"],
+                ),
+                handler=self._tool_network_ssl_check,
+                mutating=False,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="network_mdns_services",
+                description=(
+                    "Descobre passivamente serviços e dispositivos anunciados na LAN via mDNS / Avahi "
+                    "(Home Assistant, impressoras de rede, receptores Google Cast)."
+                ),
+                parameters=_param(
+                    {"timeout_sec": _num("Tempo de escuta em segundos (padrão: 2.0s).")},
+                    required=[],
+                ),
+                handler=self._tool_network_mdns_services,
+                mutating=False,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="docker_list_containers",
+                description=(
+                    "Lista containers Docker locais com status operacional, saúde, portas e consumo de recursos."
+                ),
+                parameters=_param(
+                    {"all": _bool("Se True, inclui containers parados. Padrão True.")},
+                    required=[],
+                ),
+                handler=self._tool_docker_list_containers,
+                mutating=False,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="docker_container_logs",
+                description=(
+                    "Obtém logs destilados de um container Docker, eliminando ruído repetitivo, "
+                    "destacando erros críticos e ofuscando segredos/tokens sensíveis."
+                ),
+                parameters=_param(
+                    {
+                        "container": _str("Nome ou ID do container Docker."),
+                        "tail": _int("Quantidade de linhas recentes a analisar (padrão 50)."),
+                        "filter_errors_only": _bool("Se True, retorna exclusivamente mensagens de erro."),
+                    },
+                    required=["container"],
+                ),
+                handler=self._tool_docker_container_logs,
+                mutating=False,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="docker_container_action",
+                description=(
+                    "Executa ação de ciclo de vida em um container Docker ('restart' ou 'stop') "
+                    "com verificação de estado pós-ação (RiskLevel.CONFIRM)."
+                ),
+                parameters=_param(
+                    {
+                        "container": _str("Nome ou ID do container Docker."),
+                        "action": _str("Ação a executar: 'restart' ou 'stop'."),
+                    },
+                    required=["container", "action"],
+                ),
+                handler=self._tool_docker_container_action,
+                mutating=True,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="system_hardware_health",
+                description=(
+                    "Inspeciona a saúde física do hardware: temperaturas de CPU/GPU/NVMe (lm_sensors), "
+                    "pressão de memória PSI/zRAM e status de desgaste de SSD via S.M.A.R.T. (com proteção de spin-down)."
+                ),
+                parameters=_param({}, required=[]),
+                handler=self._tool_system_hardware_health,
+                mutating=False,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="system_journal_errors",
+                description=(
+                    "Extrai os últimos erros críticos (priority err..emerg) do journalctl do systemd "
+                    "com agrupamento heurístico por serviço e deduplicação de mensagens em loop."
+                ),
+                parameters=_param(
+                    {"lines": _int("Número de registros do diário a inspecionar (padrão 40).")},
+                    required=[],
+                ),
+                handler=self._tool_system_journal_errors,
+                mutating=False,
             )
         )
 
@@ -3373,6 +3687,290 @@ class ToolRegistry:
             return {"ok": False, "error": "Driver de entrada indisponível (ydotool/uinput ausentes)."}
         ok, message = driver.type_text(text, press_enter=press_enter)
         return {"ok": bool(ok), "message": message, "element": element_name, "via": "teclado virtual"}
+
+    def _tool_network_inspect(self, args: dict[str, Any]) -> dict[str, Any]:
+        target = str(args.get("target_host") or "1.1.1.1").strip()
+        try:
+            from ..core.network_inspector import NetworkInspector
+
+            report = NetworkInspector.get_health_report(target_internet=target)
+            return {
+                "ok": True,
+                "primary_interface": report.primary_interface,
+                "primary_type": report.primary_type,
+                "local_ip": report.local_ip,
+                "gateway_ip": report.gateway_ip,
+                "gateway_ping_ms": report.gateway_ping_ms,
+                "internet_ping_ms": report.internet_ping_ms,
+                "dns_servers": report.dns_servers,
+                "packet_loss_percent": report.packet_loss_percent,
+                "wifi": {
+                    "ssid": report.wifi.ssid,
+                    "signal_percent": report.wifi.signal_percent,
+                    "frequency_ghz": report.wifi.frequency_ghz,
+                    "rate_mbps": report.wifi.rate_mbps,
+                }
+                if report.wifi
+                else None,
+            }
+        except Exception as exc:
+            logger.warning("Falha ao inspecionar rede: %s", exc)
+            return {"ok": False, "error": f"Falha na inspeção de rede: {exc}"}
+
+    def _tool_lan_devices_scan(self, args: dict[str, Any]) -> dict[str, Any]:
+        active_only = bool(args.get("active_only", True))
+        try:
+            from ..core.network_inspector import NetworkInspector
+
+            neighbors = NetworkInspector.get_neighbors()
+            if active_only:
+                neighbors = [n for n in neighbors if n.is_online]
+            safe_summary = NetworkInspector.to_safe_summary(neighbors=neighbors)
+            return {
+                "ok": True,
+                "device_count": len(neighbors),
+                "devices": safe_summary.get("lan_devices", []),
+            }
+        except Exception as exc:
+            logger.warning("Falha ao escanear LAN: %s", exc)
+            return {"ok": False, "error": f"Falha ao escanear dispositivos na LAN: {exc}"}
+
+    def _tool_local_services_list(self, args: dict[str, Any]) -> dict[str, Any]:
+        proto = str(args.get("protocol") or "all").strip().lower()
+        try:
+            from ..core.network_inspector import NetworkInspector
+
+            ports = NetworkInspector.get_listening_ports()
+            if proto in ("tcp", "udp"):
+                ports = [p for p in ports if p.protocol == proto]
+            return {
+                "ok": True,
+                "count": len(ports),
+                "ports": [
+                    {
+                        "protocol": p.protocol,
+                        "port": p.port,
+                        "ip_binding": p.ip_binding,
+                        "process_name": p.process_name,
+                        "pid": p.pid,
+                    }
+                    for p in ports
+                ],
+            }
+        except Exception as exc:
+            logger.warning("Falha ao listar serviços locais: %s", exc)
+            return {"ok": False, "error": f"Falha ao inspecionar serviços locais: {exc}"}
+
+    def _tool_network_wake_on_lan(self, args: dict[str, Any]) -> dict[str, Any]:
+        mac = str(args.get("mac") or "").strip()
+        bcast = str(args.get("broadcast_ip") or "255.255.255.255").strip()
+        if not mac:
+            return {"ok": False, "error": "Argumento 'mac' é obrigatório."}
+        try:
+            from ..core.network_actions import wake_on_lan
+
+            ok, msg = wake_on_lan(mac, broadcast_ip=bcast)
+            return {"ok": ok, "message": msg, "target_mac": mac}
+        except Exception as exc:
+            logger.warning("Falha em network_wake_on_lan: %s", exc)
+            return {"ok": False, "error": f"Erro ao executar Wake-on-LAN: {exc}"}
+
+    def _tool_network_release_port(self, args: dict[str, Any]) -> dict[str, Any]:
+        try:
+            port = int(args.get("port", 0))
+        except (ValueError, TypeError):
+            return {"ok": False, "error": "Argumento 'port' deve ser um número inteiro válido."}
+        force = bool(args.get("force", False))
+        try:
+            from ..core.network_actions import release_local_port
+
+            ok, msg, meta = release_local_port(port, force=force)
+            return {"ok": ok, "message": msg, "details": meta}
+        except Exception as exc:
+            logger.warning("Falha em network_release_port: %s", exc)
+            return {"ok": False, "error": f"Erro ao liberar porta: {exc}"}
+
+    def _tool_network_probe_service(self, args: dict[str, Any]) -> dict[str, Any]:
+        host = str(args.get("host") or "").strip()
+        try:
+            port = int(args.get("port", 0))
+        except (ValueError, TypeError):
+            return {"ok": False, "error": "Argumento 'port' inválido."}
+        if not host:
+            return {"ok": False, "error": "Argumento 'host' é obrigatório."}
+        try:
+            from ..core.network_actions import probe_service
+
+            return probe_service(host, port)
+        except Exception as exc:
+            logger.warning("Falha em network_probe_service: %s", exc)
+            return {"ok": False, "error": f"Erro ao sondar serviço: {exc}"}
+
+    def _tool_network_dns_benchmark(self, args: dict[str, Any]) -> dict[str, Any]:
+        dom = str(args.get("domain") or "").strip()
+        domains = [dom] if dom else None
+        try:
+            from ..core.network_actions import benchmark_dns
+
+            results = benchmark_dns(domains=domains)
+            return {"ok": True, "results": results}
+        except Exception as exc:
+            logger.warning("Falha em network_dns_benchmark: %s", exc)
+            return {"ok": False, "error": f"Erro ao testar DNS: {exc}"}
+
+    def _tool_network_reconnect(self, args: dict[str, Any]) -> dict[str, Any]:
+        iface = str(args.get("interface") or "").strip() or None
+        try:
+            from ..core.network_actions import reconnect_interface
+
+            ok, msg = reconnect_interface(iface)
+            return {"ok": ok, "message": msg}
+        except Exception as exc:
+            logger.warning("Falha em network_reconnect: %s", exc)
+            return {"ok": False, "error": f"Erro ao reconectar interface: {exc}"}
+
+    def _tool_network_audit_exposure(self, args: dict[str, Any]) -> dict[str, Any]:
+        try:
+            from ..core.network_actions import audit_attack_surface
+
+            report = audit_attack_surface()
+            return {"ok": True, "report": report}
+        except Exception as exc:
+            logger.warning("Falha em network_audit_exposure: %s", exc)
+            return {"ok": False, "error": f"Erro ao auditar portas: {exc}"}
+
+    def _tool_network_throughput(self, args: dict[str, Any]) -> dict[str, Any]:
+        iface = str(args.get("interface") or "").strip() or None
+        window = float(args.get("sample_seconds") or 0.4)
+        try:
+            from ..core.network_actions import measure_throughput
+
+            res = measure_throughput(interface_name=iface, sample_seconds=window)
+            return {"ok": True, "throughput": res}
+        except Exception as exc:
+            logger.warning("Falha em network_throughput: %s", exc)
+            return {"ok": False, "error": f"Erro ao medir throughput: {exc}"}
+
+    def _tool_network_diagnose_path(self, args: dict[str, Any]) -> dict[str, Any]:
+        target = str(args.get("target") or "1.1.1.1").strip()
+        try:
+            from ..core.network_actions import diagnose_connection_path
+
+            res = diagnose_connection_path(target_host=target)
+            return {"ok": True, "diagnosis": res}
+        except Exception as exc:
+            logger.warning("Falha em network_diagnose_path: %s", exc)
+            return {"ok": False, "error": f"Erro no diagnóstico de conexão: {exc}"}
+
+    def _tool_network_ssl_check(self, args: dict[str, Any]) -> dict[str, Any]:
+        host = str(args.get("host") or "").strip()
+        if not host:
+            return {"ok": False, "error": "Argumento 'host' é obrigatório."}
+        port = int(args.get("port") or 443)
+        try:
+            from ..core.network_actions import check_ssl_certificate
+
+            res = check_ssl_certificate(host, port=port)
+            return {"ok": res.get("ok", False), "certificate": res}
+        except Exception as exc:
+            logger.warning("Falha em network_ssl_check: %s", exc)
+            return {"ok": False, "error": f"Erro ao checar SSL: {exc}"}
+
+    def _tool_network_mdns_services(self, args: dict[str, Any]) -> dict[str, Any]:
+        timeout = float(args.get("timeout_sec") or 2.0)
+        try:
+            from ..core.network_actions import discover_mdns_services
+
+            services = discover_mdns_services(timeout_sec=timeout)
+            return {"ok": True, "count": len(services), "services": services}
+        except Exception as exc:
+            logger.warning("Falha em network_mdns_services: %s", exc)
+            return {"ok": False, "error": f"Erro na descoberta mDNS: {exc}"}
+
+    def _tool_docker_list_containers(self, args: dict[str, Any]) -> dict[str, Any]:
+        all_c = bool(args.get("all", True))
+        try:
+            from ..core.docker_manager import DockerManager
+
+            dm = DockerManager()
+            if not dm.is_available():
+                return {"ok": False, "error": "Docker não está disponível ou o socket está inacessível."}
+            containers = [c.to_dict() for c in dm.list_containers(all_containers=all_c)]
+            return {"ok": True, "count": len(containers), "containers": containers}
+        except Exception as exc:
+            logger.warning("Falha em docker_list_containers: %s", exc)
+            return {"ok": False, "error": f"Erro ao listar containers: {exc}"}
+
+    def _tool_docker_container_logs(self, args: dict[str, Any]) -> dict[str, Any]:
+        container = str(args.get("container") or "").strip()
+        if not container:
+            return {"ok": False, "error": "Argumento 'container' é obrigatório."}
+        tail = int(args.get("tail") or 50)
+        filter_err = bool(args.get("filter_errors_only", False))
+        try:
+            from ..core.docker_manager import DockerManager
+
+            dm = DockerManager()
+            report = dm.get_container_logs(container, tail=tail, filter_errors_only=filter_err)
+            return {"ok": True, "report": report}
+        except Exception as exc:
+            logger.warning("Falha em docker_container_logs: %s", exc)
+            return {"ok": False, "error": f"Erro ao extrair logs: {exc}"}
+
+    def _tool_docker_container_action(self, args: dict[str, Any]) -> dict[str, Any]:
+        container = str(args.get("container") or "").strip()
+        action = str(args.get("action") or "").strip().lower()
+        if not container:
+            return {"ok": False, "error": "Argumento 'container' é obrigatório."}
+        if action not in ("restart", "stop"):
+            return {"ok": False, "error": "Ação inválida. Use 'restart' ou 'stop'."}
+        try:
+            from ..core.docker_manager import DockerManager
+
+            dm = DockerManager()
+            if action == "restart":
+                result = dm.restart_container(container)
+            else:
+                result = dm.stop_container(container)
+            return {"ok": result.get("success", False), "result": result}
+        except Exception as exc:
+            logger.warning("Falha em docker_container_action: %s", exc)
+            return {"ok": False, "error": f"Erro ao executar ação no container: {exc}"}
+
+    def _tool_system_hardware_health(self, args: dict[str, Any]) -> dict[str, Any]:
+        try:
+            from ..core.system_health import SystemHealthInspector
+
+            report = SystemHealthInspector.get_complete_report()
+            return {"ok": True, "report": report}
+        except Exception as exc:
+            logger.warning("Falha em system_hardware_health: %s", exc)
+            return {"ok": False, "error": f"Erro ao inspecionar saúde do hardware: {exc}"}
+
+    def _tool_system_journal_errors(self, args: dict[str, Any]) -> dict[str, Any]:
+        lines = int(args.get("lines") or 40)
+        try:
+            from ..core.system_health import SystemHealthInspector
+
+            incidents = SystemHealthInspector.get_journal_incidents(lines=lines)
+            return {
+                "ok": True,
+                "count": len(incidents),
+                "incidents": [
+                    {
+                        "unit": inc.unit,
+                        "message": inc.message,
+                        "priority": inc.priority,
+                        "repeats": inc.repeat_count,
+                        "timestamp": inc.timestamp,
+                    }
+                    for inc in incidents
+                ],
+            }
+        except Exception as exc:
+            logger.warning("Falha em system_journal_errors: %s", exc)
+            return {"ok": False, "error": f"Erro ao extrair incidentes do journal: {exc}"}
+
 
 
 # --------------------------------------------------------------------------- #

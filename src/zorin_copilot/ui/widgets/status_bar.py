@@ -26,6 +26,7 @@ _ICON_TOKENS = "view-grid-symbolic"
 _ICON_LOAD = "system-run-symbolic"
 _ICON_RAM = "drive-harddisk-symbolic"
 _ICON_RAG = "folder-documents-symbolic"
+_ICON_NET = "network-workgroup-symbolic"
 
 _REFRESH_INTERVAL_SECONDS = 5
 
@@ -83,9 +84,22 @@ class StatusBarWidget:
         self.rag_lbl.add_css_class("tabular-nums")
         self.rag_item = self._make_item(_ICON_RAG, self.rag_lbl)
 
+        self.net_lbl = Gtk.Label(label="Rede …")
+        self.net_lbl.add_css_class("status-text")
+        self.net_lbl.add_css_class("tabular-nums")
+        self.net_item = self._make_item(_ICON_NET, self.net_lbl)
+        self.net_item.set_tooltip_text("Infraestrutura de Rede local (clique para ver detalhes)")
+
+        net_click = Gtk.GestureClick()
+        net_click.connect(
+            "pressed",
+            lambda *_: getattr(self.ctx, "_open_network_inspector", lambda: None)(),
+        )
+        self.net_item.add_controller(net_click)
+
         # Monta os itens separados por divisórias verticais sutis.
         for first, item in enumerate(
-            [self.model_item, self.tokens_item, self.load_item, self.ram_item, self.rag_item]
+            [self.model_item, self.tokens_item, self.load_item, self.ram_item, self.rag_item, self.net_item]
         ):
             if first:
                 sep = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
@@ -153,9 +167,10 @@ class StatusBarWidget:
         self.refresh_load()
         self.refresh_ram()
         self.refresh_rag()
+        self.refresh_net()
 
     def _on_tick(self) -> bool:
-        # Tick periódico: telemetria de sistema (carga/RAM/RAG) e modelo ativo.
+        # Tick periódico: telemetria de sistema (carga/RAM/RAG/Rede) e modelo ativo.
         # Tokens são atualizados de forma pontual pelo app após cada resposta.
         # Por construção o tick só roda com a janela visível; se chegou aqui
         # invisível ou já descartada, a fonte perdeu o sentido e sai de cena.
@@ -166,6 +181,7 @@ class StatusBarWidget:
         self.refresh_ram()
         self.refresh_rag()
         self.refresh_model()
+        self.refresh_net()
         return GLib.SOURCE_CONTINUE
 
     def refresh_model(self) -> None:
@@ -229,3 +245,39 @@ class StatusBarWidget:
             )
         except Exception:
             self.rag_lbl.set_text("RAG —")
+
+    def refresh_net(self) -> None:
+        import threading
+
+        def bg() -> None:
+            try:
+                from ...core.network_inspector import NetworkInspector
+
+                gw_ip, gw_dev = NetworkInspector.get_default_gateway()
+                if not gw_ip:
+                    def update_offline() -> bool:
+                        if not self._disposed:
+                            self.net_lbl.set_text("Offline")
+                            self.net_item.set_tooltip_text("Sem conexão de rede ativa")
+                        return GLib.SOURCE_REMOVE
+
+                    GLib.idle_add(update_offline)
+                    return
+
+                ping = NetworkInspector.ping_host(gw_ip, count=1, timeout_sec=0.25)
+                ping_str = f"{ping:.1f} ms" if ping is not None else "GW ok"
+
+                def update_online() -> bool:
+                    if not self._disposed:
+                        self.net_lbl.set_text(f"Rede {ping_str}")
+                        self.net_item.set_tooltip_text(
+                            f"Rede local: {gw_dev} (GW {gw_ip})\nClique para abrir o diagnóstico completo."
+                        )
+                    return GLib.SOURCE_REMOVE
+
+                GLib.idle_add(update_online)
+            except Exception:
+                pass
+
+        threading.Thread(target=bg, daemon=True).start()
+

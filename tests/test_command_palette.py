@@ -219,6 +219,25 @@ class CommandPaletteIntegrationTest(unittest.TestCase):
         callback = CopilotWindow._make_shortcut_callback(lambda: None)
         self.assertTrue(callback(None, None))
 
+    def test_network_palette_commands(self):
+        commands = self.win.palette_commands()
+        cmd_names = [c.name for c in commands]
+        self.assertIn("app.network-inspect", cmd_names)
+        self.assertIn("app.network-copy-ip", cmd_names)
+        self.assertIn("app.network-dns-bench", cmd_names)
+        self.assertIn("app.network-audit", cmd_names)
+        self.assertIn("app.network-throughput", cmd_names)
+        self.assertIn("app.network-diagnose", cmd_names)
+
+        handlers = self.win._palette_handlers()
+        self.assertIn("app.network-inspect", handlers)
+        self.assertIn("app.network-copy-ip", handlers)
+        self.assertIn("app.network-dns-bench", handlers)
+        self.assertIn("app.network-audit", handlers)
+        self.assertIn("app.network-throughput", handlers)
+        self.assertIn("app.network-diagnose", handlers)
+
 
 if __name__ == "__main__":
     unittest.main()
+

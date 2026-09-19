@@ -592,6 +592,60 @@ class CopilotWindow(Adw.ApplicationWindow):
                 ("modelo", "agente", "ia", "ollama", "dolphin", "qwen", "gemini", "trocar", "uncensored"),
             ),
             PaletteCommand(
+                "app.network-inspect", "Diagnóstico de Infraestrutura de Rede",
+                "Interfaces, gateway, latência de ping, dispositivos LAN e portas em escuta",
+                "network-transmit-receive-symbolic", "",
+                ("rede", "diagnostico", "ping", "gateway", "dns", "wifi", "lan", "portas", "ip"),
+            ),
+            PaletteCommand(
+                "app.network-copy-ip", "Copiar Endereço IP Local",
+                "Copia o IPv4 da interface de rede ativa para a área de transferência",
+                "edit-copy-symbolic", "",
+                ("ip", "copiar ip", "meu ip", "endereco", "rede", "lan"),
+            ),
+            PaletteCommand(
+                "app.network-dns-bench", "Benchmark de Latência DNS",
+                "Compara tempo de resposta de Cloudflare, Google, Quad9 e resolvedor local",
+                "network-transmit-receive-symbolic", "",
+                ("dns", "benchmark", "latencia", "rede", "cloudflare", "google", "quad9"),
+            ),
+            PaletteCommand(
+                "app.network-audit", "Auditoria de Exposição de Portas",
+                "Verifica serviços ouvindo em 0.0.0.0, dual-stack :: e loopback seguro",
+                "security-high-symbolic", "",
+                ("seguranca", "portas", "exposicao", "rede", "firewall", "auditoria", "superficie"),
+            ),
+            PaletteCommand(
+                "app.network-throughput", "Consumo de Banda de Rede em Tempo Real",
+                "Mede velocidade instantânea de download e upload (Rx/Tx)",
+                "network-transmit-receive-symbolic", "",
+                ("banda", "throughput", "velocidade", "download", "upload", "consumo", "taxa", "rede"),
+            ),
+            PaletteCommand(
+                "app.network-diagnose", "Diagnóstico de Ponto de Falha de Conexão",
+                "Teste isolado hop-by-hop (Interface física -> Gateway -> Internet/DNS)",
+                "network-error-symbolic", "",
+                ("diagnostico", "queda", "conexao", "gateway", "internet", "offline", "falha"),
+            ),
+            PaletteCommand(
+                "app.docker-inspect", "Status de Containers Docker",
+                "Inspeção de containers locais, portas e saúde operacional",
+                "system-search-symbolic", "",
+                ("docker", "container", "containers", "homeassistant", "status"),
+            ),
+            PaletteCommand(
+                "app.hardware-health", "Saúde de Hardware & Sensores Térmicos",
+                "Temperaturas CPU/GPU/NVMe, ventilação e pressão de memória PSI",
+                "utilities-system-monitor-symbolic", "",
+                ("hardware", "temperatura", "cpu", "gpu", "nvme", "sensores", "memoria", "psi"),
+            ),
+            PaletteCommand(
+                "app.journal-errors", "Diagnóstico de Falhas do Sistema",
+                "Extração e síntese heurística de erros recentes no journalctl",
+                "dialog-warning-symbolic", "",
+                ("journal", "logs", "erros", "falhas", "sistema", "systemd"),
+            ),
+            PaletteCommand(
                 "app.quit", "Sair do Zorin Copilot", "",
                 "application-exit-symbolic", acc("app.quit"), ("fechar", "encerrar"),
             ),
@@ -649,6 +703,15 @@ class CopilotWindow(Adw.ApplicationWindow):
             "app.clear-history": self.sidebar.clear_history,
             "app.context-refresh": self._refresh_context_command,
             "app.mcp-reload": self._reload_mcp_servers,
+            "app.network-inspect": self._open_network_inspector,
+            "app.network-copy-ip": self._copy_local_ip_command,
+            "app.network-dns-bench": self._run_dns_benchmark_command,
+            "app.network-audit": self._run_network_audit_command,
+            "app.network-throughput": self._run_network_throughput_command,
+            "app.network-diagnose": self._run_network_diagnose_command,
+            "app.docker-inspect": lambda: self._open_infra_inspector("docker"),
+            "app.hardware-health": lambda: self._open_infra_inspector("hardware"),
+            "app.journal-errors": lambda: self._open_infra_inspector("journal"),
             "app.quit": self._quit_application,
         }
 
@@ -689,6 +752,207 @@ class CopilotWindow(Adw.ApplicationWindow):
         except Exception as exc:
             logger.debug("Falha ao atualizar contexto: %s", exc)
             self.show_toast("Não foi possível atualizar contexto")
+
+    def _open_network_inspector(self) -> None:
+        """Abre o diálogo modal com diagnóstico de infraestrutura e topologia de rede local."""
+        try:
+            from .widgets.network_view import NetworkInspectorDialog
+
+            dialog = NetworkInspectorDialog(ctx=self)
+            dialog.present(self)
+        except Exception as exc:
+            logger.exception("Falha ao abrir diálogo de rede: %s", exc)
+            self.show_toast(f"Erro ao abrir diagnóstico de rede: {exc}")
+
+    def _copy_local_ip_command(self) -> None:
+        """Copia o endereço IP local ativo para a área de transferência."""
+        try:
+            from ..core.network_inspector import NetworkInspector
+
+            report = NetworkInspector.get_health_report()
+            ip = report.local_ip
+            clipboard = Gdk.Display.get_default().get_clipboard()
+            clipboard.set(ip)
+            self.show_toast(f"IP local copiado: {ip}")
+        except Exception as exc:
+            logger.warning("Falha ao copiar IP local: %s", exc)
+            self.show_toast("Não foi possível obter o IP local")
+
+    def _run_dns_benchmark_command(self) -> None:
+        """Executa o benchmark de servidores DNS e exibe o resultado via toast."""
+        self.show_toast("Iniciando benchmark de latência DNS...")
+
+        def bench_worker() -> None:
+            try:
+                from ..core.network_actions import benchmark_dns
+                results = benchmark_dns()
+                fastest = next((r for r in results if r.get("is_fastest")), None)
+                if fastest:
+                    msg = f"DNS mais rápido: {fastest['provider']} ({fastest['avg_latency_ms']} ms)"
+                else:
+                    msg = "Benchmark DNS concluído sem dados válidos."
+                GLib.idle_add(self.show_toast, msg)
+            except Exception as exc:
+                logger.error("Falha no benchmark DNS via paleta: %s", exc)
+                GLib.idle_add(self.show_toast, f"Erro no benchmark DNS: {exc}")
+
+        import threading
+        threading.Thread(target=bench_worker, daemon=True).start()
+
+    def _run_network_audit_command(self) -> None:
+        """Executa auditoria de portas expostas e exibe resumo via toast."""
+        self.show_toast("Auditando portas e superfície de ataque...")
+
+        def audit_worker() -> None:
+            try:
+                from ..core.network_actions import audit_attack_surface
+                res = audit_attack_surface()
+                total = res.get("total_listening", 0)
+                exposed = res.get("exposed_count", 0)
+                warnings = res.get("high_risk_warnings", [])
+                if warnings:
+                    msg = f"Auditoria: {len(warnings)} alerta(s) de portas dev/banco expostas na LAN!"
+                elif exposed > 0:
+                    msg = f"Auditoria: {exposed}/{total} portas escutando na rede ({total - exposed} em loopback)."
+                else:
+                    msg = f"Auditoria segura: Todas as {total} portas escutando apenas em loopback (127.0.0.1)."
+                GLib.idle_add(self.show_toast, msg)
+            except Exception as exc:
+                logger.error("Falha na auditoria de rede via paleta: %s", exc)
+                GLib.idle_add(self.show_toast, f"Erro na auditoria de portas: {exc}")
+
+        import threading
+        threading.Thread(target=audit_worker, daemon=True).start()
+
+    def _run_network_throughput_command(self) -> None:
+        """Mede throughput de rede instantâneo e exibe resultado via toast."""
+        self.show_toast("Medindo tráfego de rede (amostra de 0.5s)...")
+
+        def throughput_worker() -> None:
+            try:
+                from ..core.network_actions import measure_throughput
+                res = measure_throughput(sample_seconds=0.5)
+                if "error" in res:
+                    msg = f"Throughput indisponível: {res['error']}"
+                else:
+                    iface = res.get("interface", "rede")
+                    rx = res.get("rx_kb_s", 0.0)
+                    tx = res.get("tx_kb_s", 0.0)
+                    msg = f"Tráfego ({iface}): ↓ {rx:.1f} KB/s  ↑ {tx:.1f} KB/s"
+                GLib.idle_add(self.show_toast, msg)
+            except Exception as exc:
+                logger.error("Falha ao medir throughput via paleta: %s", exc)
+                GLib.idle_add(self.show_toast, f"Erro ao medir throughput: {exc}")
+
+        import threading
+        threading.Thread(target=throughput_worker, daemon=True).start()
+
+    def _run_network_diagnose_command(self) -> None:
+        """Executa diagnóstico hop-by-hop de conexão e exibe resultado via toast."""
+        self.show_toast("Diagnosticando caminho de conexão...")
+
+        def diagnose_worker() -> None:
+            try:
+                from ..core.network_actions import diagnose_connection_path
+                res = diagnose_connection_path()
+                ok = res.get("ok", False)
+                failing = res.get("failing_stage", "Desconhecido")
+                cause = res.get("root_cause", "")
+                if ok:
+                    msg = "Conexão íntegra: Cabo, Gateway e Internet funcionando."
+                else:
+                    msg = f"Falha de rede em [{failing}]: {cause[:60]}..."
+                GLib.idle_add(self.show_toast, msg)
+            except Exception as exc:
+                logger.error("Falha no diagnóstico de rede via paleta: %s", exc)
+                GLib.idle_add(self.show_toast, f"Erro no diagnóstico: {exc}")
+
+        import threading
+        threading.Thread(target=diagnose_worker, daemon=True).start()
+
+    def _open_infra_inspector(self, initial_tab: str = "hardware") -> None:
+        """Abre o diálogo modal com diagnóstico de infraestrutura, containers e hardware."""
+        try:
+            from .widgets.infra_view import InfraInspectorDialog
+
+            dialog = InfraInspectorDialog(ctx=self)
+            child = dialog.get_child()
+            if hasattr(child, "view_stack") and initial_tab:
+                child.view_stack.set_visible_child_name(initial_tab)
+            dialog.present(self)
+        except Exception as exc:
+            logger.exception("Falha ao abrir diálogo de infraestrutura: %s", exc)
+            self.show_toast(f"Erro ao abrir diagnóstico: {exc}")
+
+    def _show_docker_status_command(self) -> None:
+        """Inspeciona containers Docker em background e exibe resumo via toast."""
+        self.show_toast("Consultando containers Docker...")
+
+        def docker_worker() -> None:
+            try:
+                from ..core.docker_manager import DockerManager
+                dm = DockerManager()
+                if not dm.is_available():
+                    GLib.idle_add(self.show_toast, "Docker não está disponível ou socket inacessível.")
+                    return
+                containers = dm.list_containers(all_containers=True)
+                running = [c for c in containers if c.state == "running"]
+                if not containers:
+                    msg = "Nenhum container Docker encontrado no sistema."
+                else:
+                    names_running = ", ".join(c.name for c in running[:3])
+                    msg = f"Docker: {len(running)}/{len(containers)} ativos ({names_running})"
+                GLib.idle_add(self.show_toast, msg)
+            except Exception as exc:
+                logger.error("Falha ao consultar Docker: %s", exc)
+                GLib.idle_add(self.show_toast, f"Erro ao consultar Docker: {exc}")
+
+        import threading
+        threading.Thread(target=docker_worker, daemon=True).start()
+
+    def _show_hardware_health_command(self) -> None:
+        """Coleta métricas térmicas e de pressão de memória em background."""
+        self.show_toast("Coletando telemetria de hardware e sensores...")
+
+        def hw_worker() -> None:
+            try:
+                from ..core.system_health import SystemHealthInspector
+                report = SystemHealthInspector.get_complete_report()
+                t = report.get("thermals", {})
+                m = report.get("memory", {})
+                cpu_t = t.get("cpu_temp_c", 0.0)
+                gpu_t = t.get("gpu_temp_c", 0.0)
+                used_p = m.get("used_percent", 0.0)
+                press = m.get("pressure_level", "Baixa")
+                msg = f"CPU: {cpu_t}°C · GPU: {gpu_t}°C · RAM: {used_p}% usada (Pressão {press})"
+                GLib.idle_add(self.show_toast, msg)
+            except Exception as exc:
+                logger.error("Falha ao coletar saúde do hardware: %s", exc)
+                GLib.idle_add(self.show_toast, f"Erro nos sensores: {exc}")
+
+        import threading
+        threading.Thread(target=hw_worker, daemon=True).start()
+
+    def _show_journal_errors_command(self) -> None:
+        """Extrai erros críticos recentes do journalctl em background."""
+        self.show_toast("Inspecionando diário do sistema (journalctl)...")
+
+        def journal_worker() -> None:
+            try:
+                from ..core.system_health import SystemHealthInspector
+                incidents = SystemHealthInspector.get_journal_incidents(lines=25)
+                if not incidents:
+                    msg = "Nenhum erro crítico recente identificado no journal."
+                else:
+                    top = incidents[-1]
+                    msg = f"Journal: {len(incidents)} erros recentes (Último em {top.unit}: {top.message[:50]}...)"
+                GLib.idle_add(self.show_toast, msg)
+            except Exception as exc:
+                logger.error("Falha ao consultar journalctl: %s", exc)
+                GLib.idle_add(self.show_toast, f"Erro no journalctl: {exc}")
+
+        import threading
+        threading.Thread(target=journal_worker, daemon=True).start()
 
     def run_palette_command(self, command: PaletteCommand) -> None:
         """Executa o comando escolhido no painel."""

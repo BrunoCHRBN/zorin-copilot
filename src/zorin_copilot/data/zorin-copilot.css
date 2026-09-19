@@ -1194,5 +1194,86 @@ entry:focus-visible {
     }
 }
 
+/* ====================================================================
+   Network View & Infrastructure Introspection (Anti-AI-Slop Compliant)
+   - Zero emojis, 1px hairline borders, dense tabular desktop layout
+   - Compact desktop controls (26-28px rows), literal technical styling
+   ==================================================================== */
+.network-container {
+    background-color: transparent;
+    padding: 12px;
+}
+
+.network-health-card {
+    background-color: alpha(currentColor, 0.03);
+    border: 1px solid alpha(currentColor, 0.08);
+    border-radius: 8px;
+    padding: 10px 14px;
+}
+
+.network-health-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: alpha(currentColor, 0.85);
+}
+
+.network-section-title {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: alpha(currentColor, 0.55);
+    margin-top: 12px;
+    margin-bottom: 4px;
+}
+
+.network-table-card {
+    background-color: alpha(currentColor, 0.02);
+    border: 1px solid alpha(currentColor, 0.07);
+    border-radius: 6px;
+}
+
+.network-table-header {
+    background-color: alpha(currentColor, 0.04);
+    border-bottom: 1px solid alpha(currentColor, 0.07);
+    padding: 6px 12px;
+    font-size: 11px;
+    font-weight: 600;
+    color: alpha(currentColor, 0.6);
+}
+
+.network-table-row {
+    min-height: 28px;
+    padding: 4px 12px;
+    border-bottom: 1px solid alpha(currentColor, 0.04);
+    font-size: 12px;
+}
+
+.network-table-row:last-child {
+    border-bottom: none;
+}
+
+.network-table-row:hover {
+    background-color: alpha(currentColor, 0.04);
+}
+
+.network-metric-pill {
+    background-color: alpha(currentColor, 0.05);
+    border: 1px solid alpha(currentColor, 0.1);
+    border-radius: 4px;
+    padding: 2px 6px;
+    font-size: 11px;
+    font-family: monospace;
+    font-feature-settings: "tnum" 1;
+}
+
+.network-btn-compact {
+    min-height: 24px;
+    min-width: 24px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 11px;
+}
+
 
 
