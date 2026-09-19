@@ -444,8 +444,9 @@ class LiveVoiceWidget(Gtk.Box):
             self.status_dot.set_markup("<span foreground='#e5a50a'>●</span>")
             self.status_lbl.set_markup("<b>Zorin Copilot Live</b> • Conectando...")
             model_label = live_model_label(getattr(self.live_client.config, "gemini_live_model", ""))
+            clean_model = model_label if "Live" in model_label else f"{model_label} Live"
             self.caption_speaker_lbl.set_text("SISTEMA")
-            self.subtitle_lbl.set_text(f"Estabelecendo conexão segura com {model_label} Live...")
+            self.subtitle_lbl.set_text(f"Estabelecendo conexão segura com {clean_model}...")
             self.badge_box.set_visible(True)
             self.badge_dot.set_markup("<span foreground='#e5a50a'>●</span>")
             self.timer_lbl.set_text("Conectando...")

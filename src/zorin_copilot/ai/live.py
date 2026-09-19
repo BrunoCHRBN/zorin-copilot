@@ -2089,6 +2089,8 @@ class GeminiLiveClient:
                             "models/gemini-3.8-live ou models/gemini-3.8-live-extended-thinking), "
                             "não um alias '-latest'."
                         )
+                    elif code == 1011:
+                        msg = "Instabilidade temporária nos servidores do Gemini Live (código 1011). Reconectando sessão automaticamente..."
                     else:
                         msg = f"Conexão encerrada pelo servidor (código {code}" + (f": {reason_clean}" if reason_clean else ")")
                     logger.warning(msg)
@@ -3701,7 +3703,7 @@ class GeminiLiveClient:
                     self._last_streamed_crop_rect = crop_rect
                     self._last_streamed_window_info = (app_name, win_title)
                     ok, img_bytes, _ = ScreenCaptureService.capture(
-                        interactive=False, max_size=1024, quality=75, crop_rect=crop_rect
+                        interactive=False, max_size=800, quality=70, crop_rect=crop_rect
                     )
 
                     if ok and img_bytes and self._is_video_streaming and self._is_running:
@@ -3715,14 +3717,14 @@ class GeminiLiveClient:
                                 except Exception:
                                     pass
 
-                        # 6. Frame Diffing (detecção de tela estática para economizar tokens)
+                        # 6. Frame Diffing (detecção de tela estática para economizar tokens e evitar 1011)
                         diff = ScreenCaptureService.compute_frame_diff(
                             img_bytes, self._last_sent_frame_bytes
                         )
 
-                        # Se a diferença for insignificante (< 1.5%) e ainda não expirou o keep-alive (5 quadros)
-                        is_static = (diff < 0.015) and (self._last_sent_frame_bytes is not None)
-                        if is_static and self._unchanged_frames_count < 5:
+                        # Se a diferença for insignificante (< 2%) e ainda não expirou o keep-alive (8 quadros)
+                        is_static = (diff < 0.02) and (self._last_sent_frame_bytes is not None)
+                        if is_static and self._unchanged_frames_count < 8:
                             self._unchanged_frames_count += 1
                         else:
                             # Envia para a Gemini Live API
