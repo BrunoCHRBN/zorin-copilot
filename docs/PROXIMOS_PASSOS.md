@@ -72,14 +72,16 @@ Nesta etapa, resolvemos o gargalo de interrupção prematura ("Limite de passos 
 - Exportação direta de coleções Anki `.apkg` prontas para importação no desktop ou mobile sem dependências externas.
 - Comandos CLI, ferramentas no Modo Agente e suporte de áudio no Gemini Live totalmente operacionais.
 
-### Passo 2: Suporte a Servidores MCP Remotos (SSE / HTTP Streaming)
-- **Problema:** Atualmente o subsistema MCP suporta apenas processos locais via `stdio`.
-- **Ações:**
-  1. Implementar transporte client SSE (Server-Sent Events) sobre HTTP no `MCPClient`.
-  2. Adicionar suporte a autenticação por token (Bearer Token / API Key) para conexão com servidores MCP remotos corporativos ou de infraestrutura na nuvem.
-  3. Adicionar configuração de servidores remotos no arquivo `mcp_servers.json`.
+### Passo 2: Suporte a Servidores MCP Remotos (SSE / HTTP Streaming) (Concluído ✅)
+- **Implementação Completa:**
+  1. Suporte dual a transporte local (`stdio`) e remoto (`sse` / Server-Sent Events sobre HTTP) no cliente unificado `MCPClient` (`BaseMCPClient`, `MCPStdioClient`, `MCPSSEClient`).
+  2. Leitura assíncrona streaming de eventos SSE em background com descoberta automática de endpoint de POST via evento `endpoint` e recepção de JSON-RPC via `message`.
+  3. Autenticação por tokens (Bearer / API keys) com interpolação de variáveis de ambiente (`${VAR}`) nos headers HTTP sem expor segredos.
+  4. Suporte a servidores remotos em `mcp_servers.json` gerenciados pelo `MCPManager`.
+  5. UI de Preferências Adwaita atualizada com indicador `[SSE Remoto]` e exibição limpa de URLs.
+  6. Suíte automatizada com 6 novos testes em `tests/test_mcp_sse.py` utilizando `ThreadingHTTPServer` nativo.
 
-### Passo 3: MCP Prompts na Paleta de Comandos (`Ctrl+K`)
+### Passo 3: MCP Prompts na Paleta de Comandos (`Ctrl+K`) (Próximo Passo)
 - **Problema:** Usuários precisam digitar prompts repetitivos para tarefas comuns fornecidas por servidores MCP.
 - **Ações:**
   1. Suportar `prompts/list` e `prompts/get` da especificação MCP.

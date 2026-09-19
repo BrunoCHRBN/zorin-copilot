@@ -135,10 +135,13 @@ O Zorin Copilot é um assistente de inteligência artificial nativo para Linux (
   - Suporte nativo por voz no assistente Gemini Live com tool calling e feedback falado instantâneo.
 
 ### Fase 7: Extensões MCP Avançadas (SSE / WebSockets & MCP Prompts)
-- **Transporte Remoto (SSE / HTTP Streaming):**
-  - Suportar servidores MCP remotos rodando em servidores locais ou nuvem via HTTP Server-Sent Events (SSE).
-  - Permitir conexão segura com tokens de autenticação bearer.
-- **MCP Prompts (`prompts/list` e `prompts/get`):**
+- **Transporte Remoto (SSE / HTTP Streaming) (Concluído ✅):**
+  - Suporte completo a servidores MCP remotos rodando em servidores locais ou em nuvem via HTTP Server-Sent Events (SSE).
+  - Conexão segura com tokens de autenticação Bearer / API Key e expansão de variáveis de ambiente (`${VAR}`).
+  - Descoberta automática de endpoint POST via evento SSE `endpoint` e suporte a chamadas de ferramentas e recursos remotos.
+  - Interface de preferências Libadwaita com tag `[SSE Remoto]`.
+  - Bateria de testes em `tests/test_mcp_sse.py`.
+- **MCP Prompts (`prompts/list` e `prompts/get`) (Próximo Passo):**
   - Implementar o suporte ao terceiro pilar da especificação MCP.
   - Servidores MCP poderão registrar templates de comandos e personas customizadas diretamente na Paleta de Comandos (`Ctrl+K`) do Copilot.
 

@@ -1020,12 +1020,13 @@ class PreferencesDialog(Adw.PreferencesDialog):
                 css_class = "dim-label"
                 state_label = state.capitalize()
 
+            trans_tag = "SSE Remoto" if item.get("transport") == "sse" else "Local"
             if error:
-                sub_text = f"{desc} • {state_label}: {error}"
+                sub_text = f"{desc} • {trans_tag} • {state_label}: {error}"
             elif state == "connected":
-                sub_text = f"{desc} • {tool_cnt} ferramenta(s)"
+                sub_text = f"{desc} • {trans_tag} • {tool_cnt} ferramenta(s)"
             else:
-                sub_text = f"{desc} • {state_label}"
+                sub_text = f"{desc} • {trans_tag} • {state_label}"
 
             expander = Adw.ExpanderRow(
                 title=name,

@@ -64,41 +64,72 @@ DEFAULT_MCP_TEMPLATE = {
             "enabled": False,
             "description": "Download e conversão limpa de páginas web em Markdown",
         },
+        "cloud-sample": {
+            "transport": "sse",
+            "url": "https://mcp.exemplo.com/sse",
+            "headers": {
+                "Authorization": "Bearer ${MCP_REMOTE_TOKEN}"
+            },
+            "enabled": False,
+            "description": "Exemplo de servidor MCP remoto corporativo via HTTP Server-Sent Events (SSE)",
+        },
     }
 }
 
 
 @dataclass
 class MCPServerConfig:
-    """Configuração de inicialização de um servidor MCP."""
+    """Configuração de inicialização de um servidor MCP (Stdio ou SSE remoto)."""
     name: str
-    command: str
+    command: str = ""
     args: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
     enabled: bool = True
     description: str = ""
     cwd: str | None = None
+    transport: str = "stdio"
+    url: str | None = None
+    headers: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "command": self.command,
-            "args": self.args,
-            "env": self.env,
+        d: dict[str, Any] = {
             "enabled": self.enabled,
             "description": self.description,
-            "cwd": self.cwd,
         }
+        if self.transport == "sse" or (self.url and not self.command):
+            d["transport"] = "sse"
+            d["url"] = self.url or ""
+            if self.headers:
+                d["headers"] = self.headers
+        else:
+            d["transport"] = "stdio"
+            d["command"] = self.command
+            d["args"] = self.args
+            d["env"] = self.env
+            d["cwd"] = self.cwd
+        return d
 
     @classmethod
     def from_dict(cls, name: str, data: dict[str, Any]) -> MCPServerConfig:
+        url = data.get("url")
+        command = data.get("command", "")
+        raw_transport = data.get("transport")
+        if raw_transport:
+            transport = str(raw_transport).strip().lower()
+        else:
+            transport = "sse" if url and not command else "stdio"
+
         return cls(
             name=name,
-            command=data.get("command", ""),
+            command=command,
             args=data.get("args") or [],
             env=data.get("env") or {},
             enabled=bool(data.get("enabled", True)),
             description=data.get("description", ""),
             cwd=data.get("cwd"),
+            transport=transport,
+            url=url,
+            headers=data.get("headers") or {},
         )
 
 
@@ -262,13 +293,16 @@ class MCPManager:
     # ------------------------------------------------------------------
 
     def _create_client(self, cfg: MCPServerConfig) -> MCPClient:
-        """Instancia um novo MCPClient a partir da configuração fornecida."""
+        """Instancia um novo MCPClient (Stdio ou SSE) a partir da configuração fornecida."""
         client = MCPClient(
             name=cfg.name,
             command=cfg.command,
             args=cfg.args,
             env=cfg.env,
             cwd=cfg.cwd,
+            transport=cfg.transport,
+            url=cfg.url,
+            headers=cfg.headers,
         )
         client.on_tools_changed = self._on_client_tools_changed
         client.on_state_changed = self._on_client_state_changed
@@ -488,9 +522,12 @@ class MCPManager:
             last_err = client.last_error if client else ""
             server_tools = tools_by_server.get(name, [])
 
+            cmd_display = cfg.url if cfg.transport == "sse" or (cfg.url and not cfg.command) else f"{cfg.command} {' '.join(cfg.args)}".strip()
             summary.append({
                 "name": name,
-                "command": f"{cfg.command} {' '.join(cfg.args)}".strip(),
+                "command": cmd_display,
+                "transport": cfg.transport,
+                "url": cfg.url,
                 "enabled": cfg.enabled,
                 "description": cfg.description,
                 "state": state.value,

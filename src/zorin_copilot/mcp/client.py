@@ -1,9 +1,10 @@
-# Decisão de design: Cliente MCP stdio nativo via subprocesso e JSON-RPC 2.0.
-# Sem dependências de frameworks assíncronos pesados no núcleo: utiliza threading
-# da biblioteca padrão com leitura linha-a-linha de stdout/stderr, tornando-o 100%
-# compatível com threads de segundo plano do GTK e do AgentLoop.
+# Decisão de design: Cliente MCP com suporte dual nativo a transporte Stdio (subprocesso local)
+# e SSE / HTTP Streaming (servidores remotos / nuvem), seguindo a especificação aberta
+# Model Context Protocol (2024-11-05).
+# Utiliza exclusivamente a biblioteca padrão Python (subprocess, urllib.request, threading),
+# garantindo zero dependências externas pesadas e total compatibilidade com GTK4/Adwaita.
 
-"""Cliente de conexão com servidores MCP via transporte Stdio (subprocesso)."""
+"""Cliente de conexão com servidores MCP via transportes Stdio e SSE (HTTP Streaming)."""
 
 from __future__ import annotations
 
@@ -13,6 +14,9 @@ import os
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from typing import Any
 
 from .protocol import (
@@ -29,23 +33,11 @@ from .protocol import (
 logger = logging.getLogger(__name__)
 
 
-class MCPClient:
-    """Cliente que gerencia um servidor MCP rodando como processo filho via stdio."""
+class BaseMCPClient:
+    """Classe base que implementa o protocolo JSON-RPC 2.0 e as primitivas do MCP."""
 
-    def __init__(
-        self,
-        name: str,
-        command: str,
-        args: list[str] | None = None,
-        env: dict[str, str] | None = None,
-        cwd: str | None = None,
-    ) -> None:
+    def __init__(self, name: str) -> None:
         self.name = name
-        self.command = command
-        self.args = args or []
-        self.env = env or {}
-        self.cwd = cwd
-
         self.state: MCPServerState = MCPServerState.DISCONNECTED
         self.server_info: dict[str, Any] = {}
         self.capabilities: dict[str, Any] = {}
@@ -59,12 +51,9 @@ class MCPClient:
         self.on_tools_changed: Any | None = None
         self.on_state_changed: Any | None = None
 
-        self._process: subprocess.Popen | None = None
         self._next_req_id: int = 1
         self._lock = threading.RLock()
         self._pending_requests: dict[int | str, tuple[threading.Event, list[JSONRPCResponse | None]]] = {}
-        self._reader_thread: threading.Thread | None = None
-        self._stderr_thread: threading.Thread | None = None
         self._stopping: bool = False
 
     def _set_state(self, new_state: MCPServerState) -> None:
@@ -82,64 +71,42 @@ class MCPClient:
 
     @property
     def is_running(self) -> bool:
-        """Indica se o processo filho está ativo e em estado conectado."""
+        """Indica se o transporte está ativo e em estado conectado."""
         return (
             self.state == MCPServerState.CONNECTED
-            and self._process is not None
-            and self._process.poll() is None
+            and not self._stopping
+            and self._check_transport_alive()
         )
 
-    # ------------------------------------------------------------------
-    # Ciclo de Vida
-    # ------------------------------------------------------------------
+    def _check_transport_alive(self) -> bool:
+        """Verifica se o transporte subjacente permanece ativo."""
+        return True
+
+    def _do_connect(self, timeout: float) -> bool:
+        """Implementado pela subclasse para estabelecer o transporte físico."""
+        raise NotImplementedError
+
+    def _do_disconnect(self) -> None:
+        """Implementado pela subclasse para encerrar o transporte físico."""
+        raise NotImplementedError
+
+    def _do_send_raw(self, msg_str: str, timeout: float = 20.0) -> bool:
+        """Implementado pela subclasse para enviar texto bruto pelo canal."""
+        raise NotImplementedError
 
     def start(self, timeout: float = 10.0) -> bool:
-        """Inicia o subprocesso e realiza o handshake 'initialize' com o servidor MCP."""
+        """Inicia a conexão e executa o handshake 'initialize' com o servidor MCP."""
         with self._lock:
-            if self.state == MCPServerState.CONNECTED and self._process and self._process.poll() is None:
+            if self.state == MCPServerState.CONNECTED and self.is_running:
                 return True
 
             self._set_state(MCPServerState.CONNECTING)
             self.last_error = ""
             self._stopping = False
 
-        # Monta ambiente mesclado com variáveis do sistema
-        full_env = os.environ.copy()
-        for k, v in self.env.items():
-            full_env[k] = os.path.expandvars(str(v))
-
-        # Expande variáveis de ambiente e caminhos de usuário nos argumentos
-        expanded_args = [os.path.expanduser(os.path.expandvars(str(arg))) for arg in self.args]
-        full_cmd = [self.command] + expanded_args
-
-        try:
-            self._process = subprocess.Popen(
-                full_cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-                cwd=self.cwd,
-                env=full_env,
-            )
-        except Exception as exc:
-            self.last_error = f"Falha ao executar comando '{self.command}': {exc}"
+        if not self._do_connect(timeout=timeout):
             self._set_state(MCPServerState.ERROR)
-            logger.error(f"[MCP:{self.name}] {self.last_error}")
             return False
-
-        # Dispara thread de leitura de stdout
-        self._reader_thread = threading.Thread(
-            target=self._stdout_reader_loop, daemon=True, name=f"mcp-out-{self.name}"
-        )
-        self._reader_thread.start()
-
-        # Dispara thread de leitura de stderr para log
-        self._stderr_thread = threading.Thread(
-            target=self._stderr_reader_loop, daemon=True, name=f"mcp-err-{self.name}"
-        )
-        self._stderr_thread.start()
 
         # Executa handshake de inicialização
         init_params = {
@@ -179,7 +146,7 @@ class MCPClient:
         return True
 
     def stop(self) -> None:
-        """Finaliza o subprocesso de forma graciosa."""
+        """Finaliza a conexão de forma limpa e graciosa."""
         with self._lock:
             self._stopping = True
             self._set_state(MCPServerState.DISCONNECTED)
@@ -189,28 +156,10 @@ class MCPClient:
                 evt.set()
             self._pending_requests.clear()
 
-        proc = self._process
-        self._process = None
-
-        if proc:
-            try:
-                if proc.stdin:
-                    proc.stdin.close()
-            except Exception:
-                pass
-
-            try:
-                proc.terminate()
-                proc.wait(timeout=1.5)
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-
-    # ------------------------------------------------------------------
-    # Comunicação JSON-RPC 2.0
-    # ------------------------------------------------------------------
+        try:
+            self._do_disconnect()
+        except Exception as exc:
+            logger.debug(f"[MCP:{self.name}] Erro ao desconectar transporte: {exc}")
 
     def send_request(
         self, method: str, params: dict[str, Any] | None = None, timeout: float = 20.0
@@ -226,17 +175,7 @@ class MCPClient:
         req = JSONRPCRequest(id=req_id, method=method, params=params or {})
         msg_str = json.dumps(req.to_dict()) + "\n"
 
-        proc = self._process
-        if not proc or not proc.stdin or proc.poll() is not None:
-            with self._lock:
-                self._pending_requests.pop(req_id, None)
-            return None
-
-        try:
-            proc.stdin.write(msg_str)
-            proc.stdin.flush()
-        except Exception as exc:
-            logger.debug(f"[MCP:{self.name}] Erro ao escrever requisição no stdin: {exc}")
+        if not self._do_send_raw(msg_str, timeout=timeout):
             with self._lock:
                 self._pending_requests.pop(req_id, None)
             return None
@@ -254,21 +193,9 @@ class MCPClient:
 
     def send_notification(self, method: str, params: dict[str, Any] | None = None) -> None:
         """Envia notificação unidirecional (sem esperar resposta)."""
-        proc = self._process
-        if not proc or not proc.stdin or proc.poll() is not None:
-            return
-
         notif = JSONRPCNotification(method=method, params=params or {})
         msg_str = json.dumps(notif.to_dict()) + "\n"
-        try:
-            proc.stdin.write(msg_str)
-            proc.stdin.flush()
-        except Exception as exc:
-            logger.debug(f"[MCP:{self.name}] Erro ao enviar notificação: {exc}")
-
-    # ------------------------------------------------------------------
-    # Métodos de Alto Nível do Protocolo MCP
-    # ------------------------------------------------------------------
+        self._do_send_raw(msg_str, timeout=10.0)
 
     def list_tools(self, timeout: float = 10.0) -> list[MCPTool]:
         """Consulta as ferramentas exportadas pelo servidor (tools/list)."""
@@ -371,9 +298,172 @@ class MCPClient:
                 text_parts.append(c["text"])
         return "\n".join(text_parts)
 
-    # ------------------------------------------------------------------
-    # Loops de leitura em segundo plano
-    # ------------------------------------------------------------------
+    def _handle_incoming_message(self, raw_line: str) -> None:
+        """Faz o parsing da resposta ou notificação JSON-RPC recebida."""
+        try:
+            data = json.loads(raw_line)
+        except Exception:
+            logger.debug(f"[MCP:{self.name}] Linha não-JSON ignorada: {raw_line[:100]}")
+            return
+
+        if not isinstance(data, dict):
+            return
+
+        # Resposta a uma requisição enviada pelo cliente
+        if "id" in data and data["id"] is not None:
+            req_id = data["id"]
+            resp = JSONRPCResponse.from_dict(data)
+            with self._lock:
+                entry = self._pending_requests.get(req_id)
+                if entry:
+                    evt, container = entry
+                    container[0] = resp
+                    evt.set()
+        elif "method" in data:
+            # Notificação do servidor (ex: logging/message, notifications/tools/list_changed)
+            method = data.get("method", "")
+            params = data.get("params") or {}
+            logger.debug(f"[MCP:{self.name}] Notificação recebida: {method}")
+
+            if self.on_notification:
+                try:
+                    self.on_notification(method, params)
+                except Exception as exc:
+                    logger.debug(f"[MCP:{self.name}] Erro no callback on_notification: {exc}")
+
+            if method == "notifications/tools/list_changed":
+                logger.info(f"[MCP:{self.name}] Notificação tools/list_changed recebida.")
+                if self.on_tools_changed:
+                    try:
+                        self.on_tools_changed(self.name)
+                    except Exception as exc:
+                        logger.debug(f"[MCP:{self.name}] Erro no callback on_tools_changed: {exc}")
+
+    def _schedule_auto_restart(self) -> None:
+        """Tenta reconectar o servidor com backoff exponencial caso a conexão tenha caído inesperadamente."""
+        self._restarting = True
+        self._restart_count += 1
+        delay = min(12.0, 1.5 ** self._restart_count)
+        logger.warning(
+            f"[MCP:{self.name}] Conexão encerrou inesperadamente. Tentando auto-recuperação "
+            f"{self._restart_count}/{self.max_restarts} em {delay:.1f}s..."
+        )
+        self._set_state(MCPServerState.CONNECTING)
+
+        def restart_worker():
+            time.sleep(delay)
+            self.stop()
+            success = self.start()
+            self._restarting = False
+            if success:
+                logger.info(f"[MCP:{self.name}] Recuperado com sucesso via auto-restart.")
+                if self.on_tools_changed:
+                    try:
+                        self.on_tools_changed(self.name)
+                    except Exception as exc:
+                        logger.debug(f"[MCP:{self.name}] Erro ao notificar tools alteradas: {exc}")
+            else:
+                logger.error(f"[MCP:{self.name}] Auto-recuperação falhou na tentativa {self._restart_count}.")
+                self._set_state(MCPServerState.ERROR)
+
+        threading.Thread(target=restart_worker, daemon=True, name=f"mcp-restart-{self.name}").start()
+
+
+class MCPStdioClient(BaseMCPClient):
+    """Cliente que gerencia um servidor MCP rodando como processo filho local via Stdio."""
+
+    def __init__(
+        self,
+        name: str,
+        command: str,
+        args: list[str] | None = None,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
+    ) -> None:
+        super().__init__(name=name)
+        self.command = command
+        self.args = args or []
+        self.env = env or {}
+        self.cwd = cwd
+
+        self._process: subprocess.Popen | None = None
+        self._reader_thread: threading.Thread | None = None
+        self._stderr_thread: threading.Thread | None = None
+
+    def _check_transport_alive(self) -> bool:
+        return self._process is not None and self._process.poll() is None
+
+    def _do_connect(self, timeout: float) -> bool:
+        # Monta ambiente mesclado com variáveis do sistema
+        full_env = os.environ.copy()
+        for k, v in self.env.items():
+            full_env[k] = os.path.expandvars(str(v))
+
+        # Expande variáveis de ambiente e caminhos de usuário nos argumentos
+        expanded_args = [os.path.expanduser(os.path.expandvars(str(arg))) for arg in self.args]
+        full_cmd = [self.command] + expanded_args
+
+        try:
+            self._process = subprocess.Popen(
+                full_cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                cwd=self.cwd,
+                env=full_env,
+            )
+        except Exception as exc:
+            self.last_error = f"Falha ao executar comando '{self.command}': {exc}"
+            logger.error(f"[MCP:{self.name}] {self.last_error}")
+            return False
+
+        # Dispara thread de leitura de stdout
+        self._reader_thread = threading.Thread(
+            target=self._stdout_reader_loop, daemon=True, name=f"mcp-out-{self.name}"
+        )
+        self._reader_thread.start()
+
+        # Dispara thread de leitura de stderr para log
+        self._stderr_thread = threading.Thread(
+            target=self._stderr_reader_loop, daemon=True, name=f"mcp-err-{self.name}"
+        )
+        self._stderr_thread.start()
+        return True
+
+    def _do_disconnect(self) -> None:
+        proc = self._process
+        self._process = None
+
+        if proc:
+            try:
+                if proc.stdin:
+                    proc.stdin.close()
+            except Exception:
+                pass
+
+            try:
+                proc.terminate()
+                proc.wait(timeout=1.5)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+
+    def _do_send_raw(self, msg_str: str, timeout: float = 20.0) -> bool:
+        proc = self._process
+        if not proc or not proc.stdin or proc.poll() is not None:
+            return False
+
+        try:
+            proc.stdin.write(msg_str)
+            proc.stdin.flush()
+            return True
+        except Exception as exc:
+            logger.debug(f"[MCP:{self.name}] Erro ao escrever requisição no stdin: {exc}")
+            return False
 
     def _stdout_reader_loop(self) -> None:
         proc = self._process
@@ -411,35 +501,6 @@ class MCPClient:
                     self._set_state(MCPServerState.DISCONNECTED)
                     logger.debug(f"[MCP:{self.name}] Processo stdout encerrou.")
 
-    def _schedule_auto_restart(self) -> None:
-        """Tenta reconectar o servidor com backoff exponencial caso tenha caído inesperadamente."""
-        self._restarting = True
-        self._restart_count += 1
-        delay = min(12.0, 1.5 ** self._restart_count)
-        logger.warning(
-            f"[MCP:{self.name}] Processo encerrou inesperadamente. Tentando auto-recuperação "
-            f"{self._restart_count}/{self.max_restarts} em {delay:.1f}s..."
-        )
-        self._set_state(MCPServerState.CONNECTING)
-
-        def restart_worker():
-            time.sleep(delay)
-            self.stop()
-            success = self.start()
-            self._restarting = False
-            if success:
-                logger.info(f"[MCP:{self.name}] Recuperado com sucesso via auto-restart.")
-                if self.on_tools_changed:
-                    try:
-                        self.on_tools_changed(self.name)
-                    except Exception as exc:
-                        logger.debug(f"[MCP:{self.name}] Erro ao notificar tools alteradas: {exc}")
-            else:
-                logger.error(f"[MCP:{self.name}] Auto-recuperação falhou na tentativa {self._restart_count}.")
-                self._set_state(MCPServerState.ERROR)
-
-        threading.Thread(target=restart_worker, daemon=True, name=f"mcp-restart-{self.name}").start()
-
     def _stderr_reader_loop(self) -> None:
         proc = self._process
         if not proc or not proc.stderr:
@@ -456,44 +517,186 @@ class MCPClient:
             except Exception:
                 break
 
-    def _handle_incoming_message(self, raw_line: str) -> None:
-        """Faz o parsing da resposta ou notificação JSON-RPC recebida."""
+
+class MCPSSEClient(BaseMCPClient):
+    """Cliente que gerencia a conexão com servidores MCP remotos via HTTP Server-Sent Events (SSE)."""
+
+    def __init__(
+        self,
+        name: str,
+        url: str,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        super().__init__(name=name)
+        self.url = (url or "").strip()
+        self.headers = headers or {}
+
+        self._post_endpoint: str | None = None
+        self._sse_response: Any | None = None
+        self._sse_thread: threading.Thread | None = None
+        self._endpoint_event = threading.Event()
+
+    def _check_transport_alive(self) -> bool:
+        return self._sse_response is not None and not self._stopping
+
+    def _get_request_headers(self) -> dict[str, str]:
+        req_headers = {
+            "User-Agent": "zorin-copilot/1.0",
+            "Accept": "text/event-stream",
+            "Cache-Control": "no-cache",
+        }
+        for k, v in self.headers.items():
+            req_headers[k] = os.path.expandvars(str(v))
+        return req_headers
+
+    def _do_connect(self, timeout: float) -> bool:
+        if not self.url:
+            self.last_error = "URL do servidor SSE não informada."
+            logger.error(f"[MCP-SSE:{self.name}] {self.last_error}")
+            return False
+
+        self._endpoint_event.clear()
+        self._post_endpoint = None
+
+        req = urllib.request.Request(self.url, headers=self._get_request_headers(), method="GET")
         try:
-            data = json.loads(raw_line)
-        except Exception:
-            # Algumas saídas podem conter logs misturados no stdout
-            logger.debug(f"[MCP:{self.name}] Linha não-JSON ignorada: {raw_line[:100]}")
+            self._sse_response = urllib.request.urlopen(req, timeout=timeout)
+        except Exception as exc:
+            self.last_error = f"Falha ao conectar via SSE em '{self.url}': {exc}"
+            logger.error(f"[MCP-SSE:{self.name}] {self.last_error}")
+            return False
+
+        # Inicia leitura da stream SSE
+        self._sse_thread = threading.Thread(
+            target=self._sse_reader_loop, daemon=True, name=f"mcp-sse-{self.name}"
+        )
+        self._sse_thread.start()
+
+        # Aguarda a descoberta do endpoint de POST transmitido pelo evento 'endpoint'
+        # Damos uma janela de até 3 segundos ou o timeout especificado
+        wait_time = min(timeout, 3.0)
+        dispatched = self._endpoint_event.wait(timeout=wait_time)
+        if not dispatched and not self._post_endpoint:
+            # Fallback amigável: assume a própria URL base caso o servidor aceite POST no mesmo caminho
+            self._post_endpoint = self.url
+            logger.debug(f"[MCP-SSE:{self.name}] Evento 'endpoint' não recebido; fallback para {self.url}")
+
+        return True
+
+    def _do_disconnect(self) -> None:
+        resp = self._sse_response
+        self._sse_response = None
+        self._endpoint_event.set()
+
+        if resp:
+            try:
+                resp.close()
+            except Exception:
+                pass
+
+    def _do_send_raw(self, msg_str: str, timeout: float = 20.0) -> bool:
+        target_url = self._post_endpoint or self.url
+        data_bytes = msg_str.encode("utf-8")
+        post_headers = self._get_request_headers()
+        post_headers["Content-Type"] = "application/json"
+        post_headers["Accept"] = "application/json, text/event-stream, */*"
+
+        req = urllib.request.Request(target_url, data=data_bytes, headers=post_headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                body = resp.read().decode("utf-8", errors="replace").strip()
+                # Se o servidor responder diretamente com o corpo JSON-RPC no POST
+                if body:
+                    self._handle_incoming_message(body)
+                return True
+        except urllib.error.HTTPError as exc:
+            err_body = exc.read().decode("utf-8", errors="replace").strip() if hasattr(exc, "read") else ""
+            self.last_error = f"Erro HTTP {exc.code} ao enviar mensagem para {target_url}: {err_body or exc.reason}"
+            logger.debug(f"[MCP-SSE:{self.name}] {self.last_error}")
+            return False
+        except Exception as exc:
+            self.last_error = f"Erro de rede ao enviar mensagem POST para {target_url}: {exc}"
+            logger.debug(f"[MCP-SSE:{self.name}] {self.last_error}")
+            return False
+
+    def _sse_reader_loop(self) -> None:
+        resp = self._sse_response
+        if not resp:
             return
 
-        if not isinstance(data, dict):
-            return
+        current_event = "message"
+        data_lines: list[str] = []
 
-        # Resposta a uma requisição enviada pelo cliente
-        if "id" in data and data["id"] is not None:
-            req_id = data["id"]
-            resp = JSONRPCResponse.from_dict(data)
+        try:
+            while not self._stopping:
+                raw_line = resp.readline()
+                if not raw_line:
+                    break
+                line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+
+                if not line:
+                    # Linha em branco delimita fim de evento SSE
+                    if data_lines:
+                        content = "\n".join(data_lines)
+                        if current_event == "endpoint":
+                            resolved_endpoint = urllib.parse.urljoin(self.url, content.strip())
+                            self._post_endpoint = resolved_endpoint
+                            self._endpoint_event.set()
+                            logger.info(f"[MCP-SSE:{self.name}] Endpoint POST registrado: {resolved_endpoint}")
+                        elif current_event in ("message", ""):
+                            self._handle_incoming_message(content)
+                    current_event = "message"
+                    data_lines = []
+                    continue
+
+                if line.startswith(":"):
+                    continue  # Comentário ou keep-alive ping SSE
+                if line.startswith("event:"):
+                    current_event = line[6:].strip()
+                elif line.startswith("data:"):
+                    data_lines.append(line[5:].lstrip())
+
+        except Exception as exc:
+            if not self._stopping:
+                logger.debug(f"[MCP-SSE:{self.name}] Loop SSE interrompido: {exc}")
+
+        with self._lock:
+            should_restart = (
+                not self._stopping
+                and self.auto_restart
+                and self._restart_count < self.max_restarts
+                and not self._restarting
+            )
+
+        if should_restart:
+            self._schedule_auto_restart()
+        else:
             with self._lock:
-                entry = self._pending_requests.get(req_id)
-                if entry:
-                    evt, container = entry
-                    container[0] = resp
-                    evt.set()
-        elif "method" in data:
-            # Notificação do servidor (ex: logging/message, notifications/tools/list_changed)
-            method = data.get("method", "")
-            params = data.get("params") or {}
-            logger.debug(f"[MCP:{self.name}] Notificação recebida: {method}")
+                if not self._stopping:
+                    self._set_state(MCPServerState.DISCONNECTED)
+                    logger.debug(f"[MCP-SSE:{self.name}] Stream SSE desconectada.")
 
-            if self.on_notification:
-                try:
-                    self.on_notification(method, params)
-                except Exception as exc:
-                    logger.debug(f"[MCP:{self.name}] Erro no callback on_notification: {exc}")
 
-            if method == "notifications/tools/list_changed":
-                logger.info(f"[MCP:{self.name}] Notificação tools/list_changed recebida.")
-                if self.on_tools_changed:
-                    try:
-                        self.on_tools_changed(self.name)
-                    except Exception as exc:
-                        logger.debug(f"[MCP:{self.name}] Erro no callback on_tools_changed: {exc}")
+class MCPClient(BaseMCPClient):
+    """Fábrica e classe base unificada para clientes MCP (compatível com Stdio e SSE)."""
+
+    def __new__(
+        cls,
+        name: str,
+        command: str | None = None,
+        args: list[str] | None = None,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
+        transport: str = "stdio",
+        url: str | None = None,
+        headers: dict[str, str] | None = None,
+    ):
+        transport_normalized = (transport or "stdio").strip().lower()
+        if transport_normalized == "sse" or (url and not command):
+            instance = super().__new__(MCPSSEClient)
+            instance.__init__(name=name, url=url or "", headers=headers)
+            return instance
+
+        instance = super().__new__(MCPStdioClient)
+        instance.__init__(name=name, command=command or "", args=args, env=env, cwd=cwd)
+        return instance
