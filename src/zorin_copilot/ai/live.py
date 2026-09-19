@@ -3328,8 +3328,11 @@ class GeminiLiveClient:
         Omite `end_session` quando o usuário desativou o encerramento autônomo
         nas preferências — assim o modelo nem chega a cogitar a ferramenta.
         A constante permanece intacta (testes a inspecionam diretamente).
-        Mescla dinamicamente ferramentas do ToolRegistry e servidores MCP ativos.
+        Mescla dinamicamente ferramentas do ToolRegistry e servidores MCP ativos,
+        garantindo sanitização estrita para o protocolo Gemini Live WebSocket (evita erro 1007).
         """
+        from .agent_tools import sanitize_gemini_schema
+
         cfg = getattr(self, "config", None)
         end_session_enabled = cfg is None or bool(getattr(cfg, "end_session_enabled", True))
         decls = [
@@ -3346,7 +3349,21 @@ class GeminiLiveClient:
                     decls.append(spec_schema)
                     declared_names.add(s_name)
 
-        return [{"functionDeclarations": decls}]
+        sanitized_decls: list[dict[str, Any]] = []
+        for d in decls:
+            d_name = str(d.get("name") or "").strip()
+            d_desc = str(d.get("description") or f"Ferramenta {d_name}").strip()
+            raw_params = d.get("parameters") or {"type": "OBJECT", "properties": {}, "required": []}
+            clean_params = sanitize_gemini_schema(raw_params)
+            if clean_params.get("type") != "OBJECT":
+                clean_params = {"type": "OBJECT", "properties": {}, "required": []}
+            sanitized_decls.append({
+                "name": d_name,
+                "description": d_desc,
+                "parameters": clean_params,
+            })
+
+        return [{"functionDeclarations": sanitized_decls}]
 
     def _build_setup_payload(
         self,

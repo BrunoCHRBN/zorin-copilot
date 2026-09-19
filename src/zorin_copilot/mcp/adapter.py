@@ -37,14 +37,17 @@ def convert_mcp_input_schema(input_schema: dict[str, Any] | None) -> dict[str, A
     if not input_schema or not isinstance(input_schema, dict):
         return {"type": "OBJECT", "properties": {}, "required": []}
 
-    properties = input_schema.get("properties", {})
-    required = input_schema.get("required", [])
+    from ..ai.agent_tools import sanitize_gemini_schema
 
-    return {
-        "type": "OBJECT",
-        "properties": properties,
-        "required": required if isinstance(required, list) else [],
-    }
+    sanitized = sanitize_gemini_schema(input_schema)
+    if sanitized.get("type") != "OBJECT":
+        sanitized["type"] = "OBJECT"
+    if "properties" not in sanitized or not isinstance(sanitized["properties"], dict):
+        sanitized["properties"] = {}
+    if "required" not in sanitized or not isinstance(sanitized["required"], list):
+        sanitized["required"] = []
+
+    return sanitized
 
 
 def register_mcp_tools_in_registry(

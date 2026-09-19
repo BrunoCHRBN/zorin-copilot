@@ -90,6 +90,135 @@ def _bool(desc: str) -> dict[str, str]:
     return {"type": "BOOLEAN", "description": desc}
 
 
+GEMINI_ALLOWED_SCHEMA_KEYS = frozenset({
+    "type", "format", "description", "nullable", "enum", "properties", "required", "items"
+})
+
+GEMINI_TYPE_MAPPING = {
+    "string": "STRING",
+    "str": "STRING",
+    "integer": "INTEGER",
+    "int": "INTEGER",
+    "number": "NUMBER",
+    "float": "NUMBER",
+    "boolean": "BOOLEAN",
+    "bool": "BOOLEAN",
+    "array": "ARRAY",
+    "list": "ARRAY",
+    "object": "OBJECT",
+    "dict": "OBJECT",
+}
+
+
+def sanitize_gemini_schema(raw_schema: Any) -> dict[str, Any]:
+    """Sanitiza recursivamente um JSON Schema para a especificação estrita do Gemini Schema (Protobuf).
+
+    Remove chaves OpenAPI/JSON Schema proibidas pelo Gemini (e.g. exclusiveMaximum,
+    exclusiveMinimum, minimum, maximum, title, default, additionalProperties, $schema, etc.),
+    converte uniões anyOf/oneOf em tipos anuláveis e garante conformidade total com
+    o Gemini Live WebSocket API (prevenindo erro 1007 de invalid payload).
+    """
+    if not isinstance(raw_schema, dict):
+        return {"type": "STRING"}
+
+    cleaned: dict[str, Any] = {}
+
+    # 1. Trata anyOf / oneOf (padrão Pydantic/OpenAPI para Optional / Nullable)
+    if "anyOf" in raw_schema or "oneOf" in raw_schema:
+        union_variants = raw_schema.get("anyOf") or raw_schema.get("oneOf") or []
+        is_nullable = False
+        primary_variant = None
+        for v in union_variants:
+            if isinstance(v, dict):
+                if v.get("type") in ("null", "NULL") or (v.get("const") is None and "const" in v):
+                    is_nullable = True
+                elif not primary_variant:
+                    primary_variant = v
+
+        merged: dict[str, Any] = {}
+        if primary_variant and isinstance(primary_variant, dict):
+            merged.update(primary_variant)
+        if "description" in raw_schema and "description" not in merged:
+            merged["description"] = raw_schema["description"]
+        if is_nullable:
+            merged["nullable"] = True
+        raw_schema = merged
+
+    # 2. Normaliza type
+    raw_type = raw_schema.get("type")
+    if isinstance(raw_type, list):
+        is_nullable = "null" in raw_type
+        non_null_types = [t for t in raw_type if t != "null"]
+        base_t = non_null_types[0] if non_null_types else "string"
+        cleaned["type"] = GEMINI_TYPE_MAPPING.get(base_t.lower(), "STRING")
+        if is_nullable:
+            cleaned["nullable"] = True
+    elif isinstance(raw_type, str):
+        cleaned["type"] = GEMINI_TYPE_MAPPING.get(raw_type.lower(), raw_type.upper())
+    else:
+        if "properties" in raw_schema:
+            cleaned["type"] = "OBJECT"
+        elif "items" in raw_schema:
+            cleaned["type"] = "ARRAY"
+        else:
+            cleaned["type"] = "STRING"
+
+    # 3. Description (com enriquecimento semântico de default se houver)
+    desc = raw_schema.get("description")
+    title = raw_schema.get("title")
+    default_val = raw_schema.get("default")
+    extra_hints: list[str] = []
+    if default_val is not None and default_val != "":
+        extra_hints.append(f"padrão: {default_val}")
+
+    desc_str = str(desc or "").strip()
+    if not desc_str and title:
+        desc_str = str(title).strip()
+    if extra_hints and desc_str and not any(h in desc_str for h in extra_hints):
+        desc_str = f"{desc_str} ({'; '.join(extra_hints)})"
+
+    if desc_str:
+        cleaned["description"] = desc_str
+
+    # 4. Format
+    if "format" in raw_schema and isinstance(raw_schema["format"], str):
+        cleaned["format"] = raw_schema["format"]
+
+    # 5. Nullable
+    if raw_schema.get("nullable") is True or cleaned.get("nullable") is True:
+        cleaned["nullable"] = True
+
+    # 6. Enum
+    if "enum" in raw_schema and isinstance(raw_schema["enum"], (list, tuple)):
+        cleaned["enum"] = [str(e) for e in raw_schema["enum"]]
+
+    # 7. Properties & Required (para OBJECT)
+    if cleaned["type"] == "OBJECT":
+        raw_props = raw_schema.get("properties")
+        cleaned_props: dict[str, Any] = {}
+        if isinstance(raw_props, dict):
+            for p_name, p_schema in raw_props.items():
+                if isinstance(p_name, str):
+                    cleaned_props[p_name] = sanitize_gemini_schema(p_schema)
+        cleaned["properties"] = cleaned_props
+
+        raw_req = raw_schema.get("required")
+        if isinstance(raw_req, (list, tuple)):
+            cleaned["required"] = [str(r) for r in raw_req if str(r) in cleaned_props]
+        else:
+            cleaned["required"] = []
+
+    # 8. Items (para ARRAY)
+    elif cleaned["type"] == "ARRAY":
+        raw_items = raw_schema.get("items")
+        if isinstance(raw_items, dict):
+            cleaned["items"] = sanitize_gemini_schema(raw_items)
+        else:
+            cleaned["items"] = {"type": "STRING"}
+
+    return cleaned
+
+
 # --------------------------------------------------------------------------- #
 # Registro
 # --------------------------------------------------------------------------- #
