@@ -611,3 +611,87 @@ def test_metadados_registram_a_disciplina():
     markdown = render_markdown(result)
 
     assert "- Disciplina: Marketing" in markdown
+
+
+# --------------------------------------------------------------------------- #
+# Captura multi-páginas SCORM / AVA
+# --------------------------------------------------------------------------- #
+
+
+def test_capture_multipage_combina_paginas(monkeypatch):
+    capture = LessonCapture(min_words=5)
+
+    pages = [
+        CaptureResult(ok=True, strategy="atspi", title="Aula SCORM", text="Texto do slide um com conteúdo importante.", word_count=7, app="Firefox"),
+        CaptureResult(ok=True, strategy="atspi", title="Aula SCORM", text="Texto do slide dois com conceitos avançados.", word_count=7, app="Firefox"),
+    ]
+    idx = 0
+
+    def fake_capture(*args, **kwargs):
+        nonlocal idx
+        res = pages[min(idx, len(pages) - 1)]
+        idx += 1
+        return res
+
+    monkeypatch.setattr(capture, "capture", fake_capture)
+    monkeypatch.setattr(capture, "_advance_slide", lambda app, advance_by: True)
+
+    multi_res = capture.capture_multipage(app_name="Firefox", max_pages=2, delay_sec=0)
+
+    assert multi_res.ok is True
+    assert "+multipage" in multi_res.strategy
+    assert "## Parte 1" in multi_res.text
+    assert "Texto do slide um" in multi_res.text
+    assert "## Parte 2" in multi_res.text
+    assert "Texto do slide dois" in multi_res.text
+    assert multi_res.word_count > 10
+
+
+def test_capture_multipage_para_quando_slide_repete(monkeypatch):
+    capture = LessonCapture(min_words=5)
+
+    pages = [
+        CaptureResult(ok=True, strategy="atspi", title="Slide Único", text="Mesmo conteúdo na tela.", word_count=4, app="Firefox"),
+        CaptureResult(ok=True, strategy="atspi", title="Slide Único", text="Mesmo conteúdo na tela.", word_count=4, app="Firefox"),
+    ]
+    idx = 0
+
+    def fake_capture(*args, **kwargs):
+        nonlocal idx
+        res = pages[min(idx, len(pages) - 1)]
+        idx += 1
+        return res
+
+    monkeypatch.setattr(capture, "capture", fake_capture)
+    advances = []
+    monkeypatch.setattr(capture, "_advance_slide", lambda app, advance_by: advances.append(1) or True)
+
+    multi_res = capture.capture_multipage(app_name="Firefox", max_pages=5, delay_sec=0)
+
+    assert multi_res.ok is True
+    assert multi_res.text == "Mesmo conteúdo na tela."
+    assert len(advances) == 1  # avançou uma vez, viu que o conteúdo repetiu e parou
+
+
+def test_advance_slide_hotkey_fallback(monkeypatch):
+    capture = LessonCapture()
+    hotkeys_pressed = []
+
+    class FakeDriver:
+        def __init__(self, simulation=False):
+            pass
+        def hotkey(self, key):
+            hotkeys_pressed.append(key)
+
+    monkeypatch.setattr("zorin_copilot.shell.input_driver.VirtualInputDriver", FakeDriver)
+    ok = capture._advance_slide(app="Firefox", advance_by="hotkey")
+    assert ok is True
+    assert hotkeys_pressed == ["Page_Down"]
+
+
+def test_cli_study_capture_multipage_args():
+    args = cli.build_parser().parse_args(["study", "capture", "--multi-page", "--max-pages", "10", "--advance-by", "vlm"])
+    assert args.multi_page is True
+    assert args.max_pages == 10
+    assert args.advance_by == "vlm"
+

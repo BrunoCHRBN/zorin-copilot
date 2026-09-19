@@ -42,6 +42,11 @@ Nesta etapa, resolvemos o gargalo de interrupção prematura ("Limite de passos 
    - **Design Nativo Libadwaita:** Ícones simbólicos (`system-search-symbolic`, `utilities-system-monitor-symbolic`) e sumários claros no `AgentExecutionWidget`.
    - **Regra 13 no Prompt:** Agente explicitamente orientado a usar `search_code` em vez de inspecionar arquivos sequencialmente.
    - **Documentação e Testes:** `docs/BUSCA_CODIGO_E_PROCESSOS.md` e `tests/test_system_inspect.py`.
+8. **Automação AVA / SCORM Multi-Páginas & Decks Anki Nativos (Concluída ✅):**
+   - **Módulo `core/study_capture.py`:** Suporte a captura sequencial multi-páginas de players SCORM/AVA com avanço por VLM Grounding (`click_visual_element`), nós AT-SPI e atalhos de teclado.
+   - **Módulo `core/study_cards.py`:** Exportador nativo de decks Anki `.apkg` (coleção SQLite `collection.anki2` + ZIP) e `.tsv` com suporte a temas Libadwaita claro e escuro.
+   - **Ferramentas Integradas:** `study_generate_deck`, `study_summarize`, `study_export_anki` e `capture_lesson` com `multi_page` expostas no `ToolRegistry` (`RiskLevel.SAFE`), GUI Adwaita, assistente de voz Gemini Live e CLI (`study export-anki`).
+   - **Testes Completos:** 100% de cobertura nos módulos de estudo e Gemini Live.
 
 ---
 
@@ -51,36 +56,34 @@ Nesta etapa, resolvemos o gargalo de interrupção prematura ("Limite de passos 
                                   MAPA DE PRIORIDADES
                                   
   ┌─────────────────────────────────┐        ┌──────────────────────────────────┐
-  │  1. BUSCA CÓDIGO & PROCESSOS    │   ──►  │  2. AUTOMAÇÃO AVA / ANKI         │
-  │  (CONCLUÍDO - ripgrep / ps)     │        │  (Extração SCORM + Decks Anki)   │
+  │  1. AUTOMAÇÃO AVA / ANKI        │   ──►  │  2. MCP REMOTO (SSE / HTTP)      │
+  │  (CONCLUÍDO ✅ - SCORM + Anki)  │        │  (Servidores Cloud / Tokens)     │
   └─────────────────────────────────┘        └──────────────────────────────────┘
                    │                                          │
                    ▼                                          ▼
   ┌─────────────────────────────────┐        ┌──────────────────────────────────┐
-  │  3. MCP REMOTO (SSE / HTTP)     │   ──►  │  4. MCP PROMPTS NA PALETA        │
-  │  (Servidores Cloud / Tokens)    │        │  (Atalhos dinâmicos via Ctrl+K)  │
+  │  3. MCP PROMPTS NA PALETA       │   ──►  │  4. SUBAGENTES ESPECIALIZADOS    │
+  │  (Atalhos dinâmicos via Ctrl+K) │        │  (Pesquisa, Código, A11y)        │
   └─────────────────────────────────┘        └──────────────────────────────────┘
 ```
 
-### Passo 1: Grounding Visual com VLM Local (Concluído ✅)
-- Suporte a modelos de visão no Ollama (`qwen2.5vl`, `minicpm-v`) implementado com desambiguação geométrica, projeção pixel-perfect em monitores Wayland e fallback em nuvem. Ferramentas `locate_element_visual` e `click_visual_element` operacionais.
+### Passo 1: Automação de Estudo AVA / SCORM & Exportação Anki (Concluído ✅)
+- Captura sequencial multi-páginas para players de aula EAD com avanço automático por VLM Grounding e AT-SPI.
+- Exportação direta de coleções Anki `.apkg` prontas para importação no desktop ou mobile sem dependências externas.
+- Comandos CLI, ferramentas no Modo Agente e suporte de áudio no Gemini Live totalmente operacionais.
 
-### Passo 2: Ferramentas Nativas de Busca de Código e Processos Locais (Concluído ✅)
-- Implementada a ferramenta `search_code` com ripgrep e fallback em Python, permitindo buscas instantâneas por definições e padrões sem queimar passos de leitura de arquivos.
-- Implementada a ferramenta `system_processes` com `ps` e fallback `/proc`, permitindo monitorar consumo de RAM/CPU e verificar serviços e servidores ativos.
-
-### Passo 3: Pipeline de Automação de Estudo AVA / SENAC (Fase A)
-- **Problema:** A captura de materiais didáticos do portal EAD exige interação manual repetitiva através de múltiplos módulos e subunidades.
-- **Ações:**
-  1. Sequência automatizada de navegação supervisionada para listagem e leitura de unidades curriculares.
-  2. Extração de conteúdo embutido utilizando o leitor AT-SPI2 e Smart OCR com limpeza automática de artefatos.
-  3. Geração automática de cartões de repetição espaçada no formato Anki (`.apkg`) e sumários em Markdown salvos em `~/Documentos/Estudos`.
-
-### Passo 5: Suporte a Servidores MCP Remotos (SSE / HTTP Streaming)
+### Passo 2: Suporte a Servidores MCP Remotos (SSE / HTTP Streaming)
 - **Problema:** Atualmente o subsistema MCP suporta apenas processos locais via `stdio`.
 - **Ações:**
   1. Implementar transporte client SSE (Server-Sent Events) sobre HTTP no `MCPClient`.
   2. Adicionar suporte a autenticação por token (Bearer Token / API Key) para conexão com servidores MCP remotos corporativos ou de infraestrutura na nuvem.
+  3. Adicionar configuração de servidores remotos no arquivo `mcp_servers.json`.
+
+### Passo 3: MCP Prompts na Paleta de Comandos (`Ctrl+K`)
+- **Problema:** Usuários precisam digitar prompts repetitivos para tarefas comuns fornecidas por servidores MCP.
+- **Ações:**
+  1. Suportar `prompts/list` e `prompts/get` da especificação MCP.
+  2. Integrar os prompts descobertos dinamicamente na Paleta de Comandos rápida (`Ctrl+K`) com preenchimento assistido de argumentos.
 
 ---
 

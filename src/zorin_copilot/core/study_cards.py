@@ -22,6 +22,10 @@ import json
 import logging
 import os
 import re
+import sqlite3
+import tempfile
+import time
+import zipfile
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Iterable, Sequence
@@ -445,6 +449,274 @@ class DeckStore:
             if deck is not None:
                 decks.append(deck)
         return decks
+
+    def export_apkg(self, deck_id: str, output_path: str | None = None) -> str:
+        deck = self.load(deck_id)
+        if deck is None:
+            raise FileNotFoundError(f"Baralho '{deck_id}' não encontrado.")
+        if output_path is None:
+            out_dir = os.path.expanduser("~/Documentos/Estudos/decks")
+            output_path = os.path.join(out_dir, f"{deck.id}.apkg")
+        return export_anki_apkg(deck, output_path)
+
+    def export_tsv(self, deck_id: str, output_path: str | None = None) -> str:
+        deck = self.load(deck_id)
+        if deck is None:
+            raise FileNotFoundError(f"Baralho '{deck_id}' não encontrado.")
+        if output_path is None:
+            out_dir = os.path.expanduser("~/Documentos/Estudos/decks")
+            output_path = os.path.join(out_dir, f"{deck.id}.tsv")
+        return export_anki_tsv(deck, output_path)
+
+
+def export_anki_apkg(deck: Deck, output_path: str) -> str:
+    """Exporta um baralho (Deck) para o formato de pacote nativo do Anki (.apkg).
+
+    Gera uma coleção SQLite compatível com o Anki Desktop e AnkiMobile (collection.anki2),
+    incluindo modelos básicos, estilização Libadwaita com suporte a tema escuro,
+    tags e agendamento de revisão espaçada inicial.
+    """
+    out_abs = os.path.abspath(os.path.expanduser(output_path))
+    os.makedirs(os.path.dirname(out_abs), exist_ok=True)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "collection.anki2")
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+
+        cur.executescript(
+            """
+            CREATE TABLE col (
+                id integer primary key,
+                crt integer not null,
+                mod integer not null,
+                scm integer not null,
+                ver integer not null,
+                dty integer not null,
+                usn integer not null,
+                ls integer not null,
+                conf text not null,
+                models text not null,
+                decks text not null,
+                dconf text not null,
+                tags text not null
+            );
+            CREATE TABLE notes (
+                id integer primary key,
+                guid text not null,
+                mid integer not null,
+                mod integer not null,
+                usn integer not null,
+                tags text not null,
+                flds text not null,
+                sfld text not null,
+                csum integer not null,
+                flags integer not null,
+                data text not null
+            );
+            CREATE TABLE cards (
+                id integer primary key,
+                nid integer not null,
+                did integer not null,
+                ord integer not null,
+                mod integer not null,
+                usn integer not null,
+                type integer not null,
+                queue integer not null,
+                due integer not null,
+                ivl integer not null,
+                factor integer not null,
+                reps integer not null,
+                lapses integer not null,
+                left integer not null,
+                odue integer not null,
+                odid integer not null,
+                flags integer not null,
+                data text not null
+            );
+            CREATE TABLE revlog (
+                id integer primary key,
+                cid integer not null,
+                usn integer not null,
+                ease integer not null,
+                ivl integer not null,
+                lastIvl integer not null,
+                factor integer not null,
+                time integer not null,
+                type integer not null
+            );
+            CREATE INDEX ix_notes_usn on notes (usn);
+            CREATE INDEX ix_cards_usn on cards (usn);
+            CREATE INDEX ix_cards_nid on cards (nid);
+            CREATE INDEX ix_cards_sched on cards (did, queue, due);
+            """
+        )
+
+        now = int(time.time())
+        now_ms = int(time.time() * 1000)
+
+        # ID determinístico para o deck baseado no deck.id
+        deck_id_int = int(hashlib.md5(deck.id.encode("utf-8")).hexdigest()[:12], 16) % (10**13)
+        if deck_id_int in (0, 1):
+            deck_id_int = 2
+        model_id = (deck_id_int + 1) % (10**13)
+
+        deck_full_name = f"{deck.discipline}::{deck.title}" if deck.discipline else deck.title
+        model_name = f"ZorinCopilot-{deck.discipline or 'Estudos'}"
+
+        models_dict = {
+            str(model_id): {
+                "id": model_id,
+                "name": model_name,
+                "type": 0,
+                "mod": now,
+                "usn": -1,
+                "sortf": 0,
+                "did": deck_id_int,
+                "tmpls": [
+                    {
+                        "name": "Card 1",
+                        "ord": 0,
+                        "qfmt": "{{Front}}",
+                        "afmt": "{{FrontSide}}\n\n<hr id=answer>\n\n{{Back}}",
+                        "did": None,
+                        "bafmt": "",
+                        "bqfmt": "",
+                    }
+                ],
+                "flds": [
+                    {"name": "Front", "ord": 0, "sticky": False, "rtl": False, "font": "Arial", "size": 20},
+                    {"name": "Back", "ord": 1, "sticky": False, "rtl": False, "font": "Arial", "size": 20},
+                ],
+                "css": (
+                    ".card { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; "
+                    "font-size: 20px; text-align: center; color: #2e3436; background-color: #ffffff; padding: 12px; }\n"
+                    ".nightMode .card { color: #eeeeec; background-color: #2d2d2d; }\n"
+                    "#answer { text-align: left; margin-top: 20px; font-size: 18px; border-top: 1px solid #78aeed; padding-top: 10px; }"
+                ),
+                "latexPre": "",
+                "latexPost": "",
+            }
+        }
+
+        decks_dict = {
+            "1": {
+                "id": 1,
+                "name": "Default",
+                "mod": now,
+                "usn": -1,
+                "desc": "",
+                "dyn": 0,
+                "collapsed": False,
+            },
+            str(deck_id_int): {
+                "id": deck_id_int,
+                "name": deck_full_name,
+                "mod": now,
+                "usn": -1,
+                "desc": f"Baralho '{deck.title}' gerado pelo Zorin Copilot.",
+                "dyn": 0,
+                "collapsed": False,
+                "extendNew": 10,
+                "extendRev": 50,
+            },
+        }
+
+        cur.execute(
+            "INSERT INTO col VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                1,
+                now,
+                now_ms,
+                now_ms,
+                11,
+                0,
+                0,
+                0,
+                json.dumps({"nextPos": 1}),
+                json.dumps(models_dict),
+                json.dumps(decks_dict),
+                json.dumps({"1": {"id": 1}}),
+                "{}",
+            ),
+        )
+
+        for idx, card in enumerate(deck.cards):
+            note_id = now_ms + (idx * 2) + 2
+            card_id = now_ms + (idx * 2) + 3
+
+            front_html = card.front.replace("\n", "<br>")
+            back_html = card.back.replace("\n", "<br>")
+            flds = f"{front_html}\x1f{back_html}"
+
+            guid = hashlib.sha1(f"{card.id}:{card.front}".encode("utf-8")).hexdigest()[:10]
+            tags_str = " " + " ".join(card.tags) + " " if card.tags else ""
+            csum = int(hashlib.sha1(card.front.encode("utf-8")).hexdigest()[:8], 16)
+
+            cur.execute(
+                "INSERT INTO notes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    note_id,
+                    guid,
+                    model_id,
+                    now,
+                    -1,
+                    tags_str,
+                    flds,
+                    card.front,
+                    csum,
+                    0,
+                    "",
+                ),
+            )
+
+            queue_type = 2 if card.repetitions > 0 else 0
+            cur.execute(
+                "INSERT INTO cards VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    card_id,
+                    note_id,
+                    deck_id_int,
+                    0,
+                    now,
+                    -1,
+                    queue_type,
+                    queue_type,
+                    idx + 1,
+                    card.interval_days,
+                    int(card.easiness * 1000),
+                    card.repetitions,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    "",
+                ),
+            )
+
+        conn.commit()
+        conn.close()
+
+        with zipfile.ZipFile(out_abs, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.write(db_path, "collection.anki2")
+            zf.writestr("media", "{}")
+
+    return out_abs
+
+
+def export_anki_tsv(deck: Deck, output_path: str) -> str:
+    """Exporta um baralho para formato de texto TSV (Tab-Separated Values) compatível com Anki."""
+    out_abs = os.path.abspath(os.path.expanduser(output_path))
+    os.makedirs(os.path.dirname(out_abs), exist_ok=True)
+    with open(out_abs, "w", encoding="utf-8") as f:
+        f.write("#separator:tab\n#html:true\n#tags column:3\n")
+        for card in deck.cards:
+            f_clean = card.front.replace("\t", " ").replace("\n", "<br>")
+            b_clean = card.back.replace("\t", " ").replace("\n", "<br>")
+            tags_clean = " ".join(card.tags)
+            f.write(f"{f_clean}\t{b_clean}\t{tags_clean}\n")
+    return out_abs
 
 
 def new_deck(

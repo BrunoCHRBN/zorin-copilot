@@ -1133,6 +1133,100 @@ LIVE_TOOLS_DECLARATION = [
                     "required": ["action"],
                 },
             },
+            {
+                "name": "capture_lesson",
+                "description": (
+                    "Lê e extrai o material de aula ou slide exibido na tela no navegador ou player AVA/SCORM. "
+                    "Suporta modo multipáginas para navegar automaticamente pela aula."
+                ),
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "app": {
+                            "type": "STRING",
+                            "description": "Nome do navegador ou aplicativo (opcional, ex: 'google-chrome', 'firefox').",
+                        },
+                        "multi_page": {
+                            "type": "BOOLEAN",
+                            "description": "Se true, navega automaticamente pelos slides da aula (padrão false).",
+                        },
+                        "max_pages": {
+                            "type": "INTEGER",
+                            "description": "Quantidade máxima de páginas a capturar (padrão 5).",
+                        },
+                    },
+                },
+            },
+            {
+                "name": "study_generate_deck",
+                "description": (
+                    "Gera um baralho de flashcards com repetição espaçada SM-2 a partir de um material de estudo salvo (.md) "
+                    "e compila um pacote .apkg pronto para o Anki."
+                ),
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "source": {
+                            "type": "STRING",
+                            "description": "Caminho do arquivo de estudo .md (ex: ~/Documentos/Estudos/aula.md).",
+                        },
+                        "max_cards": {
+                            "type": "INTEGER",
+                            "description": "Quantidade de flashcards a gerar (padrão 10).",
+                        },
+                        "discipline": {
+                            "type": "STRING",
+                            "description": "Nome da disciplina acadêmica (opcional).",
+                        },
+                    },
+                    "required": ["source"],
+                },
+            },
+            {
+                "name": "study_summarize",
+                "description": (
+                    "Gera um resumo estruturado em tópicos e um glossário de termos conceituais a partir de um material de estudo (.md)."
+                ),
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "source": {
+                            "type": "STRING",
+                            "description": "Caminho do arquivo de estudo .md.",
+                        },
+                        "max_topics": {
+                            "type": "INTEGER",
+                            "description": "Máximo de tópicos do resumo (padrão 8).",
+                        },
+                        "discipline": {
+                            "type": "STRING",
+                            "description": "Nome da disciplina acadêmica (opcional).",
+                        },
+                    },
+                    "required": ["source"],
+                },
+            },
+            {
+                "name": "study_export_anki",
+                "description": (
+                    "Exporta um baralho de estudo existente para o formato nativo do Anki (.apkg ou .tsv)."
+                ),
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "deck_id": {
+                            "type": "STRING",
+                            "description": "ID ou identificador do baralho a ser exportado.",
+                        },
+                        "format": {
+                            "type": "STRING",
+                            "enum": ["apkg", "tsv"],
+                            "description": "Formato de exportação ('apkg' ou 'tsv', padrão 'apkg').",
+                        },
+                    },
+                    "required": ["deck_id"],
+                },
+            },
         ]
     }
 ]
@@ -3084,6 +3178,77 @@ class GeminiLiveClient:
                     "processes": [p.to_dict() for p in procs],
                     "summary": tbl,
                     "message": f"Listados {len(procs)} processos no sistema.",
+                }
+
+            elif name == "capture_lesson":
+                from ..core.study_capture import LessonCapture
+                cap = LessonCapture()
+                app_name = str(args.get("app") or "").strip() or None
+                mp = bool(args.get("multi_page", False))
+                raw_max = args.get("max_pages")
+                try:
+                    max_p = int(raw_max) if raw_max not in (None, "") else 5
+                except (TypeError, ValueError):
+                    max_p = 5
+
+                if mp:
+                    res = cap.capture_multipage(app_name=app_name, max_pages=max_p)
+                else:
+                    res = cap.capture(app_name=app_name)
+
+                if not res.ok:
+                    warn = res.warnings[0] if res.warnings else "conteúdo vazio ou ilegível"
+                    return {"success": False, "message": f"Não consegui capturar o conteúdo da aula: {warn}"}
+                path = cap.save(res)
+                return {
+                    "success": True,
+                    "title": res.title,
+                    "word_count": res.word_count,
+                    "path": path,
+                    "multi_page": mp,
+                    "message": f"Aula '{res.title}' capturada com sucesso ({res.word_count} palavras) e salva em {path}.",
+                }
+
+            elif name == "study_generate_deck":
+                from .agent_tools import ToolRegistry
+                reg = ToolRegistry()
+                res = reg.call("study_generate_deck", args)
+                if not res.get("ok"):
+                    return {"success": False, "message": f"Falha ao gerar flashcards: {res.get('error')}"}
+                apkg = res.get("apkg_path") or res.get("deck_path")
+                return {
+                    "success": True,
+                    "deck_id": res.get("deck_id"),
+                    "cards_count": res.get("cards_count"),
+                    "path": apkg,
+                    "message": f"Baralho '{res.get('title')}' gerado com {res.get('cards_count')} flashcards e salvo em {apkg}.",
+                }
+
+            elif name == "study_summarize":
+                from .agent_tools import ToolRegistry
+                reg = ToolRegistry()
+                res = reg.call("study_summarize", args)
+                if not res.get("ok"):
+                    return {"success": False, "message": f"Falha ao gerar resumo: {res.get('error')}"}
+                return {
+                    "success": True,
+                    "title": res.get("title"),
+                    "topics_count": res.get("topics_count"),
+                    "glossary_count": res.get("glossary_count"),
+                    "path": res.get("path"),
+                    "message": f"Resumo de '{res.get('title')}' criado com {res.get('topics_count')} tópicos e {res.get('glossary_count')} termos no glossário em {res.get('path')}.",
+                }
+
+            elif name == "study_export_anki":
+                from .agent_tools import ToolRegistry
+                reg = ToolRegistry()
+                res = reg.call("study_export_anki", args)
+                if not res.get("ok"):
+                    return {"success": False, "message": f"Falha ao exportar para o Anki: {res.get('error')}"}
+                return {
+                    "success": True,
+                    "output_path": res.get("output_path"),
+                    "message": f"Baralho exportado com sucesso para o Anki em {res.get('output_path')}.",
                 }
 
             if name == "end_session":

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 from datetime import date, timedelta
 
 import pytest
@@ -589,3 +590,109 @@ def test_decks_filtra_por_disciplina(monkeypatch, capsys, tmp_path):
     assert code == 0
     assert "Marketing" in out
     assert "Contabilidade" not in out
+
+
+# --------------------------------------------------------------------------- #
+# Exportação nativa para Anki (.apkg e .tsv)
+# --------------------------------------------------------------------------- #
+
+
+def test_export_anki_apkg_gera_arquivo_valido(tmp_path):
+    import sqlite3
+    import zipfile
+    from zorin_copilot.core.study_cards import export_anki_apkg
+
+    deck = new_deck(
+        "Contabilidade Básica",
+        [
+            make_card("O que é Ativo?", "Bens e direitos da empresa.", ["contabilidade"]),
+            make_card("O que é Passivo?", "Obrigações da empresa.", ["contabilidade"]),
+        ],
+        discipline="Ciências Contábeis",
+    )
+    apkg_file = str(tmp_path / "deck.apkg")
+    out = export_anki_apkg(deck, apkg_file)
+
+    assert out == apkg_file
+    assert os.path.exists(apkg_file)
+    assert zipfile.is_zipfile(apkg_file)
+
+    with zipfile.ZipFile(apkg_file, "r") as zf:
+        namelist = zf.namelist()
+        assert "collection.anki2" in namelist
+        assert "media" in namelist
+        assert zf.read("media") == b"{}"
+
+        # Extrair e inspecionar banco SQLite interno do Anki
+        db_path = str(tmp_path / "collection.anki2")
+        with open(db_path, "wb") as f:
+            f.write(zf.read("collection.anki2"))
+
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.execute("SELECT count(*) FROM col")
+    assert cur.fetchone()[0] == 1
+
+    cur.execute("SELECT count(*) FROM notes")
+    assert cur.fetchone()[0] == 2
+
+    cur.execute("SELECT count(*) FROM cards")
+    assert cur.fetchone()[0] == 2
+
+    cur.execute("SELECT flds FROM notes")
+    rows = cur.fetchall()
+    assert any("O que é Ativo?" in r[0] for r in rows)
+    assert any("Bens e direitos" in r[0] for r in rows)
+    conn.close()
+
+
+def test_export_anki_tsv_formato_correto(tmp_path):
+    from zorin_copilot.core.study_cards import export_anki_tsv
+
+    deck = new_deck(
+        "Marketing Digital",
+        [
+            make_card("O que é CAC?", "Custo de Aquisição de Clientes.", ["mkt", "vendas"]),
+        ],
+        discipline="Marketing",
+    )
+    tsv_file = str(tmp_path / "deck.tsv")
+    out = export_anki_tsv(deck, tsv_file)
+
+    assert out == tsv_file
+    assert os.path.exists(tsv_file)
+    content = open(tsv_file, "r", encoding="utf-8").read()
+    assert "#separator:tab" in content
+    assert "O que é CAC?\tCusto de Aquisição de Clientes.\tmkt vendas" in content
+
+
+def test_deck_store_export_apkg_e_tsv(tmp_path):
+    store = DeckStore(directory=str(tmp_path))
+    deck = new_deck("Direito Aplicado", [make_card("CF/88 Art. 5º", "Direitos fundamentais.")])
+    store.save(deck)
+
+    apkg_path = store.export_apkg(deck.id)
+    assert os.path.exists(apkg_path)
+    assert apkg_path.endswith(".apkg")
+
+    tsv_path = store.export_tsv(deck.id)
+    assert os.path.exists(tsv_path)
+    assert tsv_path.endswith(".tsv")
+
+
+def test_cli_study_export_anki_sucesso(monkeypatch, capsys, tmp_path):
+    store = DeckStore(directory=str(tmp_path))
+    deck = new_deck("Gestão de Pessoas", [make_card("O que é Feedback?", "Retorno avaliativo.")])
+    store.save(deck)
+
+    module = importlib.import_module("zorin_copilot.core.study_cards")
+    monkeypatch.setattr(module, "DeckStore", lambda *a, **k: store)
+
+    out_file = str(tmp_path / "exportado.apkg")
+    code = cli.main(["study", "export-anki", "--deck", deck.id, "--out", out_file])
+    captured = capsys.readouterr()
+
+    assert code == 0
+    assert "exportado com sucesso" in captured.out
+    assert os.path.exists(out_file)
+

@@ -58,6 +58,9 @@ TOOL_LABELS: dict[str, str] = {
     "screen_fence_control": "Controle de cerca de tela",
     "undo_last": "Desfazer última ação",
     "capture_lesson": "Capturar conteúdo da aula",
+    "study_generate_deck": "Gerar Flashcards de Estudo",
+    "study_summarize": "Resumo e Glossário de Estudo",
+    "study_export_anki": "Exportar para o Anki (.apkg)",
     "web_search": "Pesquisar na web",
     "academic_search": "Pesquisa acadêmica",
     "open_document": "Abrir documento",
@@ -88,6 +91,9 @@ TOOL_ICONS: dict[str, str] = {
     "screen_fence_control": "security-high-symbolic",
     "undo_last": "edit-undo-symbolic",
     "capture_lesson": "accessories-dictionary-symbolic",
+    "study_generate_deck": "accessories-dictionary-symbolic",
+    "study_summarize": "document-properties-symbolic",
+    "study_export_anki": "package-x-generic-symbolic",
     "web_search": "web-browser-symbolic",
     "academic_search": "system-search-symbolic",
     "open_document": "document-open-symbolic",
@@ -145,6 +151,18 @@ def _format_args_summary(tool: str, args: dict[str, Any]) -> str:
         if filter_q:
             return f'filtro "{filter_q}" (top {limit})'
         return f"top {limit} ordenados por {sort_by}"
+    if tool == "capture_lesson":
+        app = args.get("app") or "tela ativa"
+        mp = args.get("multi_page")
+        return f"{app} (multi-páginas)" if mp else str(app)
+    if tool in ("study_generate_deck", "study_summarize"):
+        src = os.path.basename(str(args.get("source") or ""))
+        disc = args.get("discipline")
+        return f"{src} ({disc})" if disc else src
+    if tool == "study_export_anki":
+        deck_id = args.get("deck_id") or ""
+        fmt = args.get("format", "apkg")
+        return f"{deck_id} [{fmt}]"
 
     # Fallback genérico: primeiro argumento não nulo
     for k, v in args.items():

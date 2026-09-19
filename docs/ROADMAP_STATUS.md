@@ -98,7 +98,7 @@ O Zorin Copilot é um assistente de inteligência artificial nativo para Linux (
   - Exibição de ícones simbólicos e rótulos nativos Adwaita no `AgentExecutionWidget`.
 
 ### 2.5 Qualidade, Testes e Estabilidade
-- **1.595 testes unitários e de integração aprovados (100% pass, 5 skipped)** cobrindo todos os módulos do sistema: ações, segurança, OCR, VLM grounding, busca de código, processos, memória, RAG, rollback, MCP, UI GTK4, Gemini Live, Home Assistant e drivers de janela.
+- **1.614 testes unitários e de integração aprovados (100% pass, 5 skipped)** cobrindo todos os módulos do sistema: ações, segurança, OCR, VLM grounding, busca de código, processos, módulo de estudo/AVA/Anki, memória, RAG, rollback, MCP, UI GTK4, Gemini Live, Home Assistant e drivers de janela.
 
 ---
 
@@ -114,10 +114,25 @@ O Zorin Copilot é um assistente de inteligência artificial nativo para Linux (
                    │                                          │
                    ▼                                          ▼
   ┌─────────────────────────────────┐        ┌──────────────────────────────────┐
-  │  FASE 7: MCP REMOTO & PROMPTS   │   ──►  │  FASE 8: CAPTURA & ESTUDO AVA    │
-  │  (SSE/WebSockets + Prompts API) │        │  (Automação SPA/SCORM + Anki)    │
+  │  FASE 8: CAPTURA & ESTUDO AVA   │   ──►  │  FASE 7: MCP REMOTO & PROMPTS    │
+  │  (CONCLUÍDA ✅ - SCORM + Anki)  │        │  (SSE/WebSockets + Prompts API)  │
   └─────────────────────────────────┘        └──────────────────────────────────┘
 ```
+
+### Fase 8: Módulo de Estudo & Captura de Conteúdo AVA (Plano de Estudos SENAC) — CONCLUÍDA ✅
+- **Automação Multi-Páginas SCORM/AVA (`core/study_capture.py`):**
+  - Método `capture_multipage`: iteração sequencial por slides e páginas de players de aula.
+  - Avanço inteligente por cascata de estratégias (`advance_by="auto"`): VLM Grounding (`click_visual_element("avançar aula")`), nós semânticos AT-SPI e hotkey `Page_Down`.
+  - Agrupamento limpo em seções Markdown (`## Parte 1`, `## Parte 2`), deduplicação de conteúdo idêntico (detecção de fim de aula) e preservação de disciplina e metadados.
+- **Exportação Nativa para Anki `.apkg` e `.tsv` (`core/study_cards.py`):**
+  - Implementação nativa de compilação de decks `.apkg` baseada em SQLite `collection.anki2` comprimida em zip com manifesto de mídia, compatível com Anki Desktop, AnkiMobile e AnkiDroid sem bibliotecas externas pesadas.
+  - Estilização Libadwaita e suporte a modo escuro embutido nos templates dos cards.
+  - Suporte a exportação em formato tabular `.tsv` com tags e HTML limpo.
+  - Subcomando CLI: `zorin-copilot-cli study export-anki --deck <id> [--out <caminho>] [--tsv]`.
+- **Integração Plena no Ecossistema:**
+  - Novas ferramentas registradas no `ToolRegistry` (`RiskLevel.SAFE`): `study_generate_deck`, `study_summarize`, `study_export_anki` e expansão de `capture_lesson` com `multi_page`, `max_pages` e `advance_by`.
+  - Exibição de ícones simbólicos e argumentos amigáveis no widget da GUI Adwaita (`AgentExecutionWidget`).
+  - Suporte nativo por voz no assistente Gemini Live com tool calling e feedback falado instantâneo.
 
 ### Fase 7: Extensões MCP Avançadas (SSE / WebSockets & MCP Prompts)
 - **Transporte Remoto (SSE / HTTP Streaming):**
@@ -126,13 +141,6 @@ O Zorin Copilot é um assistente de inteligência artificial nativo para Linux (
 - **MCP Prompts (`prompts/list` e `prompts/get`):**
   - Implementar o suporte ao terceiro pilar da especificação MCP.
   - Servidores MCP poderão registrar templates de comandos e personas customizadas diretamente na Paleta de Comandos (`Ctrl+K`) do Copilot.
-
-### Fase 8: Módulo de Estudo & Captura de Conteúdo AVA (Plano de Estudos SENAC)
-- **Objetivo:** Automatizar a captura de materiais didáticos e geração de recursos de estudo com o Modo Agente, agora potencializado pelo Grounding Visual VLM e Busca Nativa de Código.
-- **Etapas:**
-  1. Sequência automatizada de navegação no portal do estudante (autenticação supervisionada, listagem de unidades curriculares).
-  2. Extração de conteúdo embutido em players SCORM/SPA utilizando o leitor de árvore AT-SPI2, Smart OCR e VLM Grounding.
-  3. Pipeline de geração automática de cartões Anki (`.apkg`) e sumários executivos estruturados em Markdown via RAG local.
 
 ---
 

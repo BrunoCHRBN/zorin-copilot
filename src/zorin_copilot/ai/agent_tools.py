@@ -828,9 +828,72 @@ class ToolRegistry:
                         "directory": _str("Pasta de destino (padrão: ~/Documentos/Estudos)."),
                         "min_words": _num("Abaixo disso a captura é considerada rala (padrão 120)."),
                         "save": _bool("Gravar em arquivo (padrão true)."),
+                        "multi_page": _bool("Se true, captura múltiplos slides/páginas navegando pelo player SCORM/AVA (padrão false)."),
+                        "max_pages": _num("Máximo de páginas a capturar sequencialmente (padrão 5, máx 20)."),
+                        "advance_by": _str("Estratégia de avanço de slide: 'auto' (VLM/AT-SPI/hotkey), 'vlm', 'atspi' ou 'hotkey'."),
                     }
                 ),
                 handler=self._tool_capture_lesson,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="study_generate_deck",
+                description=(
+                    "Gera flashcards com agendamento de repetição espaçada (SM-2) a partir de um arquivo de estudo Markdown capturado (.md), "
+                    "salvando o baralho e opcionalmente exportando diretamente um pacote pronto para o Anki (.apkg)."
+                ),
+                parameters=_param(
+                    {
+                        "source": _str("Caminho do arquivo .md de estudo (ex: ~/Documentos/Estudos/aula.md)."),
+                        "max_cards": _num("Máximo de flashcards a gerar (padrão 10)."),
+                        "discipline": _str("Nome da disciplina acadêmica (opcional)."),
+                        "export_apkg": _bool("Se true, compila e gera arquivo .apkg para o Anki (padrão true)."),
+                        "out_apkg": _str("Caminho de saída opcional do arquivo .apkg."),
+                    },
+                    required=["source"],
+                ),
+                handler=self._tool_study_generate_deck,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="study_summarize",
+                description=(
+                    "Gera um resumo executivo com afirmações completas em tópicos e um glossário de termos técnicos a partir de um material de estudo (.md), "
+                    "salvando o arquivo estruturado de revisão."
+                ),
+                parameters=_param(
+                    {
+                        "source": _str("Caminho do arquivo .md de estudo."),
+                        "max_topics": _num("Máximo de tópicos do resumo (padrão 8)."),
+                        "max_terms": _num("Máximo de termos técnicos no glossário (padrão 12)."),
+                        "discipline": _str("Nome da disciplina acadêmica (opcional)."),
+                        "save": _bool("Se true, grava o arquivo de resumo ao lado do original (padrão true)."),
+                    },
+                    required=["source"],
+                ),
+                handler=self._tool_study_summarize,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="study_export_anki",
+                description=(
+                    "Exporta um baralho existente no sistema para o formato nativo do Anki (.apkg ou .tsv) pronto para importação no desktop ou mobile."
+                ),
+                parameters=_param(
+                    {
+                        "deck_id": _str("ID ou identificador do baralho."),
+                        "format": _str("Formato de exportação: 'apkg' ou 'tsv' (padrão 'apkg')."),
+                        "output_path": _str("Caminho de destino do arquivo exportado (opcional)."),
+                    },
+                    required=["deck_id"],
+                ),
+                handler=self._tool_study_export_anki,
             )
         )
 
@@ -1984,8 +2047,20 @@ class ToolRegistry:
         strategy = str(args.get("strategy") or "auto").strip().lower()
         capture = LessonCapture(min_words=min_words)
 
+        multi_page = bool(args.get("multi_page", False))
+        max_pages = int(args.get("max_pages") or 5)
+        advance_by = str(args.get("advance_by") or "auto").strip().lower()
+
         try:
-            result = capture.capture(str(args.get("app") or "").strip() or None, strategy=strategy)
+            if multi_page and hasattr(capture, "capture_multipage"):
+                result = capture.capture_multipage(
+                    str(args.get("app") or "").strip() or None,
+                    strategy=strategy,
+                    max_pages=max_pages,
+                    advance_by=advance_by,
+                )
+            else:
+                result = capture.capture(str(args.get("app") or "").strip() or None, strategy=strategy)
         except Exception as exc:
             return {"ok": False, "error": f"Falha ao capturar a tela: {exc}"}
 
@@ -1996,6 +2071,7 @@ class ToolRegistry:
             "app": result.app,
             "warnings": list(result.warnings),
             "preview": result.text[:400],
+            "multi_page": multi_page,
         }
         if not result.ok:
             payload["error"] = result.warnings[0] if result.warnings else "Nada capturado na tela."
@@ -2013,6 +2089,180 @@ class ToolRegistry:
         except OSError as exc:
             return payload | {"ok": False, "error": f"Falha ao salvar o material: {exc}"}
         return payload | {"ok": True, "path": path, "saved": True}
+
+    def _tool_study_generate_deck(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Gera flashcards com repetição espaçada SM-2 a partir de arquivo de estudo (.md) e opcionalmente exporta .apkg."""
+        source = str(args.get("source") or "").strip()
+        if not source:
+            return {"ok": False, "error": "`source` é obrigatório."}
+
+        source = os.path.expanduser(source)
+        if not os.path.exists(source):
+            return {"ok": False, "error": f"Arquivo não encontrado: {source}"}
+
+        try:
+            from ..core.study_cards import (
+                DeckStore,
+                StudyAI,
+                generate_cards,
+                merge_cards,
+                new_deck,
+                read_discipline,
+                read_source,
+            )
+
+            discipline = (args.get("discipline") or "").strip() or read_discipline(source) or "Estudos"
+            title, body = read_source(source)
+            raw_max = args.get("max_cards")
+            try:
+                max_cards = int(raw_max) if raw_max not in (None, "") else 10
+            except (TypeError, ValueError):
+                max_cards = 10
+
+            ai = StudyAI(mode="auto")
+            cards, warnings = generate_cards(
+                body,
+                ai,
+                title=title or os.path.basename(source),
+                discipline=discipline,
+                n_cards=max_cards,
+            )
+
+            if not cards:
+                return {
+                    "ok": False,
+                    "error": "Nenhum card gerado a partir do material.",
+                    "warnings": list(warnings),
+                }
+
+            store = DeckStore()
+            deck = new_deck(
+                title or os.path.basename(source),
+                cards,
+                source=source,
+                discipline=discipline,
+                provider=ai.used,
+            )
+            existing = store.load(deck.id)
+            if existing is not None and existing.cards:
+                deck.cards = merge_cards(existing.cards, cards)
+                deck.created_at = existing.created_at
+
+            deck_path = store.save(deck)
+
+            export_apkg = args.get("export_apkg") is not False
+            apkg_path = None
+            if export_apkg:
+                out_apkg = str(args.get("out_apkg") or "").strip() or None
+                apkg_path = store.export_apkg(deck.id, out_apkg)
+
+            return {
+                "ok": True,
+                "deck_id": deck.id,
+                "title": deck.title,
+                "discipline": deck.discipline,
+                "cards_count": len(deck.cards),
+                "deck_path": deck_path,
+                "apkg_path": apkg_path,
+                "provider": ai.used,
+                "warnings": list(warnings),
+            }
+        except Exception as exc:
+            return {"ok": False, "error": f"Falha ao gerar deck de estudo: {exc}"}
+
+    def _tool_study_summarize(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Gera resumo estruturado e glossário de termos a partir de material Markdown."""
+        source = str(args.get("source") or "").strip()
+        if not source:
+            return {"ok": False, "error": "`source` é obrigatório."}
+
+        source = os.path.expanduser(source)
+        if not os.path.exists(source):
+            return {"ok": False, "error": f"Arquivo não encontrado: {source}"}
+
+        try:
+            from ..core.study_cards import read_discipline, read_source
+            from ..core.study_summary import build_default_ai, generate_summary, save as save_summary
+
+            discipline = (args.get("discipline") or "").strip() or read_discipline(source) or "Estudos"
+            title, body = read_source(source)
+            raw_topics = args.get("max_topics")
+            raw_terms = args.get("max_terms")
+            try:
+                max_topics = int(raw_topics) if raw_topics not in (None, "") else 8
+            except (TypeError, ValueError):
+                max_topics = 8
+            try:
+                max_terms = int(raw_terms) if raw_terms not in (None, "") else 12
+            except (TypeError, ValueError):
+                max_terms = 12
+
+            ai = build_default_ai("auto")
+            summary, warnings = generate_summary(
+                body,
+                ai,
+                title=title or os.path.basename(source),
+                discipline=discipline,
+                max_topics=max_topics,
+                max_terms=max_terms,
+            )
+            summary.source = source
+
+            if not summary.topics and not summary.glossary:
+                return {
+                    "ok": False,
+                    "error": "Nenhum conteúdo aproveitável encontrado para resumir.",
+                    "warnings": list(warnings),
+                }
+
+            saved_path = None
+            if args.get("save") is not False:
+                target = os.path.join(
+                    os.path.dirname(source), f"resumo-{os.path.basename(source)}"
+                )
+                saved_path = save_summary(summary, target)
+
+            return {
+                "ok": True,
+                "title": summary.title,
+                "discipline": summary.discipline,
+                "topics_count": len(summary.topics),
+                "glossary_count": len(summary.glossary),
+                "topics": summary.topics,
+                "glossary": summary.glossary,
+                "path": saved_path,
+                "provider": summary.provider or ai.used,
+                "warnings": list(warnings),
+            }
+        except Exception as exc:
+            return {"ok": False, "error": f"Falha ao gerar resumo: {exc}"}
+
+    def _tool_study_export_anki(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Exporta um baralho existente para o formato nativo do Anki (.apkg ou .tsv)."""
+        deck_id = str(args.get("deck_id") or "").strip()
+        if not deck_id:
+            return {"ok": False, "error": "`deck_id` é obrigatório."}
+
+        fmt = str(args.get("format") or "apkg").strip().lower()
+        out_path = str(args.get("output_path") or "").strip() or None
+
+        try:
+            from ..core.study_cards import DeckStore
+
+            store = DeckStore()
+            if fmt == "tsv":
+                exported_path = store.export_tsv(deck_id, out_path)
+            else:
+                exported_path = store.export_apkg(deck_id, out_path)
+
+            return {
+                "ok": True,
+                "deck_id": deck_id,
+                "format": fmt,
+                "output_path": exported_path,
+            }
+        except Exception as exc:
+            return {"ok": False, "error": f"Falha ao exportar baralho para Anki: {exc}"}
 
     def _tool_academic_search(self, args: dict[str, Any]) -> dict[str, Any]:
         query = str(args.get("query") or "").strip()

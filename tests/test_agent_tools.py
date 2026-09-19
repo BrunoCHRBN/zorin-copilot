@@ -7,6 +7,9 @@
 
 from __future__ import annotations
 
+import json
+import os
+
 import pytest
 
 from zorin_copilot.ai.agent_tools import FINISH_TOOLS, ToolRegistry
@@ -480,6 +483,17 @@ class FakeLessonCapture:
             word_count=len(texto.split()),
         )
 
+    def capture_multipage(self, app_name=None, strategy="auto", max_pages=5, advance_by="auto", **kwargs):
+        self.chamadas.append((app_name, f"{strategy}+multipage"))
+        texto = self.texto() + " Conteúdo complementar do slide seguinte."
+        return capture_result(
+            ok=bool(texto),
+            strategy=f"{strategy}+multipage",
+            text=texto,
+            app=app_name or "Firefox",
+            word_count=len(texto.split()),
+        )
+
     def texto(self) -> str:
         return getattr(self, "_texto", "A contabilidade gerencial apoia decisões de preço. " * 6)
 
@@ -550,6 +564,107 @@ def test_capture_lesson_nao_pede_confirmacao():
     level, _motivo = registry.classify("capture_lesson", {})
     assert level == RiskLevel.SAFE
     assert registry.requires_approval("capture_lesson", {}) is False
+
+
+def test_capture_lesson_multipage(captura_duble):
+    registry = ToolRegistry()
+    result = registry.call("capture_lesson", {"app": "Firefox", "multi_page": True, "max_pages": 3})
+
+    assert result["ok"] is True
+    assert result["multi_page"] is True
+    assert "multipage" in result["strategy"]
+    assert captura_duble.criados[0].chamadas == [("Firefox", "auto+multipage")]
+
+
+def test_study_tools_registradas_e_classificadas_como_safe():
+    registry = ToolRegistry()
+    for tool_name in ("study_generate_deck", "study_summarize", "study_export_anki"):
+        assert tool_name in registry.names()
+        level, _ = registry.classify(tool_name, {})
+        assert level == RiskLevel.SAFE
+        assert registry.requires_approval(tool_name, {}) is False
+
+
+def test_study_generate_deck_cria_deck_e_apkg(monkeypatch, tmp_path):
+    class StubCardsAI:
+        def __init__(self, *args, **kwargs):
+            self.used = "stub-model"
+        def complete(self, *args, **kwargs):
+            return json.dumps({
+                "cards": [
+                    {"front": "O que é ROI?", "back": "Retorno sobre Investimento.", "tags": ["financas"]}
+                ]
+            })
+
+    from zorin_copilot.core.study_cards import DeckStore
+    monkeypatch.setattr("zorin_copilot.core.study_cards.StudyAI", StubCardsAI)
+    monkeypatch.setattr("zorin_copilot.core.study_cards.DeckStore", lambda *a, **k: DeckStore(directory=str(tmp_path / "decks")))
+
+    source_file = tmp_path / "aula.md"
+    texto_longo = "# Aula de Finanças\n\n" + ("O ROI mede o retorno financeiro obtido em relação ao investimento feito na empresa com análise contábil detalhada. " * 10)
+    source_file.write_text(texto_longo, encoding="utf-8")
+
+    registry = ToolRegistry()
+    res = registry.call("study_generate_deck", {
+        "source": str(source_file),
+        "discipline": "Finanças",
+        "export_apkg": True,
+        "out_apkg": str(tmp_path / "financas.apkg"),
+    })
+
+    assert res["ok"] is True
+    assert res["cards_count"] == 1
+    assert res["discipline"] == "Finanças"
+    assert os.path.exists(res["apkg_path"])
+    assert res["apkg_path"].endswith("financas.apkg")
+
+
+def test_study_summarize_gera_resumo_e_salva(monkeypatch, tmp_path):
+    class StubSummaryAI:
+        def __init__(self, *args, **kwargs):
+            self.used = "stub-model"
+        def complete(self, *args, **kwargs):
+            return json.dumps({
+                "topics": ["O ROI é fundamental para avaliar projetos empresariais com consistência."],
+                "glossary": [{"term": "ROI", "definition": "Métrica financeira que quantifica o retorno econômico obtido."}]
+            })
+
+    monkeypatch.setattr("zorin_copilot.core.study_summary.build_default_ai", lambda mode="auto": StubSummaryAI())
+
+    source_file = tmp_path / "gestao.md"
+    texto_longo = "# Gestão Empresarial\n\n" + ("Conteúdo estruturado sobre planejamento estratégico, indicadores de desempenho, liderança e metas operacionais para empresas. " * 10)
+    source_file.write_text(texto_longo, encoding="utf-8")
+
+    registry = ToolRegistry()
+    res = registry.call("study_summarize", {
+        "source": str(source_file),
+        "discipline": "Administração",
+        "save": True,
+    })
+
+    assert res["ok"] is True
+    assert res["topics_count"] == 1
+    assert res["glossary_count"] == 1
+    assert os.path.exists(res["path"])
+
+
+def test_study_export_anki_exporta_apkg_e_tsv(tmp_path, monkeypatch):
+    from zorin_copilot.core.study_cards import DeckStore, new_deck, make_card
+    store = DeckStore(directory=str(tmp_path / "decks"))
+    deck = new_deck("Contratos", [make_card("O que é Cláusula?", "Disposição contratual.")], discipline="Direito")
+    store.save(deck)
+    monkeypatch.setattr("zorin_copilot.core.study_cards.DeckStore", lambda *a, **k: store)
+
+    registry = ToolRegistry()
+    res_apkg = registry.call("study_export_anki", {"deck_id": deck.id, "format": "apkg"})
+    assert res_apkg["ok"] is True
+    assert os.path.exists(res_apkg["output_path"])
+    assert res_apkg["output_path"].endswith(".apkg")
+
+    res_tsv = registry.call("study_export_anki", {"deck_id": deck.id, "format": "tsv"})
+    assert res_tsv["ok"] is True
+    assert os.path.exists(res_tsv["output_path"])
+    assert res_tsv["output_path"].endswith(".tsv")
 
 
 # --------------------------------------------------------------------------- #

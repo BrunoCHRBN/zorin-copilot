@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -281,6 +282,113 @@ class LessonCapture:
                 "se o player não expuser a árvore de acessibilidade, --strategy ocr lê a tela por pixels."
             )
         return best
+
+    def capture_multipage(
+        self,
+        app_name: str | None = None,
+        strategy: str = "auto",
+        discipline: str | None = None,
+        max_pages: int = 5,
+        advance_by: str = "auto",
+        delay_sec: float = 1.0,
+    ) -> CaptureResult:
+        """Captura múltiplos slides ou páginas sequenciais de um player SCORM/AVA.
+
+        Avança as páginas usando VLM Grounding ('avançar aula'), nós AT-SPI ou Page_Down,
+        concatenando o material de estudo sem duplicatas.
+        """
+        max_pages = max(1, min(max_pages, 20))
+        page_results: list[CaptureResult] = []
+        seen_texts: set[str] = set()
+
+        for page_idx in range(max_pages):
+            cur_res = self.capture(app_name=app_name, strategy=strategy, discipline=discipline)
+            if not cur_res.ok or not cur_res.text.strip():
+                if not page_results:
+                    return cur_res
+                break
+
+            t_norm = " ".join(cur_res.text.split())
+            if t_norm in seen_texts:
+                # O conteúdo não mudou em relação a páginas anteriores (chegou ao fim da aula)
+                break
+            seen_texts.add(t_norm)
+            page_results.append(cur_res)
+
+            if page_idx < max_pages - 1:
+                advanced = self._advance_slide(app=app_name, advance_by=advance_by)
+                if not advanced:
+                    break
+                if delay_sec > 0:
+                    time.sleep(delay_sec)
+
+        if not page_results:
+            return self.capture(app_name=app_name, strategy=strategy, discipline=discipline)
+
+        if len(page_results) == 1:
+            return page_results[0]
+
+        combined_sections = []
+        for i, res in enumerate(page_results):
+            section_title = f"## Parte {i + 1}"
+            combined_sections.append(f"{section_title}\n\n{res.text.strip()}")
+
+        combined_text = "\n\n---\n\n".join(combined_sections)
+        first_res = page_results[0]
+        return CaptureResult(
+            ok=True,
+            strategy=f"{first_res.strategy}+multipage",
+            title=first_res.title,
+            text=combined_text,
+            word_count=count_words(combined_text),
+            app=first_res.app,
+            discipline=discipline or first_res.discipline,
+            url=first_res.url,
+            warnings=list(first_res.warnings),
+        )
+
+    def _advance_slide(self, app: str | None, advance_by: str) -> bool:
+        """Tenta avançar para a próxima página ou slide da aula no player SCORM/web."""
+        advance_by = (advance_by or "auto").strip().lower()
+
+        # 1. Tenta VLM Grounding se solicitado ou em auto
+        if advance_by in ("auto", "vlm"):
+            try:
+                from .ui_grounding import UIGroundingService
+                svc = UIGroundingService.get_default() if hasattr(UIGroundingService, "get_default") else UIGroundingService()
+                if hasattr(svc, "click_visual_element"):
+                    for q in ("avançar", "próxima página", "próximo", "next"):
+                        ok, _ = svc.click_visual_element(query=q, prefer_vlm=True)
+                        if ok:
+                            return True
+            except Exception as exc:
+                logger.debug("Avanço por VLM falhou: %s", exc)
+
+        # 2. Tenta AT-SPI procurando botão com rótulo de avanço
+        if advance_by in ("auto", "atspi"):
+            try:
+                tree = self.inspector.get_ui_tree(app) if self.inspector else None
+                if tree:
+                    for node in getattr(tree, "find_all", lambda **kw: [])(role="push_button"):
+                        n_lower = (getattr(node, "name", "") or "").lower()
+                        if any(kw in n_lower for kw in ("avançar", "avancar", "próximo", "proximo", "next")):
+                            if hasattr(node, "do_action"):
+                                node.do_action(0)
+                                return True
+            except Exception as exc:
+                logger.debug("Avanço por AT-SPI falhou: %s", exc)
+
+        # 3. Fallback para driver de teclado (Page_Down)
+        if advance_by in ("auto", "hotkey"):
+            try:
+                from ..shell.input_driver import VirtualInputDriver
+                driver = VirtualInputDriver(simulation=False)
+                driver.hotkey("Page_Down")
+                return True
+            except Exception as exc:
+                logger.debug("Avanço por hotkey falhou: %s", exc)
+
+        return False
 
     @staticmethod
     def _with_discipline(result: CaptureResult, discipline: str | None) -> CaptureResult:

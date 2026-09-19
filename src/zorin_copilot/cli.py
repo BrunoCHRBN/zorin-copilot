@@ -172,6 +172,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     study_cap.add_argument("--min-words", type=int, default=120, help="aviso de captura rala (padrão 120)")
     study_cap.add_argument("--out", help="arquivo .md de destino (padrão: ~/Documentos/Estudos/<titulo>.md)")
+    study_cap.add_argument("--multi-page", action="store_true", help="captura sequencial de slides em players AVA/SCORM")
+    study_cap.add_argument("--max-pages", type=int, default=5, help="número máximo de páginas (padrão 5)")
+    study_cap.add_argument("--advance-by", choices=["auto", "vlm", "atspi", "hotkey"], default="auto", help="método de avanço de slide (padrão: auto)")
     study_cap.add_argument("--no-save", action="store_true", help="não grava arquivo, só mostra")
     study_cap.add_argument("--print", dest="show", action="store_true", help="imprime o texto capturado")
     study_cap.add_argument("--json", action="store_true", help="saída em JSON (para scriptar)")
@@ -216,6 +219,11 @@ def build_parser() -> argparse.ArgumentParser:
     study_abnt = study_sub.add_parser("abnt", help="gera .docx no padrão ABNT a partir de um .md")
     study_abnt.add_argument("--from", dest="source", required=True, help="arquivo .md de origem")
     study_abnt.add_argument("--out", help="arquivo .docx de destino (padrão: mesmo nome)")
+
+    study_exp = study_sub.add_parser("export-anki", help="exporta baralho para o formato nativo do Anki (.apkg)")
+    study_exp.add_argument("--deck", required=True, help="id ou nome do baralho")
+    study_exp.add_argument("--out", help="caminho do arquivo .apkg de destino")
+    study_exp.add_argument("--tsv", action="store_true", help="exporta como TSV em vez de .apkg")
 
     study_ask = study_sub.add_parser(
         "ask",
@@ -1001,6 +1009,8 @@ def cmd_study(args: argparse.Namespace) -> int:
         return _study_review(args)
     if args.study_action == "abnt":
         return _study_abnt(args)
+    if args.study_action == "export-anki":
+        return _study_export_anki(args)
     if args.study_action == "ask":
         return _study_ask(args)
     if args.study_action == "search":
@@ -1015,7 +1025,16 @@ def _study_capture(args: argparse.Namespace) -> int:
     from .core.study_capture import LessonCapture
 
     capture = LessonCapture(min_words=args.min_words)
-    result = capture.capture(args.app, strategy=args.strategy, discipline=getattr(args, "discipline", None))
+    if getattr(args, "multi_page", False):
+        result = capture.capture_multipage(
+            args.app,
+            strategy=args.strategy,
+            discipline=getattr(args, "discipline", None),
+            max_pages=getattr(args, "max_pages", 5),
+            advance_by=getattr(args, "advance_by", "auto"),
+        )
+    else:
+        result = capture.capture(args.app, strategy=args.strategy, discipline=getattr(args, "discipline", None))
 
     if args.json:
         if not args.no_save and result.ok:
@@ -1212,6 +1231,24 @@ def _study_ask(args: argparse.Namespace) -> int:
     for warning in warnings:
         print(f"\n  ⚠️  {warning}")
     return 0
+
+
+def _study_export_anki(args: argparse.Namespace) -> int:
+    """Exporta um baralho existente para pacote nativo Anki (.apkg) ou TSV."""
+    from .core.study_cards import DeckStore
+
+    store = DeckStore()
+    deck_id = args.deck
+    try:
+        if getattr(args, "tsv", False):
+            path = store.export_tsv(deck_id, getattr(args, "out", None))
+        else:
+            path = store.export_apkg(deck_id, getattr(args, "out", None))
+        print(f"✓ Baralho exportado com sucesso para o Anki: {path}")
+        return 0
+    except Exception as exc:
+        print(f"✗ Falha ao exportar baralho: {exc}", file=sys.stderr)
+        return 1
 
 
 def _study_search(args: argparse.Namespace) -> int:
