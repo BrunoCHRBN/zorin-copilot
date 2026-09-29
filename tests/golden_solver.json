@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "description": "Golden set determinístico do math_solver: caminhos puros (sem rede/display). Consumido por tests/test_golden_solver.py. Torna melhorias de prompt/provedor MENSURÁVEIS (§6.2).",
+  "quadratics": [
+    {"input": "x^2 - 5x + 6 = 0", "roots": [2.0, 3.0], "passed": true},
+    {"input": "x^2 - 4 = 0", "roots": [-2.0, 2.0], "passed": true},
+    {"input": "2x^2 + 3x - 2 = 0", "roots": [-2.0, 0.5], "passed": true},
+    {"input": "x^2 - 6x + 9 = 0", "roots": [3.0, 3.0], "passed": true},
+    {"input": "x^2 + 1 = 0", "complex": true, "passed": true}
+  ],
+  "systems2": [
+    {"input": "x + y = 10; x - y = 2", "solution": [6.0, 4.0], "unique": true},
+    {"input": "2x + y = 5; x - y = 1", "solution": [2.0, 1.0], "unique": true},
+    {"input": "x + y = 2; 2x + 2y = 5", "unique": false}
+  ],
+  "routing": [
+    {"input": "x^2 - 5x + 6 = 0", "dispatch": "quadratic"},
+    {"input": "x + y = 10; x - y = 2", "dispatch": "system2"},
+    {"input": "derivada de x^3", "dispatch": "engine", "needs_engine": true},
+    {"input": "qual a capital da França?", "dispatch": "none"}
+  ],
+  "looks_like_math": [
+    {"input": "resolva 2x^2 - 4x - 6 = 0", "expect": true},
+    {"input": "x + y = 10; x - y = 2", "expect": true},
+    {"input": "calcule a derivada de sen(x)", "expect": true},
+    {"input": "qual é a capital da França?", "expect": false},
+    {"input": "abrir o firefox", "expect": false}
+  ]
+}
