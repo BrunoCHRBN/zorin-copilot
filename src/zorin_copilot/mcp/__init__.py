@@ -10,6 +10,8 @@ from .manager import MCPServerConfig, MCPManager
 from .protocol import (
     MCP_PROTOCOL_VERSION,
     MCPCallResult,
+    MCPPrompt,
+    MCPPromptArgument,
     MCPResource,
     MCPServerState,
     MCPTool,
@@ -20,6 +22,8 @@ __all__ = [
     "MCPCallResult",
     "MCPClient",
     "MCPManager",
+    "MCPPrompt",
+    "MCPPromptArgument",
     "MCPResource",
     "MCPServerConfig",
     "MCPServerState",

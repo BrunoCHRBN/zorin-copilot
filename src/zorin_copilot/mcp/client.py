@@ -25,6 +25,8 @@ from .protocol import (
     JSONRPCRequest,
     JSONRPCResponse,
     MCPCallResult,
+    MCPPrompt,
+    MCPPromptArgument,
     MCPResource,
     MCPServerState,
     MCPTool,
@@ -49,6 +51,7 @@ class BaseMCPClient:
         self._restarting: bool = False
         self.on_notification: Any | None = None
         self.on_tools_changed: Any | None = None
+        self.on_prompts_changed: Any | None = None
         self.on_state_changed: Any | None = None
 
         self._next_req_id: int = 1
@@ -298,6 +301,134 @@ class BaseMCPClient:
                 text_parts.append(c["text"])
         return "\n".join(text_parts)
 
+    def list_prompts(self, timeout: float = 10.0) -> list[MCPPrompt]:
+        """Consulta os prompts (templates) exportados pelo servidor (prompts/list).
+
+        Um prompt MCP não executa nada: devolve texto pronto para o modelo. Por
+        isso ele é listado separadamente das ferramentas — na paleta de comandos
+        ele preenche a entrada em vez de agir no sistema.
+        """
+        if self.state != MCPServerState.CONNECTED:
+            if not self.start():
+                return []
+
+        resp = self.send_request("prompts/list", {}, timeout=timeout)
+        if not resp or resp.is_error:
+            # Servidor que não anuncia a capability 'prompts' responde com erro
+            # JSON-RPC (-32601 Method not found). Isso não é uma falha do cliente:
+            # apenas significa que este servidor não tem prompts.
+            logger.debug(
+                f"[MCP:{self.name}] Sem prompts disponíveis: "
+                f"{resp.error if resp else 'timeout'}"
+            )
+            return []
+
+        prompts_data = resp.result.get("prompts", []) if isinstance(resp.result, dict) else []
+        prompts: list[MCPPrompt] = []
+        for pd in prompts_data:
+            if not isinstance(pd, dict) or "name" not in pd:
+                continue
+            prompts.append(
+                MCPPrompt(
+                    name=pd["name"],
+                    server_name=self.name,
+                    description=pd.get("description", ""),
+                    arguments=self._parse_prompt_arguments(pd.get("arguments")),
+                )
+            )
+        return prompts
+
+    @staticmethod
+    def _parse_prompt_arguments(raw: Any) -> list[MCPPromptArgument]:
+        """Normaliza a lista ``arguments`` de um prompt MCP.
+
+        A especificação define ``arguments`` como opcional; servidores omitem o
+        campo quando o prompt não recebe parâmetros. Itens sem ``name`` são
+        descartados por serem inutilizáveis na coleta de argumentos da UI.
+        """
+        if not isinstance(raw, list):
+            return []
+        parsed: list[MCPPromptArgument] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            if not name:
+                continue
+            parsed.append(
+                MCPPromptArgument(
+                    name=str(name),
+                    description=item.get("description", "") or "",
+                    required=bool(item.get("required", False)),
+                )
+            )
+        return parsed
+
+    @staticmethod
+    def _prompt_message_text(message: Any) -> str:
+        """Extrai o texto legível de uma mensagem devolvida por ``prompts/get``.
+
+        O campo ``content`` de uma mensagem pode ser um objeto único
+        (``TextContent`` / ``EmbeddedResource``) ou uma lista deles. Recursos
+        embutidos trazem o texto em ``resource.text``.
+        """
+        if not isinstance(message, dict):
+            return ""
+        content = message.get("content")
+        blocks = content if isinstance(content, list) else [content]
+
+        parts: list[str] = []
+        for block in blocks:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict):
+                if isinstance(block.get("text"), str):
+                    parts.append(block["text"])
+                elif isinstance(block.get("resource"), dict):
+                    resource_text = block["resource"].get("text")
+                    if isinstance(resource_text, str):
+                        parts.append(resource_text)
+        return "\n".join(part for part in parts if part)
+
+    def get_prompt(
+        self,
+        name: str,
+        arguments: dict[str, Any] | None = None,
+        timeout: float = 15.0,
+    ) -> str:
+        """Materializa um prompt com os argumentos fornecidos (prompts/get).
+
+        Retorna o texto já pronto para ser enviado ao modelo — a concatenação
+        das mensagens na ordem em que o servidor as devolveu. Em caso de erro
+        devolve uma mensagem legível (nunca ``None``) para que a UI possa
+        mostrá-la sem tratamento especial.
+        """
+        if self.state != MCPServerState.CONNECTED:
+            if not self.start():
+                return f"Erro: Servidor MCP '{self.name}' não conectado."
+
+        # A especificação exige que 'arguments' seja um objeto; enviamos sempre
+        # um dict (possivelmente vazio) para não quebrar servidores estritos.
+        params = {"name": name, "arguments": arguments or {}}
+        resp = self.send_request("prompts/get", params, timeout=timeout)
+
+        if not resp:
+            return f"Timeout ao obter o prompt '{name}' no servidor '{self.name}'."
+
+        if resp.is_error:
+            err_msg = resp.error.get("message", "Erro desconhecido") if resp.error else "Erro"
+            return f"Erro MCP ({self.name}): {err_msg}"
+
+        result = resp.result if isinstance(resp.result, dict) else {}
+        messages = result.get("messages", [])
+        texts = [self._prompt_message_text(m) for m in messages]
+        text = "\n\n".join(t for t in texts if t)
+
+        if not text:
+            # Fallback: alguns servidores devolvem apenas 'description'.
+            return result.get("description", "") or ""
+        return text
+
     def _handle_incoming_message(self, raw_line: str) -> None:
         """Faz o parsing da resposta ou notificação JSON-RPC recebida."""
         try:
@@ -338,6 +469,16 @@ class BaseMCPClient:
                         self.on_tools_changed(self.name)
                     except Exception as exc:
                         logger.debug(f"[MCP:{self.name}] Erro no callback on_tools_changed: {exc}")
+
+            elif method == "notifications/prompts/list_changed":
+                # Prompts são cache separado do de ferramentas: sem este gancho a
+                # paleta de comandos mostraria a lista antiga até o app reiniciar.
+                logger.info(f"[MCP:{self.name}] Notificação prompts/list_changed recebida.")
+                if self.on_prompts_changed:
+                    try:
+                        self.on_prompts_changed(self.name)
+                    except Exception as exc:
+                        logger.debug(f"[MCP:{self.name}] Erro no callback on_prompts_changed: {exc}")
 
     def _schedule_auto_restart(self) -> None:
         """Tenta reconectar o servidor com backoff exponencial caso a conexão tenha caído inesperadamente."""

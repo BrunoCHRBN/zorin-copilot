@@ -465,7 +465,10 @@ class MCPPreferencesAndPaletteTest(unittest.TestCase):
 
         dlg = PreferencesDialog(None)
         self.assertTrue(hasattr(dlg, "mcp_switch_row"))
-        self.assertTrue(hasattr(dlg, "mcp_servers_group"))
+        # Os servidores deixaram de viver num grupo único: agora há um grupo por
+        # categoria, derivada do nome/comando (ver `mcp/categories.py`).
+        self.assertTrue(hasattr(dlg, "_mcp_groups"))
+        self.assertIsInstance(dlg._mcp_groups, list)
 
         # Carregamento do valor inicial
         self.assertTrue(dlg.mcp_switch_row.get_active())

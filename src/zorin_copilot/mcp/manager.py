@@ -9,12 +9,13 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable
 
 from .client import MCPClient
-from .protocol import MCPCallResult, MCPResource, MCPServerState, MCPTool
+from .protocol import MCPCallResult, MCPPrompt, MCPResource, MCPServerState, MCPTool
 
 try:
     import gi
@@ -39,6 +40,11 @@ def get_default_mcp_config_path() -> str:
 
 DEFAULT_CONFIG_DIR = get_default_config_dir()
 DEFAULT_MCP_CONFIG_PATH = get_default_mcp_config_path()
+
+#: O nome do servidor é a **chave** do objeto `mcpServers` no JSON. Restringir a
+#: pontuação evita que um nome com aspas ou chaves quebre o arquivo inteiro — e
+#: que um nome com barra vire caminho em algum consumidor futuro.
+_SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 # Template inicial com servidores MCP padrão sugeridos (desabilitados por padrão para não gastar recursos)
 DEFAULT_MCP_TEMPLATE = {
@@ -141,6 +147,7 @@ class MCPManager:
         self._clients: dict[str, MCPClient] = {}
         self._server_configs: dict[str, MCPServerConfig] = {}
         self._cached_tools: list[MCPTool] = []
+        self._cached_prompts: list[MCPPrompt] = []
         self._lock = threading.RLock()
         self._change_listeners: list[Callable[[], None]] = []
         self._file_monitor: Any | None = None
@@ -212,6 +219,7 @@ class MCPManager:
         self.load_config()
         self.start_all_enabled()
         self.refresh_tools_cache()
+        self.refresh_prompts_cache()
         self._notify_listeners()
 
     def _ensure_config_file(self) -> None:
@@ -288,6 +296,73 @@ class MCPManager:
         """Alias conveniente para set_server_enabled."""
         return self.set_server_enabled(name, enabled)
 
+    def add_server(
+        self,
+        name: str,
+        command: str,
+        args: list[str] | None = None,
+        description: str = "",
+        enabled: bool = True,
+    ) -> tuple[bool, str]:
+        """Acrescenta um servidor stdio à configuração e grava no arquivo.
+
+        Devolve ``(ok, mensagem)`` em vez de levantar: a origem é um formulário
+        preenchido à mão, e um nome repetido ou um comando vazio são erros de
+        digitação, não falhas do programa. A mensagem é escrita para ser mostrada
+        ao usuário como está.
+        """
+        clean_name = (name or "").strip()
+        clean_command = (command or "").strip()
+
+        if not clean_name:
+            return False, "Dê um nome ao servidor."
+        if not _SERVER_NAME_RE.match(clean_name):
+            return False, (
+                "O nome aceita apenas letras, números, ponto, hífen e sublinhado."
+            )
+        if not clean_command:
+            return False, "Informe o comando que inicia o servidor."
+
+        # Relê o arquivo antes de escrever. `save_config` grava o dicionário
+        # inteiro, então um servidor acrescentado fora do app desde o último
+        # load seria apagado em silêncio pela nossa gravação.
+        self.load_config()
+
+        with self._lock:
+            if clean_name in self._server_configs:
+                return False, f'Já existe um servidor chamado "{clean_name}".'
+            self._server_configs[clean_name] = MCPServerConfig(
+                name=clean_name,
+                command=clean_command,
+                args=list(args or []),
+                enabled=enabled,
+                description=description,
+            )
+
+        if not self.save_config():
+            return False, "Não foi possível gravar o arquivo de configuração."
+
+        if enabled:
+            self.start_server(clean_name)
+        self._notify_listeners()
+        return True, f'Servidor "{clean_name}" adicionado.'
+
+    def remove_server(self, name: str) -> tuple[bool, str]:
+        """Remove um servidor da configuração e do arquivo."""
+        self.load_config()
+
+        with self._lock:
+            if name not in self._server_configs:
+                return False, f'Não há servidor chamado "{name}".'
+            del self._server_configs[name]
+
+        self.stop_server(name)
+        if not self.save_config():
+            return False, "Não foi possível gravar o arquivo de configuração."
+
+        self._notify_listeners()
+        return True, f'Servidor "{name}" removido.'
+
     # ------------------------------------------------------------------
     # Ciclo de Vida dos Clientes
     # ------------------------------------------------------------------
@@ -305,12 +380,18 @@ class MCPManager:
             headers=cfg.headers,
         )
         client.on_tools_changed = self._on_client_tools_changed
+        client.on_prompts_changed = self._on_client_prompts_changed
         client.on_state_changed = self._on_client_state_changed
         return client
 
     def _on_client_tools_changed(self, server_name: str) -> None:
         logger.info(f"[MCP:{server_name}] Atualizando ferramentas após notificação remota.")
         self.refresh_tools_cache()
+        self._notify_listeners()
+
+    def _on_client_prompts_changed(self, server_name: str) -> None:
+        logger.info(f"[MCP:{server_name}] Atualizando prompts após notificação remota.")
+        self.refresh_prompts_cache()
         self._notify_listeners()
 
     def _on_client_state_changed(self, server_name: str, new_state: MCPServerState) -> None:
@@ -342,6 +423,7 @@ class MCPManager:
 
         started = client.start()
         self.refresh_tools_cache()
+        self.refresh_prompts_cache()
         return started
 
     def stop_server(self, name: str) -> None:
@@ -352,6 +434,7 @@ class MCPManager:
         if client:
             client.stop()
         self.refresh_tools_cache()
+        self.refresh_prompts_cache()
 
     def start_all_enabled(self) -> None:
         """Inicia todos os servidores configurados com enabled=True."""
@@ -360,6 +443,7 @@ class MCPManager:
             if cfg.enabled:
                 self.start_server(name)
         self.refresh_tools_cache()
+        self.refresh_prompts_cache()
 
     def stop_all(self) -> None:
         """Encerra todos os servidores ativos."""
@@ -374,6 +458,7 @@ class MCPManager:
             except Exception:
                 pass
         self._cached_tools.clear()
+        self._cached_prompts.clear()
 
     # ------------------------------------------------------------------
     # Recursos (MCP Resources)
@@ -503,6 +588,104 @@ class MCPManager:
         return client.call_tool(tool_name, arguments or {})
 
     # ------------------------------------------------------------------
+    # Prompts (MCP Prompts)
+    # ------------------------------------------------------------------
+
+    def refresh_prompts_cache(self) -> list[MCPPrompt]:
+        """Consulta os prompts de todos os servidores MCP conectados.
+
+        Um servidor que não anuncia a capability ``prompts`` responde com erro
+        JSON-RPC a ``prompts/list``; o cliente devolve lista vazia nesse caso, de
+        modo que aqui não há nada a filtrar.
+        """
+        all_prompts: list[MCPPrompt] = []
+        with self._lock:
+            clients = list(self._clients.values())
+
+        for client in clients:
+            if client.is_running or client.state == MCPServerState.CONNECTED:
+                try:
+                    prompts = client.list_prompts()
+                    all_prompts.extend(prompts)
+                except Exception as exc:
+                    logger.debug(f"[MCP:{client.name}] Erro ao listar prompts: {exc}")
+
+        with self._lock:
+            self._cached_prompts = all_prompts
+        return all_prompts
+
+    def get_all_prompts(self) -> list[MCPPrompt]:
+        """Retorna os prompts em cache ou os atualiza se o cache estiver vazio."""
+        with self._lock:
+            if self._cached_prompts:
+                return list(self._cached_prompts)
+        return self.refresh_prompts_cache()
+
+    def get_prompt(self, qualified_or_name: str) -> MCPPrompt | None:
+        """Busca um prompt pelo nome qualificado (mcp__server__prompt) ou simples."""
+        prompts = self.get_all_prompts()
+        for p in prompts:
+            if p.qualified_name == qualified_or_name or p.name == qualified_or_name:
+                return p
+        return None
+
+    def _resolve_prompt_target(self, qualified_or_name: str) -> tuple[str, str]:
+        """Separa ``(servidor, prompt)`` aceitando as mesmas formas de ``call_tool``.
+
+        Formas aceitas:
+          - ``mcp__git__code_review`` -> ``("git", "code_review")``
+          - ``git:code_review``       -> ``("git", "code_review")``
+          - ``code_review``           -> descoberto pelo cache de prompts
+        """
+        server_name = ""
+        prompt_name = qualified_or_name
+
+        if qualified_or_name.startswith("mcp__"):
+            parts = qualified_or_name.split("__", 2)
+            if len(parts) >= 3:
+                server_name = parts[1]
+                prompt_name = parts[2]
+        elif ":" in qualified_or_name:
+            server_name, prompt_name = qualified_or_name.split(":", 1)
+        else:
+            for p in self.get_all_prompts():
+                if p.name == qualified_or_name or p.qualified_name == qualified_or_name:
+                    server_name = p.server_name
+                    prompt_name = p.name
+                    break
+
+        return server_name, prompt_name
+
+    def render_prompt(
+        self, qualified_or_name: str, arguments: dict[str, Any] | None = None
+    ) -> str:
+        """Materializa um prompt MCP como texto, identificando o servidor por prefixo.
+
+        Devolve sempre texto legível — inclusive em erro — porque o destino é a
+        caixa de entrada da paleta de comandos, que não trata exceções.
+        """
+        server_name, prompt_name = self._resolve_prompt_target(qualified_or_name)
+
+        if not server_name:
+            return (
+                f"Não foi possível identificar o servidor MCP para o prompt "
+                f"'{qualified_or_name}'."
+            )
+
+        client = self.get_client(server_name)
+        if not client:
+            # Mesmo comportamento de `call_tool`: sobe sob demanda se configurado.
+            cfg = self.get_server_configs().get(server_name)
+            if cfg and cfg.enabled:
+                self.start_server(server_name)
+                client = self.get_client(server_name)
+
+        if not client:
+            return f"Servidor MCP '{server_name}' não está ativo."
+
+        return client.get_prompt(prompt_name, arguments or {})
+
+    # ------------------------------------------------------------------
     # Status dos Servidores
     # ------------------------------------------------------------------
 
@@ -510,10 +693,15 @@ class MCPManager:
         """Retorna informações completas de status para UI ou auditoria."""
         configs = self.get_server_configs()
         tools = self.get_all_tools()
+        prompts = self.get_all_prompts()
 
         tools_by_server: dict[str, list[MCPTool]] = {}
         for t in tools:
             tools_by_server.setdefault(t.server_name, []).append(t)
+
+        prompts_by_server: dict[str, list[MCPPrompt]] = {}
+        for p in prompts:
+            prompts_by_server.setdefault(p.server_name, []).append(p)
 
         summary = []
         for name, cfg in configs.items():
@@ -521,6 +709,7 @@ class MCPManager:
             state = client.state if client else (MCPServerState.DISABLED if not cfg.enabled else MCPServerState.DISCONNECTED)
             last_err = client.last_error if client else ""
             server_tools = tools_by_server.get(name, [])
+            server_prompts = prompts_by_server.get(name, [])
 
             cmd_display = cfg.url if cfg.transport == "sse" or (cfg.url and not cfg.command) else f"{cfg.command} {' '.join(cfg.args)}".strip()
             summary.append({
@@ -537,6 +726,11 @@ class MCPManager:
                 "tool_details": [
                     {"name": t.name, "description": t.description, "qualified_name": t.qualified_name}
                     for t in server_tools
+                ],
+                "prompt_count": len(server_prompts),
+                "prompt_details": [
+                    {"name": p.name, "description": p.description, "qualified_name": p.qualified_name}
+                    for p in server_prompts
                 ],
             })
         return summary

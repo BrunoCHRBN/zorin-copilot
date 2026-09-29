@@ -109,6 +109,49 @@ class MCPResource:
 
 
 @dataclass
+class MCPPromptArgument:
+    """Argumento declarado por um prompt MCP (``prompts/list``)."""
+    name: str
+    description: str = ""
+    required: bool = False
+
+
+@dataclass
+class MCPPrompt:
+    """Prompt reutilizável (template) exposto por um servidor MCP.
+
+    Diferente de uma ferramenta, um prompt **não executa nada**: ele devolve
+    texto pronto para o modelo. É por isso que ele cabe na paleta de comandos —
+    escolher um prompt preenche a caixa de entrada em vez de agir no sistema.
+    """
+    name: str
+    server_name: str
+    description: str = ""
+    arguments: list[MCPPromptArgument] = field(default_factory=list)
+
+    @property
+    def qualified_name(self) -> str:
+        """Nome único qualificado, para não colidir entre servidores."""
+        return f"mcp__{self.server_name}__{self.name}"
+
+    @property
+    def required_arguments(self) -> list[MCPPromptArgument]:
+        return [a for a in self.arguments if a.required]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "server_name": self.server_name,
+            "qualified_name": self.qualified_name,
+            "description": self.description,
+            "arguments": [
+                {"name": a.name, "description": a.description, "required": a.required}
+                for a in self.arguments
+            ],
+        }
+
+
+@dataclass
 class MCPCallResult:
     """Resultado retornado pela execução de tools/call."""
     content: list[dict[str, Any]] = field(default_factory=list)
