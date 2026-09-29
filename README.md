@@ -61,19 +61,64 @@ O Zorin Copilot utiliza o runtime nativo do Zorin OS (Python 3.12, PyGObject, AT
 cd ~/zorin-copilot
 
 # Testes automatizados do núcleo
-python3 -m unittest discover -s tests
+.venv/bin/python -m pytest -q
 ```
+
+> **Use `pytest`, não `unittest`.** A suíte tem as duas famílias de teste (classes
+> `unittest.TestCase` **e** funções no estilo pytest). O `python -m unittest` coleta
+> **só a primeira**: os outros 14 módulos saem com `Ran 0 tests` e código **5**.
+> Até 2026-09-21 isso significava **435 testes que passavam e nunca rodavam** — o
+> `tests/test_study_tutor.py`, que cobre a injeção do addon do modo tutor no prompt,
+> era um deles. `exit 5` significa **"não rodou"**, não "verde por outro caminho".
+> O `pytest` está no `.venv` (extra `[test]`); o `python3` do sistema **não** o tem.
+
+O `tests/__init__.py` e o `tests/conftest.py` ativam o mesmo isolamento de ambiente
+por caminhos diferentes — `unittest` importa o primeiro, `pytest` carrega o segundo.
+É ele que redireciona `XDG_CONFIG_HOME`/`XDG_DATA_HOME`, define `ZORIN_TEST_MODE` e
+bloqueia os serviços pesados (MCP, indexação RAG em disco, wake word). Sem ele a
+suíte roda contra o `config.json` e o `memory.db` **reais do usuário** e sobe um
+processo de servidor MCP por janela criada, o que esgota a memória da máquina.
+Detalhes em `tests/_sandbox.py`.
 
 A suíte completa (inclui os testes de interface) roda sob um servidor gráfico
 virtual — é exatamente o que o CI faz:
 
 ```bash
-xvfb-run -a python3 -m pytest -q
+xvfb-run -a .venv/bin/python -m pytest -q
 ```
+
+> **Nesta máquina o `xvfb-run` não está instalado** (verificado em 2026-09-21), então
+> esse comando é o do CI, não o local. Localmente há `DISPLAY=:0`, e é por isso que o
+> caminho recomendado aqui é o runner com guarda abaixo — ele roda um módulo por
+> processo e não depende de servidor gráfico virtual.
+
+**Para a suíte inteira com guarda de memória**, use o runner que roda um módulo por
+processo e aborta quem passar de 900 MB (esta máquina **não tem swap**):
+
+```bash
+.venv/bin/python ~/.workbuddy-ai/skills/zorin-copilot-gui-change/scripts/run_tests_safe.py \
+    --python .venv/bin/python
+```
+
+Baseline: **147 módulos, 0 falhas**.
+
+> **Por que o isolamento e por que os testes travavam:** o diagnóstico completo
+> (duas falhas independentes — estouro de memória e um `wl-copy` órfão segurando
+> o pipe de saída) está em [`docs/ESTABILIDADE_TESTES.md`](docs/ESTABILIDADE_TESTES.md).
 
 Os testes de interface precisam das typelibs do sistema (`gir1.2-gtk-4.0`,
 `gir1.2-adw-1`). Pillow é opcional em runtime, mas obrigatória para rodar a
 suíte: `pip install -e ".[test]"`.
+
+### Rodando um subconjunto
+
+Prefira um arquivo por processo. Um arquivo de UI cria dezenas de janelas e,
+mesmo com o isolamento, a memória só volta de fato quando o processo termina:
+
+```bash
+.venv/bin/python -m pytest -q tests/test_ui_refactor.py
+.venv/bin/python -m pytest -q tests/test_ui_reform.py tests/test_sidebar_grouping.py
+```
 
 ---
 

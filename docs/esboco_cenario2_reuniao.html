@@ -1,0 +1,422 @@
+<!doctype html>
+<html lang="pt-BR" data-page-node-id="CDs1oZN5DDNSlYmkYK3QU9">
+<head data-page-node-id="0oLISDTHIxCMZiPCPpwUd2">
+<meta charset="utf-8" data-page-node-id="Y16DEajkoEXQSr4N9tNW6U" />
+<meta name="viewport" content="width=device-width, initial-scale=1" data-page-node-id="3xeprdV9w333hkRvDLfRiI" />
+<title>Esboço — Cenário 2: Assistente ativado por participante (Zorin Copilot)</title>
+<style>
+  :root {
+    --bg: #fafafa;
+    --window: #f6f5f4;
+    --card: #ffffff;
+    --card-2: #fcfcfc;
+    --ink: #241f31;
+    --ink-2: #5b5764;
+    --ink-3: #8d8896;
+    --line: #e2e0df;
+    --line-2: #d3d0ce;
+    --blue: #3584e4;
+    --blue-ink: #1c5fb4;
+    --green: #2ec27e;
+    --green-ink: #1a7d4e;
+    --red: #e01b24;
+    --red-ink: #a3161b;
+    --amber: #e5a50a;
+    --shadow: 0 1px 2px rgba(0,0,0,.06), 0 8px 24px rgba(0,0,0,.10);
+    --radius: 12px;
+    --radius-sm: 9px;
+    --font: "Cantarell", "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--font);
+    font-size: 14px;
+    line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+    padding: 24px;
+  }
+  .page-head { max-width: 1080px; margin: 0 auto 18px; }
+  .page-head h1 { font-size: 20px; font-weight: 700; margin: 0 0 6px; letter-spacing: -.2px; }
+  .page-head p { margin: 0; color: var(--ink-2); max-width: 760px; }
+  .thesis {
+    margin-top: 12px;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--blue);
+    border-radius: var(--radius-sm);
+    padding: 10px 14px;
+    color: var(--ink-2);
+    font-size: 13px;
+  }
+  .thesis b { color: var(--ink); }
+  .layout { max-width: 1080px; margin: 0 auto; display: grid; grid-template-columns: 1fr 320px; gap: 18px; }
+  @media (max-width: 920px) { .layout { grid-template-columns: 1fr; } }
+
+  /* ---------- Desktop scene ---------- */
+  .scene {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    overflow: hidden;
+  }
+  .topbar {
+    height: 30px;
+    background: #f0efee;
+    border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: 8px;
+    padding: 0 12px; font-size: 12px; color: var(--ink-2);
+  }
+  .topbar .clock { margin-left: auto; font-variant-numeric: tabular-nums; }
+  .topbar .pill-tag { background: #e7e5e4; border-radius: 6px; padding: 1px 8px; }
+  .desktop {
+    position: relative;
+    height: 520px;
+    background:
+      radial-gradient(circle at 20% 20%, #4a4a5e 0, #36364a 60%, #2c2c3c 100%);
+    /* um "wallpaper" sólido/escuro é permitido: não é gradiente decorativo de UI, é fundo de área de trabalho */
+    padding: 18px;
+  }
+
+  /* Meeting window (Google Meet) */
+  .meeting {
+    position: absolute; top: 18px; left: 18px; right: 18px; bottom: 120px;
+    background: var(--window);
+    border-radius: var(--radius);
+    box-shadow: 0 10px 30px rgba(0,0,0,.35);
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .meeting-bar {
+    height: 34px; display: flex; align-items: center; gap: 8px;
+    padding: 0 12px; border-bottom: 1px solid var(--line);
+    font-size: 13px; font-weight: 600;
+  }
+  .meeting-bar .dot-live { width: 8px; height: 8px; border-radius: 50%; background: var(--green); }
+  .meeting-grid {
+    flex: 1; display: grid; grid-template-columns: 1fr 1fr; grid-auto-rows: 1fr;
+    gap: 10px; padding: 12px; background: #1f1f29;
+  }
+  .tile {
+    background: #2e2e3c; border-radius: 10px; position: relative;
+    display: flex; align-items: flex-end; padding: 8px;
+  }
+  .tile .face {
+    position: absolute; inset: 0; margin: auto; width: 54px; height: 54px; border-radius: 50%;
+    background: #454559; display: flex; align-items: center; justify-content: center;
+    color: #cfcfe0; font-weight: 700; font-size: 18px;
+  }
+  .tile .name {
+    position: relative; z-index: 1; color: #e8e8f2; background: rgba(0,0,0,.45);
+    border-radius: 6px; padding: 1px 7px; font-size: 11px;
+  }
+  .tile.you { outline: 2px solid var(--blue); }
+  .meeting-foot {
+    height: 46px; background: #15151d; display: flex; align-items: center; justify-content: center; gap: 10px;
+  }
+  .mtg-btn {
+    width: 38px; height: 38px; border-radius: 50%; border: none; cursor: pointer;
+    background: #34343f; color: #e8e8f2; display: flex; align-items: center; justify-content: center;
+  }
+  .mtg-btn.leave { background: var(--red); }
+  .mtg-btn svg { width: 18px; height: 18px; fill: currentColor; }
+
+  /* ---------- Voice pill (voice_pill.py) ---------- */
+  .voice-pill {
+    position: absolute; left: 26px; bottom: 132px;
+    background: var(--card); border: 1px solid var(--line-2); border-radius: 999px;
+    box-shadow: var(--shadow); display: flex; align-items: center; gap: 8px;
+    padding: 6px 12px 6px 6px; z-index: 5;
+  }
+  .avatar-box {
+    position: relative; width: 32px; height: 32px; border-radius: 50%;
+    background: linear-gradient(0deg,#1c5fb4,#3584e4); display: flex; align-items: center; justify-content: center;
+    color: #fff; font-weight: 700; font-size: 12px;
+  }
+  .rec-dot {
+    position: absolute; top: -1px; right: -1px; color: var(--green); font-size: 13px;
+    text-shadow: 0 0 0 #fff; animation: pulse 1.6s ease-in-out infinite;
+  }
+  .mic-dot { color: var(--blue); font-size: 13px; }
+  .status-row { display: flex; align-items: center; gap: 6px; }
+  .status-row .sdot { color: var(--green); font-size: 12px; }
+  .pill-label { font-size: 12px; color: var(--ink-2); font-weight: 600; }
+
+  /* ---------- Live card (live_view.py:183) ---------- */
+  .live-card {
+    position: absolute; right: 22px; bottom: 22px; width: 332px;
+    background: var(--card); border: 1px solid var(--line-2); border-radius: var(--radius);
+    box-shadow: var(--shadow); overflow: hidden; z-index: 6;
+  }
+  .card-head {
+    display: flex; align-items: center; gap: 8px; padding: 8px 10px 6px;
+    border-bottom: 1px solid var(--line);
+  }
+  .status-dot { color: var(--green); font-size: 13px; }
+  .status-lbl { font-weight: 700; font-size: 13.5px; }
+  .badge {
+    display: flex; align-items: center; gap: 5px; margin-left: 2px;
+    background: #eef4fc; border-radius: 999px; padding: 2px 9px;
+  }
+  .badge .bdot { color: var(--blue); font-size: 11px; }
+  .badge .timer { font-variant-numeric: tabular-nums; font-size: 12px; color: var(--blue-ink); font-weight: 600; }
+  .video-badge { color: var(--green-ink); font-size: 11.5px; font-weight: 600; }
+  .rec-lbl { color: var(--red-ink); font-size: 11.5px; font-weight: 600; }
+  .icon-btn {
+    width: 28px; height: 28px; border-radius: 50%; border: none; background: transparent;
+    color: var(--ink-2); cursor: pointer; display: flex; align-items: center; justify-content: center;
+  }
+  .icon-btn:hover { background: #f0efee; }
+  .icon-btn svg { width: 16px; height: 16px; fill: currentColor; }
+  .spacer { flex: 1; }
+
+  .visualizer {
+    height: 85px; background: var(--card-2); border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; justify-content: center; gap: 3px; padding: 0 14px;
+  }
+  .bar { width: 4px; background: var(--blue); border-radius: 2px; animation: bounce 1.1s ease-in-out infinite; }
+  .bar:nth-child(odd) { background: #62a0ea; }
+
+  .caption {
+    padding: 10px 12px; min-height: 56px;
+  }
+  .caption .speaker {
+    display: inline-block; font-size: 10px; font-weight: 700; letter-spacing: .4px;
+    color: var(--blue-ink); background: #eef4fc; border-radius: 5px; padding: 1px 7px; margin-bottom: 5px;
+  }
+  .caption .text { font-size: 13px; color: var(--ink); }
+  .caption .text .you { color: var(--ink-3); }
+
+  /* ---------- Side legend ---------- */
+  .side { display: flex; flex-direction: column; gap: 14px; }
+  .panel {
+    background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+    box-shadow: var(--shadow); padding: 14px;
+  }
+  .panel h2 { font-size: 14px; margin: 0 0 8px; }
+  .panel p { margin: 0 0 8px; color: var(--ink-2); font-size: 12.5px; }
+  ul.elem { list-style: none; margin: 0; padding: 0; }
+  ul.elem li { padding: 6px 0; border-top: 1px solid var(--line); font-size: 12.5px; }
+  ul.elem li:first-child { border-top: none; }
+  ul.elem .k { font-weight: 700; color: var(--ink); }
+  ul.elem .ref { color: var(--ink-3); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .tag { display:inline-block; font-size: 10.5px; font-weight:700; border-radius: 5px; padding: 1px 6px; }
+  .tag.ok { background: #e6f6ee; color: var(--green-ink); }
+  .tag.new { background: #fdeede; color: #9a6200; }
+
+  /* Others view */
+  .others {
+    max-width: 1080px; margin: 18px auto 0;
+    background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+    box-shadow: var(--shadow); overflow: hidden;
+  }
+  .others-head { padding: 12px 16px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 12px; }
+  .others-head h2 { font-size: 15px; margin: 0; }
+  .toggle {
+    margin-left: auto; display: inline-flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--ink-2);
+  }
+  .toggle button {
+    font-family: var(--font); font-size: 12.5px; border: 1px solid var(--line-2);
+    background: var(--card); border-radius: var(--radius-sm); padding: 6px 12px; cursor: pointer; color: var(--ink);
+  }
+  .toggle button.active { background: var(--blue); color: #fff; border-color: var(--blue); }
+  .others-body { padding: 16px; display: flex; gap: 16px; flex-wrap: wrap; }
+  .mini {
+    width: 320px; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: var(--window);
+  }
+  .mini .mhead { height: 28px; display: flex; align-items: center; gap: 6px; padding: 0 10px; border-bottom: 1px solid var(--line); font-size: 12px; font-weight: 600; }
+  .mini .grid { height: 150px; background: #1f1f29; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 8px; }
+  .mini .t { background: #2e2e3c; border-radius: 8px; position: relative; }
+  .mini .t .face { position: absolute; inset: 0; margin: auto; width: 36px; height: 36px; border-radius: 50%; background: #454559; display: flex; align-items: center; justify-content: center; color: #cfcfe0; font-weight: 700; }
+  .mini .t .nm { position: absolute; left: 5px; bottom: 5px; color: #e8e8f2; background: rgba(0,0,0,.45); border-radius: 5px; font-size: 10px; padding: 0 5px; }
+  .mini .assistant-tile { background: #2e3b52; display: flex; align-items: center; justify-content: center; color: #cfe0ff; font-size: 11px; font-weight: 600; }
+  .note { font-size: 12px; color: var(--ink-2); max-width: 360px; }
+  .hidden { display: none; }
+
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+  @keyframes bounce { 0%,100% { height: 14px; } 50% { height: 60px; } }
+  .foot-note { max-width: 1080px; margin: 14px auto 0; color: var(--ink-3); font-size: 11.5px; }
+</style>
+</head>
+<body data-page-node-id="oqhMNUKYmIthw40nvGC7Kz">
+
+  <div class="page-head" data-page-node-id="yRxWHi51SQPxVvxThrX8sE">
+    <h1 data-page-node-id="mEe3aZ88M54xCg8SlqfjGa">Esboço visual — Cenário 2: assistente ativado por participante (sem conta própria)</h1>
+    <p data-page-node-id="AuRvgCHdC1Jx0kUBgWfJ0C">Mockup estático do estado real hoje no Zorin Copilot. O assistente é um <b data-page-node-id="gCHXtWdMwaNL0nE67xiXX9">overlay local</b> na máquina de quem o ativa — não um participante da call.</p>
+    <div class="thesis" data-page-node-id="sqVNHYk9BHS23KsRHYUXLy">
+      <b data-page-node-id="h9rvvZ2gDdU0jrZ3Gw1POL">Restrição confirmada no código:</b> sem loopback de áudio, o assistente capta só o microfone
+      (<code data-page-node-id="XFCI5AcV3aXdlZ8CJdDq3F">dictation.py:266</code>, <code data-page-node-id="LarRn8AVoQ2rIqa0IDWywd">local_voice.py:678</code>). Os outros participantes <b data-page-node-id="pBDmq87axJiZCDnEv5tWxU">não veem</b> o
+      assistente — a menos que o ativador compartilhe a tela (recorte inferior, botão “Compartilhar tela”).
+    </div>
+  </div>
+
+  <div class="layout" data-page-node-id="gEAznyfGC5mi7uRtYZTPbo">
+    <!-- ===== Desktop scene ===== -->
+    <div class="scene" data-page-node-id="vIEdO0MMzTxqg8dpyjQ7pe">
+      <div class="topbar" data-page-node-id="xyKz6JACF59YeL08tgBXtY">
+        <span class="pill-tag" data-page-node-id="luBUwV2v4ktlN7Al6XcQ21">Zorin OS</span>
+        <span data-page-node-id="rjG8OYXSQOBgqgoyqfBm2Q">09:42</span>
+        <span class="clock" id="wall" data-page-node-id="7KxYzK1BFLEBEXCyAWn0Nd">ter 09:42</span>
+      </div>
+      <div class="desktop" data-page-node-id="xKs8NYT3ES94VbkcVAjx4d">
+        <!-- Meeting window -->
+        <div class="meeting" data-page-node-id="s3aGEL4QBpzLKl7S5IYTZ6">
+          <div class="meeting-bar" data-page-node-id="cwjp2bYZroaC2y0wxBCXXJ">
+            <span class="dot-live" data-page-node-id="hMRWsXr2yd5flgPXuuXadC"></span> Reunião de Planejamento — Google Meet
+          </div>
+          <div class="meeting-grid" data-page-node-id="lSq9GGgZfkqrGvMY8Hu645">
+            <div class="tile you" data-page-node-id="9gbQvAqyBaa6pEWFeT1OHz"><div class="face" data-page-node-id="vS6qitxJCmGV1A0x1xegYG">BV</div><span class="name" data-page-node-id="asi87xTEvGTdzxA7ZoGwNA">Você (Bruno)</span></div>
+            <div class="tile" data-page-node-id="9qOMWz8L67S059I6DvgTPp"><div class="face" data-page-node-id="V0QGVdsdabHZzzAe5o83AH">AS</div><span class="name" data-page-node-id="5ODX2OLMuukX6Hb7PDQwe7">Ana Souza</span></div>
+            <div class="tile" data-page-node-id="SeSXtXj7rVcQ4zZIV5aP6P"><div class="face" data-page-node-id="zr3VDmLpz1qPe332tAo4Mm">CM</div><span class="name" data-page-node-id="KhaJVeDCpq2WjjCpZJKPT5">Carlos M.</span></div>
+            <div class="tile" data-page-node-id="Dr1bZXHwZnQarfCnTQZ51V"><div class="face" data-page-node-id="ijeORZbBtji1VADtkcGzfA">RL</div><span class="name" data-page-node-id="DGgwsMKP2WHpGPdezOxeLz">Renata L.</span></div>
+          </div>
+          <div class="meeting-foot" data-page-node-id="BVs28nRI2JEawuXMNHyRG9">
+            <button class="mtg-btn" title="Microfone" data-page-node-id="V3Mm9BvYUiCxs029WsVfdq"><svg viewBox="0 0 24 24" data-page-node-id="Rfsh9iopW6JJCAyGAypYyQ"><path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.9V21h2v-3.1A7 7 0 0 0 19 11h-2z" data-page-node-id="ew0Wa1WXgm1mXV9LlOygW8"/></svg></button>
+            <button class="mtg-btn" title="Câmera" data-page-node-id="4Rbt9IPhDGXWhdvMSXdPk1"><svg viewBox="0 0 24 24" data-page-node-id="SeLDTDrdgWWVcT7pjnRYZ5"><path d="M17 10.5V7a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-3.5l4 4v-11l-4 4z" data-page-node-id="bjFbonAPyRoaJNnT3n2Tpf"/></svg></button>
+            <button class="mtg-btn" title="Compartilhar tela" data-page-node-id="Y8HhIQyx9jiGnFom54QY7C"><svg viewBox="0 0 24 24" data-page-node-id="JMKG9wXHaFA3HNC7q0pr1Q"><path d="M20 3H4a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h6v2H8v2h8v-2h-2v-2h6a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2zm0 13H4V5h16v11z" data-page-node-id="REm1F9QQhbSOwTJWU2Wela"/></svg></button>
+            <button class="mtg-btn leave" title="Sair" data-page-node-id="dRDR0pFQ4YgaTIaJWCvJTG"><svg viewBox="0 0 24 24" data-page-node-id="ULpVjYiYCei6ESEVfvdAOT"><path d="M12 9c-1.6 0-3.15.25-4.6.7v3.1c0 .4-.23.74-.57.9-.98.49-1.87 1.12-2.66 1.85a1 1 0 0 1-1.4-.02L.3 13.08a1 1 0 0 1 0-1.42C3.34 8.78 7.46 7 12 7s8.66 1.78 11.7 4.66a1 1 0 0 1 0 1.42l-2.47 2.45a1 1 0 0 1-1.4.02 11.6 11.6 0 0 0-2.66-1.85.99.99 0 0 1-.57-.9v-3.1A15.6 15.6 0 0 0 12 9z" data-page-node-id="tjk65BMPJWLjBIQPA8MwIL"/></svg></button>
+          </div>
+        </div>
+
+        <!-- Voice pill (voice_pill.py) -->
+        <div class="voice-pill" data-page-node-id="BgTNTyauCinm26rk54pzC4">
+          <div class="avatar-box" data-page-node-id="Nv5rUe8nsRuNqX9vMYOisi">ZC<span class="rec-dot" data-page-node-id="Frh3ncYAtb9TyMJHRBIE36">●</span></div>
+          <div class="status-row" data-page-node-id="1GdmeAI6V0GWXIY3dLvb4A">
+            <span class="sdot" data-page-node-id="GHFBkzBmnFsc4YDezkkAiZ">●</span>
+            <span class="mic-dot" data-page-node-id="PRfn38WVIBwEBFUHaZ62KF">●</span>
+            <span class="pill-label" data-page-node-id="v4RPHOdYHX9yhhJjWfa3RC">Copilot ouvindo</span>
+          </div>
+        </div>
+
+        <!-- Live card (live_view.py:183) -->
+        <div class="live-card" data-page-node-id="spF1HHS2hfA3qcPVNxTldO">
+          <div class="card-head" data-page-node-id="9G1WZtEUWPxfn9pgGff8nG">
+            <span class="status-dot" data-page-node-id="yHqTwLW71wCWNUhSHhpjXE">●</span>
+            <span class="status-lbl" data-page-node-id="jYyoToYkDUC5nf76ixGE9f">Zorin Copilot Live</span>
+            <span class="badge" data-page-node-id="CpAMctkAkbKYUKIrYAHBlr"><span class="bdot" data-page-node-id="jBr46gfGdCpczPNXUKUd08">●</span><span class="timer" id="timer" data-page-node-id="ixFe8jZFNZUA7HP3HtACul">Ao Vivo · 00:42</span></span>
+            <span class="video-badge" data-page-node-id="XNFzNHVuwtTDLG6bDFAUn4">● TELA (1 FPS)</span>
+            <span class="rec-lbl" data-page-node-id="eeoVkOGH6ShUEGKxue2KgK">● Gravando</span>
+            <span class="spacer" data-page-node-id="c4DP9k7l8RrSZKoEI2PIEN"></span>
+            <button class="icon-btn" title="Alternar visualizador" data-page-node-id="C06lP317UVqXM8nN5d0G49"><svg viewBox="0 0 24 24" data-page-node-id="M1cDNDWZmvXwNhLeQ7IoLM"><path d="M3 5h18v2H3zM3 11h12v2H3zM3 17h18v2H3z" data-page-node-id="urZtMpXSbl0cWk5eWYYSFQ"/></svg></button>
+            <button class="icon-btn" title="Encerrar (Esc)" data-page-node-id="0nsH46l9cdlu0rXOV482AO"><svg viewBox="0 0 24 24" data-page-node-id="amOjoODZC8tfhNeZl6l79A"><path d="M18.3 5.7 12 12l6.3 6.3-1.4 1.4L10.6 13.4 4.3 19.7 2.9 18.3 9.2 12 2.9 5.7 4.3 4.3l6.3 6.3 6.3-6.3z" data-page-node-id="YSrNG04F4FgZ2bgH8WTSDZ"/></svg></button>
+          </div>
+          <div class="visualizer" id="viz" data-page-node-id="BO6RUpZChIaxaprnE5W9us">
+            <span class="bar" style="animation-delay:0s" data-page-node-id="yp2CAgeDjBAvWtrxkhhuLA"></span><span class="bar" style="animation-delay:.1s" data-page-node-id="AxrAOcSAUwcejW3kAxg77d"></span>
+            <span class="bar" style="animation-delay:.2s" data-page-node-id="ftsHptZBDtltSy33Fjbpyv"></span><span class="bar" style="animation-delay:.3s" data-page-node-id="g5m8jaGKLSeH6sPOMrx2fg"></span>
+            <span class="bar" style="animation-delay:.15s" data-page-node-id="9wGviUO7QywDqsFMW1rGz2"></span><span class="bar" style="animation-delay:.25s" data-page-node-id="gxtjBLlYUtzCB3JWjY0XPd"></span>
+            <span class="bar" style="animation-delay:.05s" data-page-node-id="1tdT8paqMT6QUwvujEs6g4"></span><span class="bar" style="animation-delay:.35s" data-page-node-id="3JOXjvetscyYYiyOMZpxES"></span>
+            <span class="bar" style="animation-delay:.2s" data-page-node-id="b9XfoymuPe0EIW9o2Rkc9w"></span><span class="bar" style="animation-delay:.1s" data-page-node-id="oM0CRES7QRsVi0wNzoGEL3"></span>
+            <span class="bar" style="animation-delay:.3s" data-page-node-id="vXgQ8gIGv5rAkSHhvrRVWP"></span><span class="bar" style="animation-delay:.15s" data-page-node-id="giOYyHItmrQAQP2HRe8PmZ"></span>
+            <span class="bar" style="animation-delay:.25s" data-page-node-id="J2sz7wj3EdpD0iSyXGZnrb"></span><span class="bar" style="animation-delay:.05s" data-page-node-id="YOeR2XqVDPUlgtzmy6S3Q3"></span>
+          </div>
+          <div class="caption" data-page-node-id="YF0sPRHau59GG0dRuvzedW">
+            <span class="speaker" data-page-node-id="AQUtplBaaRv8aFFiLcmUM2">COPILOT</span>
+            <div class="text" data-page-node-id="2rj2LTArkiuX3GvycFZLWn">
+              <span class="you" data-page-node-id="xxUi50oQEcQ8MaMGgB2HzP">Ana:</span> “Fechamos a entrega para quinta?”<br data-page-node-id="HqQxLD0ojXAqqPIDmVWSw7"/>
+              <b data-page-node-id="5Q4G33wBp9gXHTzmEKOLLB">Resumo pendente:</b> apontar responsável e prazo no calendário.
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== Legend ===== -->
+    <div class="side" data-page-node-id="qIGFCCSeOLFERphqAGXinF">
+      <div class="panel" data-page-node-id="BLElS7WfJoJDHIPPqRhx2M">
+        <h2 data-page-node-id="87wHTYA4wD5v8P33C2ewJK">Elementos de UI (Cenário 2)</h2>
+        <ul class="elem" data-page-node-id="YSp1P89qdcWlF3YjDG8kxy">
+          <li data-page-node-id="LKN59DHW8XPxl7gmTgnR2T"><span class="k" data-page-node-id="MlAq8P1PU8Pu5HTxetSwIf">Janela flutuante</span> <span class="ref" data-page-node-id="lKssMhhlGo3AjaVxZPT4JD">live_view.py:108 / voice_pill.py</span><br data-page-node-id="adgcdnEpEUuF1lrf0KKlYs">
+            <span class="tag ok" data-page-node-id="gTFFjFWlAMTHCGUvHbmPhQ">EXISTE</span> overlay não-focável ancorado no desktop (Wayland).</li>
+          <li data-page-node-id="h99X5iJ2NwEbVgIKWVsosm"><span class="k" data-page-node-id="UPvzv3VUTMo3zHyzjJXz3q">Avatar + rec_dot</span> <span class="ref" data-page-node-id="4lH3HDwgg8yD9xGODvAc84">voice_pill.py:337,346</span><br data-page-node-id="VCNDWxidDeHwnrmbtHu2vf">
+            <span class="tag ok" data-page-node-id="RfX8eScVzDVB9qJfDPQ42p">EXISTE</span> pulsa quando há vídeo/tela (status_dot em :1013).</li>
+          <li data-page-node-id="ksAUUT6a8FbiTRL2nN8afz"><span class="k" data-page-node-id="NER5nG0ePhJJnNW1WJ4G9u">mic_dot (nível)</span> <span class="ref" data-page-node-id="J4VhXPE4I0HyEXsw9ECNeL">voice_pill.py:414,1703</span><br data-page-node-id="fXqljIsKkzh7TmTrfUAkjX">
+            <span class="tag ok" data-page-node-id="5qRUKWpqyttmWZTzi5nepG">EXISTE</span> opacidade segue o volume do microfone.</li>
+          <li data-page-node-id="SHMJvkXyrnuvaVK8r18oS3"><span class="k" data-page-node-id="GRN39RrESXF0ox6yx5p1P0">status_dot + timer</span> <span class="ref" data-page-node-id="ma5qLR7p1jEZISG7mqEMgO">live_view.py:190,207</span><br data-page-node-id="j4JWe2hSoQDRR5nuK69wGb">
+            <span class="tag ok" data-page-node-id="bocjgKyJoN7OqbWV91LIk2">EXISTE</span> “Ao Vivo · 00:00”, cronômetro tabular.</li>
+          <li data-page-node-id="cHvawT8LRtc4VpqC1uA6F6"><span class="k" data-page-node-id="ne4hn3qVqp9cPXLVh7AUxq">video_badge</span> <span class="ref" data-page-node-id="69L7r1sGahvfXQgTBigljF">live_view.py:213</span><br data-page-node-id="wNkdsD4i7nBCThbzfaj490">
+            <span class="tag ok" data-page-node-id="xt2rH0TRBkwldesXbccwI4">EXISTE</span> “● TELA (1 FPS)” — só caminho Gemini.</li>
+          <li data-page-node-id="Gr1nY3wlnjoEMgKCBfgnAK"><span class="k" data-page-node-id="D9zTHLifKxdhkPuSMJGjHl">rec_lbl</span> <span class="ref" data-page-node-id="w3NcQomCg9BGkKGvocCH6X">live_view.py:223</span><br data-page-node-id="LUaKXrFeUzE8qDOqoEzgzU">
+            <span class="tag ok" data-page-node-id="A9U2SJf8fgamxQsVU3qcRB">EXISTE</span> “● Gravando”, nasce oculto.</li>
+          <li data-page-node-id="1OdzQxI4dohpWMv1s1dRyp"><span class="k" data-page-node-id="eDkYCNnD8H1F0JKzY9KEK3">Live Captions</span> <span class="ref" data-page-node-id="o5pMwtSoSEMoil57kCRaqA">live_view.py:292</span><br data-page-node-id="PB0XvBj3B2CoBRPYzpWQxE">
+            <span class="tag ok" data-page-node-id="fDPX0tU6gTr91FWOnVAjMJ">EXISTE</span> speaker “COPILOT” + texto selecionável.</li>
+          <li data-page-node-id="va3vy0BcEgxA5cnuPL4lTC"><span class="k" data-page-node-id="cPopqXei70lulpgaGosU10">Diarização (quem fala)</span> <span class="ref" data-page-node-id="x6QKN5BjvHdq5hilp5A0Gj">—</span><br data-page-node-id="ocSmv6J8mQbyEpsVtlf328">
+            <span class="tag new" data-page-node-id="wg0FPEB8Gf8vHcdFNrW85R">FALTA</span> caption fixo em “COPILOT”; sem rótulo por canal.</li>
+          <li data-page-node-id="Sqcfr16XTgYh6QxTPa6ARu"><span class="k" data-page-node-id="yGuFfbLp7ZnvV0sny8gGA2">Ouvir a sala (loopback)</span> <span class="ref" data-page-node-id="A4S8dodna210wATRhOFsx3">dictation.py:266</span><br data-page-node-id="KM2Kfuxe9bWH0wCQ4h8Ppz">
+            <span class="tag new" data-page-node-id="t9GYBpUz5FlmK9AggcEk4c">FALTA</span> só microfone; terceiros não são transcritos.</li>
+        </ul>
+      </div>
+      <div class="panel" data-page-node-id="6Yoigk1gHfEgNfeC1CFY5c">
+        <h2 data-page-node-id="g32liPmaDbLiDEV5NY56h6">O que isto NÃO é</h2>
+        <p data-page-node-id="YsSmVeRskugTaduJ7Q332D">Não há tile do “Zorin Copilot” na grade da call — não existe integração de bot
+        (grep: zero <code data-page-node-id="TLtJ7i9zeRpE4G9HnJ0up4">join_meeting</code> em <code data-page-node-id="KvKMGyOL0pDWI8EVLq4366">src/</code>). O assistente não é um
+        participante da reunião, é um companheiro local na sua máquina.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== Others view ===== -->
+  <div class="others" data-page-node-id="HWCdlA73BgAdHAuJFJdWnC">
+    <div class="others-head" data-page-node-id="jw5F8VAWecG0fiR3WxhZia">
+      <h2 data-page-node-id="e9DGo757X2pGlhzHcd2skp">O que os <b data-page-node-id="gHw0oadpJvFwRklK0PG8c6">outros participantes</b> veem</h2>
+      <div class="toggle" data-page-node-id="E1SmBuOjkYC8UENSLr82Ld">
+        <button id="btnNoShare" class="active" onclick="setShare(false)" data-page-node-id="gGKlGZAomgd4JEfMp0AKh4">Sem compartilhar</button>
+        <button id="btnShare" onclick="setShare(true)" data-page-node-id="N2mhNAGrXsFQouvgNDewRP">Compartilhando tela</button>
+      </div>
+    </div>
+    <div class="others-body" data-page-node-id="6R25g6YxYQ9qI5FWemo1Ej">
+      <div class="mini" data-page-node-id="z5yuLMjnCoTD9ym9PoFg2u">
+        <div class="mhead" data-page-node-id="gVuQ4jcBBjfNpEe43Wuggi"><span class="dot-live" style="width:8px;height:8px;border-radius:50%;background:var(--green);display:inline-block" data-page-node-id="2Yf144ACEjsY5FVNv4wXFZ"></span> Meet — visão da Ana</div>
+        <div class="grid" id="othersGrid" data-page-node-id="a3feffp3gmdVLYDXDUX36H">
+          <div class="t" data-page-node-id="UXdNydxFQ4b8XKsLk5TIOv"><div class="face" data-page-node-id="JEY5b0b7HnucWC9Eun8jGj">BV</div><div class="nm" data-page-node-id="5DCuzJU3d4RPtEBcysxpXZ">Bruno</div></div>
+          <div class="t" data-page-node-id="uvIr2NS9DJXunIKxi3Xm8s"><div class="face" data-page-node-id="9aNgYJXj6GZH2cYpoi6nnv">AS</div><div class="nm" data-page-node-id="RMLaYII1KYGPwdBnLA4jrG">Ana</div></div>
+          <div class="t" data-page-node-id="HO8HRavSy5M8do6wParuhY"><div class="face" data-page-node-id="TaxAb7QvAx2YuhzJ4KjE5L">CM</div><div class="nm" data-page-node-id="EUxUN8uNHvdQbnnoHNVnUJ">Carlos</div></div>
+          <div class="t" data-page-node-id="REuFhSmXh65EK6fJHw7sxT"><div class="face" data-page-node-id="iBm1Dhf2bAqI6GQ8tn5z6p">RL</div><div class="nm" data-page-node-id="dUIsUayTrDbhBAy4aXezGg">Renata</div></div>
+        </div>
+      </div>
+      <div class="note" id="othersNote" data-page-node-id="sVi92LR2tTUuDTXsBSXSA8">
+        <b data-page-node-id="fycfHaZDS9ZcfrtFi0cWQn">Sem compartilhar tela:</b> a Ana vê só os 4 participantes. O assistente é invisível para
+        ela — não há tile próprio, não há caption dela. O Zorin Copilot existe apenas na máquina do Bruno.
+      </div>
+    </div>
+  </div>
+
+  <div class="foot-note" data-page-node-id="1TIxHuZpnY8073nsQioWjS">
+    Mockup de esboço (não é screenshot). Mapeado para <code data-page-node-id="CFlCW0u7KZBLThhugjWtkn">docs/PROPOSTA_APRESENTACAO_REUNIOES.md</code>.
+    Cores/seleção de ícones seguem a HIG do GNOME/Libadwaita (ícones simbólicos, sem gradiente decorativo, sem emoji).
+  </div>
+
+<script>
+  // Timer "Ao Vivo" (live_view.py:207) — conta a partir de 00:42
+  let secs = 42;
+  const timerEl = document.getElementById('timer');
+  setInterval(() => {
+    secs++;
+    const m = String(Math.floor(secs / 60)).padStart(2, '0');
+    const s = String(secs % 60).padStart(2, '0');
+    timerEl.textContent = `Ao Vivo · ${m}:${s}`;
+  }, 1000);
+
+  function setShare(on) {
+    document.getElementById('btnShare').classList.toggle('active', on);
+    document.getElementById('btnNoShare').classList.toggle('active', !on);
+    const grid = document.getElementById('othersGrid');
+    const note = document.getElementById('othersNote');
+    if (on) {
+      grid.insertAdjacentHTML('beforeend',
+        '<div class="t assistant-tile">Tela do Bruno<br>(janela flutuante visível)</div>');
+      note.innerHTML = '<b>Compartilhando tela:</b> a Ana passa a ver a janela do Bruno como qualquer ' +
+        'tela compartilhada — e, nela, o card flutuante do assistente. Ainda assim não há tile nem ' +
+        'caption próprios do “Zorin Copilot”: ele aparece apenas porque a tela foi transmitida.';
+    } else {
+      const t = grid.querySelector('.assistant-tile');
+      if (t) t.remove();
+      note.innerHTML = '<b>Sem compartilhar tela:</b> a Ana vê só os 4 participantes. O assistente é ' +
+        'invisível para ela — não há tile próprio, não há caption dela. O Zorin Copilot existe apenas ' +
+        'na máquina do Bruno.';
+    }
+  }
+</script>
+</body>
+</html>

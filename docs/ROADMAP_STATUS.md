@@ -57,12 +57,14 @@ O Zorin Copilot é um assistente de inteligência artificial nativo para Linux (
   - Implementação completa da especificação JSON-RPC 2.0 sobre transporte `stdio`.
   - Tratamento assíncrono de requisições com `threading.RLock` contra deadlocks.
   - **Self-Healing:** Auto-recuperação de processos filhos com backoff exponencial (`max_restarts=3`).
-  - **Notificações Bidirecionais:** Processamento de `notifications/tools/list_changed` e `notifications/resources/list_changed`.
+  - **Notificações Bidirecionais:** Processamento de `notifications/tools/list_changed`, `notifications/resources/list_changed` e `notifications/prompts/list_changed`.
   - **Recursos MCP:** Suporte a descoberta (`resources/list`) e leitura (`resources/read`).
+  - **Prompts MCP:** Suporte a descoberta (`prompts/list`) e materialização (`prompts/get`), com parsing tolerante a `arguments` ausente/`null` e a `content` como objeto ou lista (incluindo recurso embutido).
 - **Gerenciamento e Orquestração (`mcp/manager.py`):**
   - Arquivo de configuração padronizado em `~/.config/zorin-copilot/mcp_servers.json`.
   - Monitoramento inotify via `Gio.File.monitor_file` com debounce de 500ms para *hot-reload* instantâneo.
   - Template inicial pronto com servidores padrão (Git, SQLite, Docker, Fetch).
+  - Caches independentes de ferramentas e prompts, ambos invalidados em start/stop/reload.
 - **Integração com Ferramentas do Agente (`mcp/adapter.py`):**
   - Registro dinâmico de ferramentas no `ToolRegistry`.
   - Heurística automática de classificação de risco (mutante vs. leitura).
@@ -98,7 +100,10 @@ O Zorin Copilot é um assistente de inteligência artificial nativo para Linux (
   - Exibição de ícones simbólicos e rótulos nativos Adwaita no `AgentExecutionWidget`.
 
 ### 2.5 Qualidade, Testes e Estabilidade
-- **1.614 testes unitários e de integração aprovados (100% pass, 5 skipped)** cobrindo todos os módulos do sistema: ações, segurança, OCR, VLM grounding, busca de código, processos, módulo de estudo/AVA/Anki, memória, RAG, rollback, MCP, UI GTK4, Gemini Live, Home Assistant e drivers de janela.
+- **3.106 testes aprovados (0 falhas)** cobrindo todos os módulos do sistema: ações, segurança, OCR, VLM grounding, busca de código, processos, módulo de estudo/AVA/Anki, memória, RAG, rollback, MCP, subagentes, UI GTK4, Gemini Live, Home Assistant e drivers de janela.
+- **Runner com guarda** (`run_tests_safe.py`): roda um arquivo de teste por processo, mede o pico de RSS e mata o que estourar o teto. Última medição: **147 módulos, 0 falhas, ~175 s, pico ~334 MB, zero abortos**.
+- **`pytest` é o runner da suíte** (2026-09-21). O runner de guarda invocava `python -m unittest`, que coleta só `unittest.TestCase`; os módulos em estilo pytest saíam com `Ran 0 tests` / código **5**, e isso era lido como *"falhas estruturais pré-existentes, nenhuma falha real"* por várias rodadas. Medido: eram **435 testes que passavam e nunca rodavam**. Agora o runner usa `pytest -q -p no:cacheprovider` por módulo e **um comando cobre a suíte inteira**. Detalhe em `docs/ESTABILIDADE_TESTES.md`.
+- **Harnesses de mutação** em `tests/mutacao/` — quebram o código de produção de propósito e exigem que a suíte falhe, provando que os testes *pegariam o defeito de volta*. Não são coletados por nenhum dos dois runners.
 
 ---
 
@@ -115,9 +120,28 @@ O Zorin Copilot é um assistente de inteligência artificial nativo para Linux (
                    ▼                                          ▼
   ┌─────────────────────────────────┐        ┌──────────────────────────────────┐
   │  FASE 8: CAPTURA & ESTUDO AVA   │   ──►  │  FASE 7: MCP REMOTO & PROMPTS    │
-  │  (CONCLUÍDA ✅ - SCORM + Anki)  │        │  (SSE/WebSockets + Prompts API)  │
+  │  (CONCLUÍDA ✅ - SCORM + Anki)  │        │  (CONCLUÍDA ✅ - SSE + Prompts)  │
   └─────────────────────────────────┘        └──────────────────────────────────┘
+                   │                                          │
+                   └────────────────────┬─────────────────────┘
+                                        ▼
+  ┌────────────────────────────────────────────────────────────────────────────┐
+  │  FASE 9: SUBAGENTES ESPECIALIZADOS                                         │
+  │  (CONCLUÍDA ✅ - contexto isolado + ferramentas restritas + encadeamento)  │
+  └────────────────────────────────────────────────────────────────────────────┘
 ```
+
+> Todas as fases do roadmap original estão concluídas, e o Passo 4 de
+> `docs/PROXIMOS_PASSOS.md` (Subagentes Especializados) também.
+
+### Fase 9: Subagentes Especializados — CONCLUÍDA ✅
+- **Contrato de subagente (`ai/subagents.py`, módulo puro):** um subagente é um `AgentLoop` comum com três coisas trocadas — contexto isolado, registro de ferramentas restrito e orçamento próprio. Reusar o laço em vez de escrever outro faz todos os freios já testados (teto de passos e de tempo, detecção de repetição e de laço, aborto) valerem para o subagente sem reimplementação.
+- **Restrição no *schema*, não validação a posteriori:** `ToolRegistry.restricted(names)` devolve um clone cujo catálogo contém só o allowlist. O subagente não vê as ferramentas proibidas — não há caminho de código em que ele possa chamá-las. `resolve_allow` sempre acrescenta `done`/`finish`, senão ele só pararia esgotando o orçamento.
+- **Encadeamento explícito:** `SubagentPipeline` passa a saída de um estágio como entrada do próximo, com o estado materializado em `PipelineState`/`SubagentRun`/`PipelineResult` (todos serializáveis) e um motivo de parada nomeado por execução.
+- **Progresso sem bloquear a janela:** cada transição chega à UI por `GLib.idle_add` e vira uma linha recuada no `AgentExecutionWidget`, sem número de etapa — é trabalho *dentro* do passo `run_subagent`, e numerá-la faria a contagem de etapas mentir.
+- **Recursão bloqueada por construção:** nenhum allowlist contém `run_subagent`, com teste afirmando isso para todo o catálogo.
+- **Catálogo de três especialistas** (`researcher`, `refactorer`, `a11y_auditor`), com allowlists e orçamentos conferidos contra o registro real.
+- **Evidência visual:** `docs/agente-subagente.png` (render real GTK4 → Gsk → PNG) mostrando as três gravidades de estágio lado a lado.
 
 ### Fase 8: Módulo de Estudo & Captura de Conteúdo AVA (Plano de Estudos SENAC) — CONCLUÍDA ✅
 - **Automação Multi-Páginas SCORM/AVA (`core/study_capture.py`):**
@@ -141,9 +165,12 @@ O Zorin Copilot é um assistente de inteligência artificial nativo para Linux (
   - Descoberta automática de endpoint POST via evento SSE `endpoint` e suporte a chamadas de ferramentas e recursos remotos.
   - Interface de preferências Libadwaita com tag `[SSE Remoto]`.
   - Bateria de testes em `tests/test_mcp_sse.py`.
-- **MCP Prompts (`prompts/list` e `prompts/get`) (Próximo Passo):**
-  - Implementar o suporte ao terceiro pilar da especificação MCP.
-  - Servidores MCP poderão registrar templates de comandos e personas customizadas diretamente na Paleta de Comandos (`Ctrl+K`) do Copilot.
+- **MCP Prompts (`prompts/list` e `prompts/get`) (Concluído ✅):**
+  - Terceiro pilar da especificação MCP implementado de ponta a ponta: descoberta, agregação entre servidores e materialização com argumentos.
+  - Servidores MCP registram templates de comandos e personas customizadas diretamente na Paleta de Comandos (`Ctrl+K`) do Copilot, como `mcp-prompt::mcp__servidor__nome`.
+  - **Um prompt não executa nada no sistema** — escolhê-lo preenche a caixa de entrada com o texto pronto para o modelo. É o que separa este pilar do de ferramentas.
+  - Argumentos declarados são coletados num diálogo Libadwaita (`Adw.Dialog` + `Adw.EntryRow`), com marcação de obrigatórios; prompts sem parâmetros preenchem direto, sem passo intermediário.
+  - Lógica de nome, busca e validação isolada em `mcp/prompts.py` (pura, sem GTK) e suíte em `tests/test_mcp_prompts.py`.
 
 ---
 

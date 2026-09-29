@@ -57,13 +57,13 @@ Nesta etapa, resolvemos o gargalo de interrupção prematura ("Limite de passos 
                                   
   ┌─────────────────────────────────┐        ┌──────────────────────────────────┐
   │  1. AUTOMAÇÃO AVA / ANKI        │   ──►  │  2. MCP REMOTO (SSE / HTTP)      │
-  │  (CONCLUÍDO ✅ - SCORM + Anki)  │        │  (Servidores Cloud / Tokens)     │
+  │  (CONCLUÍDO ✅ - SCORM + Anki)  │        │  (CONCLUÍDO ✅ - Cloud / Tokens) │
   └─────────────────────────────────┘        └──────────────────────────────────┘
                    │                                          │
                    ▼                                          ▼
   ┌─────────────────────────────────┐        ┌──────────────────────────────────┐
   │  3. MCP PROMPTS NA PALETA       │   ──►  │  4. SUBAGENTES ESPECIALIZADOS    │
-  │  (Atalhos dinâmicos via Ctrl+K) │        │  (Pesquisa, Código, A11y)        │
+  │  (CONCLUÍDO ✅ - Ctrl+K)        │        │  (PRÓXIMO PASSO - Pesquisa/Code) │
   └─────────────────────────────────┘        └──────────────────────────────────┘
 ```
 
@@ -81,11 +81,67 @@ Nesta etapa, resolvemos o gargalo de interrupção prematura ("Limite de passos 
   5. UI de Preferências Adwaita atualizada com indicador `[SSE Remoto]` e exibição limpa de URLs.
   6. Suíte automatizada com 6 novos testes em `tests/test_mcp_sse.py` utilizando `ThreadingHTTPServer` nativo.
 
-### Passo 3: MCP Prompts na Paleta de Comandos (`Ctrl+K`) (Próximo Passo)
+### Passo 3: MCP Prompts na Paleta de Comandos (`Ctrl+K`) (Concluído ✅)
 - **Problema:** Usuários precisam digitar prompts repetitivos para tarefas comuns fornecidas por servidores MCP.
-- **Ações:**
-  1. Suportar `prompts/list` e `prompts/get` da especificação MCP.
-  2. Integrar os prompts descobertos dinamicamente na Paleta de Comandos rápida (`Ctrl+K`) com preenchimento assistido de argumentos.
+- **Implementação Completa:**
+  1. Primitiva `prompts/list` e `prompts/get` suportada de ponta a ponta: `MCPPrompt`/`MCPPromptArgument` em `mcp/protocol.py`, `list_prompts`/`get_prompt` em `BaseMCPClient`, agregação (`refresh_prompts_cache`, `get_all_prompts`, `get_prompt`, `render_prompt`) em `MCPManager`.
+  2. Notificação `notifications/prompts/list_changed` tratada com callback próprio (`on_prompts_changed`), mantendo o cache de prompts separado do de ferramentas.
+  3. Prompts descobertos entram na Paleta de Comandos como `mcp-prompt::mcp__servidor__nome`. Escolher um prompt **não executa nada no sistema** — ele preenche a caixa de entrada com o texto materializado.
+  4. Diálogo Libadwaita (`Adw.Dialog` + `Adw.EntryRow`) coleta os argumentos declarados quando existem, com marcação de obrigatórios; prompts sem parâmetros preenchem direto.
+  5. `prompts/get` roda fora da thread da UI e o texto entra por `GLib.idle_add`; erros do servidor viram texto legível, nunca exceção.
+  6. Lógica pura isolada em `mcp/prompts.py` (nome de comando, palavras-chave de busca, validação e limpeza de argumentos), sem GTK — testável sem display.
+  7. Suíte com 60 testes em `tests/test_mcp_prompts.py`, cobrindo protocolo, cliente, gerenciador, helper puro e integração com a paleta.
+- **Evidência visual** (render real, GTK4 → Gsk → PNG): `docs/paleta-mcp-prompt.png` (prompt como primeiro resultado da busca), `docs/paleta-mcp-lista.png` (painel aberto) e `docs/dialogo-argumentos-prompt.png` (diálogo de argumentos com marcação de obrigatório). A verificação encontrou um defeito real, descrito abaixo.
+
+> **Defeito encontrado ao renderizar (corrigido):** `Adw.ActionRow.title`/`subtitle` são
+> interpretados como **markup** pelo GTK. Um `&`, `<` ou `>` cru faz o parsing falhar: o GTK
+> emite um warning, `get_title()` continua devolvendo o texto original e o **rótulo fica
+> vazio** — a linha aparece em branco, e nenhum teste que olhe só para `get_title()` percebe.
+> O comando `app.hardware-health` ("Saúde de Hardware & Sensores Térmicos") já sofria disso
+> antes deste passo; com prompts vindos de servidores externos o defeito passaria a ser
+> alcançável por dado de terceiro. Corrigido em `CommandPalette._make_row` com
+> `GLib.markup_escape_text`, com guarda em `test_command_palette.py`.
+>
+> O mesmo padrão existe em outros pontos que passam texto dinâmico para `title=`/`subtitle=`
+> (`preferences.py`, `infra_view.py`, `chat_stream.py`). **Não** é uma troca mecânica: em
+> `chat_stream.py` parte das chamadas passa markup **de propósito** (`<b>…</b>` com
+> `html.escape` no conteúdo), e escapar ali quebraria a formatação.
+
+### Passo 4: Subagentes Especializados (Concluído ✅)
+- **Problema:** Tarefas longas (pesquisa profunda, refatoração de código, auditoria de acessibilidade) exigem raciocínio em etapas com contexto próprio, e hoje o agente principal carrega tudo.
+- **Implementação Completa:**
+  1. **Contrato de subagente** (`ai/subagents.py`, módulo **puro** — sem GTK, sem rede, sem provedor). A decisão de projeto foi **não escrever um laço novo**: um subagente é um `AgentLoop` comum com três coisas trocadas. Assim todos os freios já medidos e testados do laço (teto de passos, teto de tempo, detecção de repetição e de laço, aborto) valem para o subagente **de graça**, em vez de serem reimplementados — e reimplementados pior.
+  2. **Contexto isolado:** `session_context=[]` na construção do laço interno. É o ponto do recurso — se o subagente recebesse o histórico da conversa, não haveria alívio de contexto e ele repetiria o que o pai já fez.
+  3. **Ferramentas restritas no *schema*, não validadas a posteriori:** `ToolRegistry.restricted(names)` devolve um clone cujo `_specs` contém **só** as ferramentas do allowlist. O subagente literalmente não vê as outras — não há caminho de código em que ele possa chamar uma ferramenta proibida, porque ela não está no catálogo que ele recebe. `resolve_allow` sempre acrescenta `FINISH_TOOLS` (`done`/`finish`), senão o subagente só conseguiria parar esgotando o orçamento.
+  4. **Encadeamento com estado explícito:** `SubagentPipeline` roda os estágios em série e passa a saída de um como entrada do próximo (`chain_input`). O estado é materializado em `PipelineState`/`SubagentRun`/`PipelineResult`, todos com `to_dict()` — o relatório vira JSON para o chat e para o log. Como no `AgentLoop`, toda execução termina com **exatamente um** motivo de parada nomeado (`done`, `no_stages`, `no_planner`, `stage_failed`, `aborted`, `timeout`).
+  5. **Progresso no chat sem bloquear a janela:** o pipeline é acionado por um passo normal do agente (a ferramenta `run_subagent`), que roda no thread do agente. Cada transição de estágio chega à UI por `GLib.idle_add` e vira uma linha em `AgentExecutionWidget.add_subagent_stage`. As linhas entram **sem número de etapa** e recuadas com borda à esquerda: elas são trabalho *dentro* do passo `run_subagent`, e numerá-las faria a contagem de etapas do agente principal mentir. O gancho `registry.subagent_runner` reusa o mesmo contrato do `board_opener` já existente.
+  6. **Recursão bloqueada por construção:** nenhum allowlist do catálogo contém `run_subagent`, então um subagente não consegue abrir outro. Há teste afirmando isso para todos os especialistas.
+  7. **Catálogo de três especialistas reais** (`researcher`, `refactorer`, `a11y_auditor`), com allowlists e orçamentos conferidos **contra o registro de verdade** antes de escrever qualquer teste: todo padrão casa com pelo menos uma ferramenta existente e todo especialista consegue terminar.
+  8. Suíte com **59 testes puros** em `tests/test_subagents.py` (sem display, sem rede, sem modelo) e **9 testes de widget** em `tests/test_agent_gui.py`, cobrindo allowlist, isolamento de registro, contexto isolado, orçamentos, encadeamento, motivos de parada, notificações de progresso, repasse de aprovação e a ferramenta `run_subagent`.
+- **Evidência visual** (render real, GTK4 → Gsk → PNG): `docs/agente-subagente.png`, com um pipeline de três estágios mostrando as três gravidades lado a lado — concluído, falhou e interrompido.
+
+> **Defeito encontrado ao renderizar (corrigido):** o ícone de um estágio concluído era pintado de
+> **verde** sempre que o estágio terminava, porque a cor saía direto de `SubagentRun.ok`. Mas
+> `ok` é só `stop_reason == "done"` — um booleano que **joga fora o motivo**. Um estágio parado por
+> `max_steps` e um que quebrou com `no_provider` chegam os dois como `ok=False`, e os dois saíam
+> verdes ao lado do texto "interrompido". O ícone contradizia o rótulo, e nenhuma asserção de texto
+> pegaria: o texto sempre esteve certo. Corrigido com `stage_severity`, que usa o `ok` para o caso
+> feliz e o `stop_reason` para separar **"acabou o orçamento"** (trabalho parcial → âmbar,
+> "interrompido") de **"quebrou"** (vermelho, "falhou"). Motivo desconhecido cai em vermelho de
+> propósito: um motivo novo deve aparecer, não passar batido.
+
+> **Defeito de orçamento encontrado pelos testes (corrigido):** `max_total_seconds` aplicava um piso
+> silencioso de 1 segundo (`max(1.0, …)`), então um teto de 0,01 s virava 1 s e o primeiro estágio
+> completava em vez de o pipeline desistir. O piso existia para nunca entregar orçamento zero ao
+> `AgentLoop`; foi trocado por um epsilon (`_MIN_STAGE_SECONDS = 0.001`) que cumpre a mesma função
+> sem inventar tempo que o chamador não deu.
+
+> **Nota de honestidade sobre um teste:** o caso "estágio 1 conclui, orçamento acaba antes do estágio
+> 2" **não tem teste determinístico** — o orçamento do estágio é o que sobrou do total, e o
+> `AgentLoop` confere o orçamento no início do passo, então um estágio que conclui sempre termina
+> dentro do orçamento. O teste foi reescrito para afirmar a regra que **é** determinística (com o
+> total esgotado, nenhum estágio começa) e o raciocínio ficou registrado no docstring, em vez de ser
+> disfarçado com um teste que passa por acidente.
 
 ---
 

@@ -60,6 +60,16 @@ office = [
     "python-docx>=1.1.0",
     "python-pptx>=0.5.0",
 ]
+# Integrações Google (OAuth2 "Desktop app"). Opcional pelo mesmo motivo da voz:
+# só quem quer a integração precisa do peso. `keyring` vem junto para o token
+# ir ao Secret Service do sistema em vez de um arquivo — `core/google_auth.py`
+# degrada para um arquivo 0600 se o `keyring` não estiver presente.
+google = [
+    "google-api-python-client>=2.0.0",
+    "google-auth-oauthlib>=1.0.0",
+    "google-auth>=2.0.0",
+    "keyring>=24.0.0",
+]
 
 [project.scripts]
 zorin-copilot = "zorin_copilot.ui.app:main"
