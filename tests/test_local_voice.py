@@ -279,7 +279,7 @@ class TestLocalLiveVoiceClient(unittest.TestCase):
 
         self.assertEqual(transcripts, [
             ("user", "abra as configurações de som"),
-            ("agent", "Abrindo as configurações de som do sistema."),
+            ("assistant", "Abrindo as configurações de som do sistema."),
         ])
         self.assertEqual(len(tool_executed), 1)
         self.assertEqual(tool_executed[0][0], ActionType.LAUNCH_APP.value)
@@ -330,11 +330,13 @@ class TestLocalLiveVoiceClient(unittest.TestCase):
         self.client.synthesizer.speak.assert_called_with(expected_spoken)
 
         # Garante que o transcript também foi higienizado e não contém os menus de rodapé
-        agent_transcripts = [t[1] for t in transcripts if t[0] == "agent"]
-        self.assertEqual(len(agent_transcripts), 1)
-        self.assertNotIn("[1]", agent_transcripts[0])
-        self.assertNotIn("Lojas oficiais", agent_transcripts[0])
-        self.assertIn("Mercado Livre", agent_transcripts[0])
+        # Entrega G / P1-7: o papel do copiloto é `"assistant"` (canônico), não o
+        # histórico `"agent"` — o mesmo vocabulário do cliente de nuvem.
+        assistant_transcripts = [t[1] for t in transcripts if t[0] == "assistant"]
+        self.assertEqual(len(assistant_transcripts), 1)
+        self.assertNotIn("[1]", assistant_transcripts[0])
+        self.assertNotIn("Lojas oficiais", assistant_transcripts[0])
+        self.assertIn("Mercado Livre", assistant_transcripts[0])
 
 
 class _RecordingBackend(desktop_shortcuts.ShortcutBackend):
@@ -405,6 +407,19 @@ class TestVoiceShortcuts(unittest.TestCase):
         self.assertTrue(ShortcutManager.unregister_voice())
         self.assertEqual(self.backend.unregistered, ["voice"])
 
+    def test_register_voice_pill_despacha_slot_e_flag_corretos(self):
+        """O atalho dedicado usa o slot 'voice-pill' e a flag --voice-pill."""
+        self.assertTrue(ShortcutManager.register_voice_pill("<Super><Shift>p"))
+        slot, accelerator, command = self.backend.registered[0]
+        self.assertEqual(slot, "voice-pill")
+        self.assertEqual(accelerator, "<Super><Shift>p")
+        self.assertTrue(command.endswith("--voice-pill"))
+
+    def test_unregister_voice_pill_remove_o_slot(self):
+        ShortcutManager.register_voice_pill()
+        self.assertTrue(ShortcutManager.unregister_voice_pill())
+        self.assertEqual(self.backend.unregistered, ["voice-pill"])
+
     def test_backend_com_falha_devolve_falso_e_explica(self):
         with patch.object(
             desktop_shortcuts,
@@ -413,6 +428,160 @@ class TestVoiceShortcuts(unittest.TestCase):
         ):
             self.assertFalse(ShortcutManager.register_voice())
             self.assertIn("Nenhum backend", ShortcutManager.last_message)
+
+
+class _FakeProc:
+    """Popen falso para os testes de reconexão do gravador."""
+
+    def __init__(self, exit_code: int = 1, stdout_data: bytes = b""):
+        self._exit_code = exit_code
+        self.terminated = False
+        self.killed = False
+        self.stdout = MagicMock()
+        self.stdout.read.return_value = stdout_data
+
+    def poll(self):
+        return self._exit_code
+
+    def terminate(self):
+        self.terminated = True
+
+    def wait(self, timeout=None):
+        return self._exit_code
+
+    def kill(self):
+        self.killed = True
+
+
+class TestLocalMicReconnect(unittest.TestCase):
+    """Entrega B / P0-4 (WS1): reconexão automática do gravador de microfone no modo local.
+
+    Cobre L1–L5 do plano `docs/ENTREGA_B_RECONEXAO.md`. Não usa áudio real: o `Popen`
+    e a fonte filtrada (WS2) são mockados.
+    """
+
+    def setUp(self):
+        self.config = CopilotConfig(provider="ollama")
+        self.client = LocalLiveVoiceClient(
+            config=self.config, executor=MagicMock(), engine=MagicMock()
+        )
+        self.client.on_error = MagicMock()
+
+    # --- L1: comando / abertura do gravador ------------------------------
+    def test_build_recorder_cmd_none_without_recorder(self):
+        with patch("zorin_copilot.ai.local_voice.shutil.which", return_value=None):
+            self.assertIsNone(self.client._build_recorder_cmd())
+
+    def test_build_recorder_cmd_enriches_with_filtered_source(self):
+        with patch("zorin_copilot.ai.local_voice.shutil.which", return_value="/usr/bin/pw-record"), \
+             patch("zorin_copilot.ai.local_voice.get_processed_capture_source", return_value="mysrc"):
+            cmd = self.client._build_recorder_cmd()
+        self.assertIn("--target", cmd)
+        self.assertEqual(cmd[cmd.index("--target") + 1], "mysrc")
+        self.assertEqual(cmd[-1], "-")
+
+    def test_open_recorder_uses_filtered_source_without_aborting(self):
+        # REGRESSÃO (bug de indentação do WS2/B2): encontrar um source filtrado
+        # NÃO pode abortar a abertura do gravador.
+        fake = _FakeProc()
+        with patch("zorin_copilot.ai.local_voice.shutil.which", return_value="/usr/bin/pw-record"), \
+             patch("zorin_copilot.ai.local_voice.get_processed_capture_source", return_value="mysrc"), \
+             patch("zorin_copilot.ai.local_voice.subprocess.Popen", return_value=fake) as mock_popen:
+            proc = self.client._open_recorder()
+        self.assertIs(proc, fake)
+        self.assertIn("--target", mock_popen.call_args.args[0])
+
+    def test_open_recorder_returns_none_without_recorder(self):
+        with patch("zorin_copilot.ai.local_voice.shutil.which", return_value=None):
+            self.assertIsNone(self.client._open_recorder())
+
+    # --- L5: fechamento ---------------------------------------------------
+    def test_close_recorder_terminates_and_clears(self):
+        fake = _FakeProc()
+        self.client._record_proc = fake
+        self.client._close_recorder()
+        self.assertTrue(fake.terminated)
+        self.assertIsNone(self.client._record_proc)
+
+    def test_close_recorder_is_idempotent(self):
+        self.client._record_proc = None
+        self.client._close_recorder()  # não deve levantar
+
+    # --- L3: sem gravador -> ERROR imediato -------------------------------
+    def test_mic_loop_without_recorder_goes_error(self):
+        with patch("zorin_copilot.ai.local_voice.shutil.which", return_value=None):
+            self.client._mic_loop()  # retorna sem travar
+        self.assertEqual(self.client.state, LiveVoiceState.ERROR)
+        self.client.on_error.assert_called_once()
+
+    # --- L2/L3: reconexão com backoff -------------------------------------
+    def test_reconnect_exhausts_attempts_then_error(self):
+        self.config.live_local_reconnect_max_attempts = 3
+        self.client._is_running = True
+        with patch.object(self.client, "_open_recorder", return_value=_FakeProc(exit_code=1)) as mock_open, \
+             patch.object(self.client, "_sleep_cancellable", return_value=True):
+            self.client._mic_loop()
+        self.assertEqual(mock_open.call_count, 3)
+        self.assertEqual(self.client.state, LiveVoiceState.ERROR)
+        self.client.on_error.assert_called_once()
+
+    def test_reconnect_disabled_single_attempt(self):
+        self.config.live_local_reconnect_enabled = False
+        self.client._is_running = True
+        with patch.object(self.client, "_open_recorder", return_value=_FakeProc(exit_code=1)) as mock_open, \
+             patch.object(self.client, "_sleep_cancellable", return_value=True):
+            self.client._mic_loop()
+        self.assertEqual(mock_open.call_count, 1)
+        self.assertEqual(self.client.state, LiveVoiceState.ERROR)
+
+    def test_reconnect_recovers_and_returns_to_listening(self):
+        self.client._is_running = True
+        calls = {"n": 0}
+
+        def fake_capture():
+            calls["n"] += 1
+            if calls["n"] >= 2:
+                self.client._is_running = False
+            return "drop"
+
+        with patch.object(self.client, "_open_recorder", return_value=_FakeProc(exit_code=1)) as mock_open, \
+             patch.object(self.client, "_capture_loop", side_effect=fake_capture), \
+             patch.object(self.client, "_sleep_cancellable", return_value=True), \
+             patch.object(self.client, "_set_state") as mock_state:
+            self.client._mic_loop()
+
+        self.assertEqual(mock_open.call_count, 2)
+        mock_state.assert_any_call(LiveVoiceState.LISTENING, "Ouvindo microfone...")
+
+    def test_stop_during_backoff_does_not_raise_error(self):
+        self.client._is_running = True
+
+        def fake_sleep(_delay):
+            self.client._is_running = False
+            return False
+
+        with patch.object(self.client, "_open_recorder", return_value=_FakeProc(exit_code=1)), \
+             patch.object(self.client, "_capture_loop", return_value="drop"), \
+             patch.object(self.client, "_sleep_cancellable", side_effect=fake_sleep):
+            self.client._mic_loop()
+        self.client.on_error.assert_not_called()
+        self.assertNotEqual(self.client.state, LiveVoiceState.ERROR)
+
+    # --- _sleep_cancellable -----------------------------------------------
+    def test_sleep_cancellable_returns_false_when_not_running(self):
+        self.client._is_running = False
+        self.assertFalse(self.client._sleep_cancellable(0.5))
+
+    def test_sleep_cancellable_returns_true_quickly(self):
+        self.client._is_running = True
+        self.assertTrue(self.client._sleep_cancellable(0.0))
+
+    # --- VAD preservado pela extração de _process_chunk -------------------
+    def test_process_chunk_preroll_when_listening_silent(self):
+        self.client.state = LiveVoiceState.LISTENING
+        self.client._process_chunk(b"\x00\x00" * 1600)  # silêncio
+        self.assertEqual(len(self.client._speech_buffer), 0)
+        self.assertEqual(len(self.client._preroll_buffer), 1)
 
 
 if __name__ == "__main__":

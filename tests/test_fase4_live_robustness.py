@@ -22,15 +22,20 @@ sys.path.insert(
 
 from zorin_copilot.ai import live as live_module  # noqa: E402
 from zorin_copilot.ai.live import GeminiLiveClient, _SessionDropped  # noqa: E402
+from zorin_copilot.core.audio.buffer import PcmRingBuffer  # noqa: E402
 from zorin_copilot.shell.risk import RiskPolicy  # noqa: E402
 
 
 def _bare_client() -> GeminiLiveClient:
-    """Cliente mínimo sem dependências pesadas (mesmo padrão de test_fase3_risk)."""
+    """Cliente mínimo sem dependências pesadas (mesmo padrão de test_fase3_risk).
+
+    O espelho de atributos precisa acompanhar `__init__`: `_live_session` (WS2/Entrega B)
+    depende de `_pcm_buffer`, `_capture_task` e `_record_proc`. A bomba de captura é
+    substituída por um no-op — do contrário o teste abriria um `pw-record` de verdade.
+    """
     c = GeminiLiveClient.__new__(GeminiLiveClient)
     c.risk_policy = RiskPolicy()
     c._pending_actions = {}
-    c._bypass_risk_gate = False
     c._queued_initial_text = ""
     c._is_running = False
     c._ws = None
@@ -43,6 +48,11 @@ def _bare_client() -> GeminiLiveClient:
     c.on_transcript = None
     c.on_audio_level = None
     c._last_error = ""
+    # WS2/Entrega B (P0-4): captura desacoplada do WebSocket.
+    c._pcm_buffer = PcmRingBuffer(1.0)
+    c._capture_task = None
+    c._record_proc = None
+    c._capture_pump = mock.AsyncMock()
     return c
 
 

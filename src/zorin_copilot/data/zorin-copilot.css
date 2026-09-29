@@ -136,7 +136,6 @@ window.light-glass headerbar windowcontrols button,
 window.light-glass headerbar windowcontrols button image,
 window.light-glass entry image,
 window.light-glass .glass-chip image,
-window.light-glass .welcome-icon,
 window.light-glass popover image,
 window.light-glass popover button image,
 window.light-glass .glass-card image,
@@ -179,7 +178,6 @@ window.dark-glass headerbar windowcontrols button,
 window.dark-glass headerbar windowcontrols button image,
 window.dark-glass entry image,
 window.dark-glass .glass-chip image,
-window.dark-glass .welcome-icon,
 window.dark-glass popover image,
 window.dark-glass popover button image,
 window.dark-glass .glass-card image,
@@ -288,6 +286,24 @@ window.glass-window > contents scrolledwindow > viewport {
 preferencesdialog,
 preferencesdialog > contents {
     background-color: @dialog_bg_color;
+}
+
+/* Chips de leitura da prévia do Home Assistant (Conexões › Casa Inteligente).
+   Sem `:hover` e sem cursor de ponteiro, de propósito: são leitura, não
+   controle. Um chip que reage ao ponteiro promete uma ação que não existe — e
+   ao lado de linhas realmente editáveis isso confundiria em vez de ajudar. */
+.entity-chip {
+    border-radius: 999px;
+    padding: 3px 10px;
+    font-size: 11.5px;
+}
+
+window.light-glass .entity-chip {
+    background-color: alpha(@zc_gray_800, 0.06);
+}
+
+window.dark-glass .entity-chip {
+    background-color: rgba(255, 255, 255, 0.08);
 }
 
 /* --- Indicador de Modelo / Status no HeaderBar e Botões de Controle (Glass Pill) --- */
@@ -640,6 +656,18 @@ window.dark-glass .sidebar-chat-row.active {
     border-left: 3px solid @zc_gray_400;
 }
 
+/* Cabeçalho de seção da sidebar (Hoje / Ontem / Esta semana / Anterior).
+   Não é alvo de clique: é um rótulo de agrupamento, com peso de texto menor que
+   o das conversas — o olho usa a data para varrer a lista, não para interagir. */
+.sidebar-group-label {
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    opacity: 0.55;
+    padding: 10px 6px 4px;
+}
+
 /* --- Bolha de Mensagem do Usuário (Estilo Gemini) --- */
 .user-chat-bubble {
     border-radius: 18px 18px 4px 18px;
@@ -772,6 +800,51 @@ window.light-glass .drop-hint {
     border-radius: 10px;
 }
 
+/* Chip de frase de ativação (§2.5) — mesma linguagem do chip de anexo, mas
+   sem ícone: o glifo seria idêntico em todos os chips da mesma lista e não
+   distinguiria nada. Padding assimétrico porque o botão de remover já traz o
+   próprio respiro interno. */
+.wake-phrase-chip {
+    padding: 4px 2px;
+    border-radius: 10px;
+}
+
+/* --- Chip de MODO na barra de prompt (§1.4) --- */
+/* Comando e estado não podem dividir a mesma silhueta (§0.1). As duas ações de
+   entrada (câmera, clipboard) são botões circulares de ícone; o Modo Agente é
+   um modo que muda o significado do Enter, então é rotulado e tem forma
+   própria. As cores usam alpha sobre a superfície já existente, de propósito:
+   o mesmo par de regras serve para o tema claro e o escuro, sem duplicar
+   blocos `window.light-glass` / `window.dark-glass`.
+
+   O contorno existe no estado DESLIGADO. Sem ele o rótulo flutuava entre os
+   ícones parecendo texto solto, não um controle — o chip precisa ser um chip
+   antes de ser um estado. O que muda entre ligado e desligado é o
+   PREENCHIMENTO: vazio = desligado, preenchido = ligado. Assim a leitura do
+   estado não depende de decorar uma cor.
+
+   É `border`, e não `box-shadow: inset 0 0 0 1px`, por dois motivos: o que se
+   desenha aqui é literalmente uma borda, e o guarda anti-LED de
+   `tests/test_style.py` recusa qualquer `box-shadow` no formato `0 0 0 N` —
+   regra pensada para halo difuso, mas que também pegaria um anel nítido. Usar
+   a propriedade certa evita ter de afrouxar o guarda. */
+.mode-chip {
+    padding: 4px 12px;
+    border-radius: 10px;
+    font-size: 0.85em;
+    font-weight: 500;
+    border: 1px solid alpha(@accent_color, 0.30);
+}
+
+.mode-chip:hover {
+    border-color: alpha(@accent_color, 0.55);
+}
+
+.mode-chip-active {
+    background-color: alpha(@accent_color, 0.22);
+    border-color: alpha(@accent_color, 0.55);
+}
+
 /* --- Barra de status inferior (estilo Warp / Apple Studio) --- */
 .status-bar {
     padding: 4px 10px;
@@ -795,6 +868,26 @@ window.dark-glass .status-bar {
 .status-text {
     font-size: 12px;
     opacity: 0.85;
+}
+
+/* Regiões semânticas da barra de status: cada uma agrupa itens da mesma
+   natureza (cérebro, contexto indexado, saúde do SO). O agrupamento visual é
+   o que evita que "tokens" e "Carga" pareçam a mesma categoria. */
+.status-region {
+    padding: 0 2px;
+}
+
+/* Botão da cerca espacial hospedado na barra de status. Nasce como MenuButton
+   (tem popover), mas precisa parecer — e se comportar — como os demais itens
+   de leitura, não como uma pílula de comando do topo. */
+.status-fence-btn {
+    padding: 0 6px;
+    min-height: 20px;
+}
+
+.status-fence-btn:hover {
+    background-color: alpha(@zc_gray_500, 0.12);
+    border-radius: 6px;
 }
 
 /* --- Indicador de digitação (estilo iMessage) --- */
@@ -831,7 +924,7 @@ window.voice-pill-window > contents {
                 0 0 16px var(--pill-glow-color),
                 0 16px 40px rgba(0, 0, 0, 0.50);
     transition: background-image 180ms ease-in-out, border-color 180ms ease-in-out,
-                box-shadow 220ms ease-in-out;
+                box-shadow 220ms ease-in-out, opacity 420ms ease-out;
 }
 
 window.light-glass.voice-pill-window .voice-pill-container {
@@ -925,6 +1018,19 @@ window.voice-pill-window .pill-probe-thinking   { color: @voice_pill_thinking_co
 window.voice-pill-window .pill-probe-executing  { color: @voice_pill_executing_color; }
 window.voice-pill-window .pill-probe-error      { color: @voice_pill_error_color; }
 
+/* Conexão: enquanto o WebSocket sobe, a pílula se tinge com o acento. Declarado
+   ANTES de pill-muted/privacy/interrupting de propósito: mesma especificidade,
+   então mute e privacidade (sinais mais fortes) precisam vencer no empate.
+   A "respiração" do avatar é dirigida pelo frame clock — GTK4 não anima CSS. */
+window.voice-pill-window .voice-pill-container.pill-connecting {
+    background-image: linear-gradient(0deg,
+        alpha(@accent_color, 0.10), alpha(@accent_color, 0.10));
+}
+window.light-glass.voice-pill-window .voice-pill-container.pill-connecting {
+    background-image: linear-gradient(0deg,
+        alpha(@accent_color, 0.07), alpha(@accent_color, 0.07));
+}
+
 /* Estados do container — tint flat via background-image. Cor é conteúdo, não chrome.
    Borda e box-shadow ficam intocados; só o fundo é tingido. */
 window.voice-pill-window .voice-pill-container.pill-muted {
@@ -981,10 +1087,67 @@ window.light-glass.voice-pill-window .voice-pill-container.pill-chip-fail .voice
     color: @zc_error;
 }
 
+/* Indicador de captação de microfone. Responde à pergunta binária que o
+   visualizador não responde ("o mic está me ouvindo agora?"): o visualizador
+   mostra a forma do áudio, o dot mostra se ele está sendo captado. Mesma cor do
+   estado LISTENING (acento) para dot e onda lerem como um só canal; a opacidade
+   é dirigida em Python pelo nível de áudio. Cor é conteúdo, nunca chrome. */
+window.voice-pill-window .pill-mic-dot {
+    color: @accent_color;
+    font-size: 8px;
+    margin-left: 1px;
+}
+
+/* Mudo reforçado: além do tint de fundo e do ícone do botão trocado, o texto de
+   status assume a cor do estado. É `color` (conteúdo) — o guarda anti-LED proíbe
+   cor semântica como *borda*, e o contorno aqui é o próprio tint do container.
+   Seletor ancorado em `.pill-muted` (não em `.voice-pill-container.pill-muted`)
+   de propósito: os guardas exigem que todo bloco daquele prefixo seja um tint. */
+window.voice-pill-window .pill-muted .voice-pill-status {
+    color: @voice_pill_error_color;
+}
+
+/* Ocioso: o halo já é apagado em Python (--pill-glow-color cai para o alpha de
+   repouso) e o container esmaece. Aqui o texto de status recua um pouco mais,
+   para o estado "em espera" ser legível como repouso — não como pílula morta. */
+window.voice-pill-window .voice-pill-container.pill-idle .voice-pill-status {
+    opacity: 0.75;
+}
+
+/* Dica de atalho transitória: ocupa o lugar do texto de status na primeira vez
+   que a pílula aparece. Uma dica por vez porque a área de texto cabe ~17
+   caracteres — listar os atalhos juntos só renderizaria reticências. Usa o
+   acento (grafite), que é cor de conteúdo, não chrome. */
+window.voice-pill-window .pill-hint {
+    color: @accent_color;
+}
+
 /* Timer na title label */
 window.voice-pill-window .voice-pill-title-sep {
     opacity: 0.5;
     margin: 0 4px;
+}
+
+/* Chip de modo (Entrega C / P1-5): "Nuvem" x "Local". Cor é conteúdo — o modo muda o
+   que o assistente pode fazer (o local é 100% offline e não tem captura de tela), então
+   o usuário precisa saber de relance com quem está falando. Sóbrio: sem fundo tingido,
+   sem borda, sem pílula cheia — só texto pequeno em caixa alta discreta. */
+window.voice-pill-window .pill-mode {
+    font-size: 9px;
+    letter-spacing: 0.5px;
+    margin-right: 2px;
+}
+window.voice-pill-window .pill-mode-cloud {
+    color: @zc_gray_400;
+}
+window.voice-pill-window .pill-mode-local {
+    color: @zc_success;
+}
+window.light-glass.voice-pill-window .pill-mode-cloud {
+    color: @zc_gray_500;
+}
+window.light-glass.voice-pill-window .pill-mode-local {
+    color: @zc_success;
 }
 
 /* PopoverMenu herda tema libadwaita — só precisa de polimento mínimo */
@@ -1056,6 +1219,22 @@ window.dark-glass .agent-approval-box {
 
 .agent-step-row .warning {
     color: @zc_warn;
+}
+
+/* Estágio de subagente: o trabalho interno do passo `run_subagent`. O recuo e a
+   borda à esquerda marcam que a linha está DENTRO de um passo, e não é um passo
+   a mais — a contagem de etapas do agente principal não inclui estas linhas. */
+.agent-subagent-row {
+    margin-left: 22px;
+    border-left: 2px solid alpha(@zc_gray_400, 0.45);
+}
+
+window.dark-glass .agent-subagent-row {
+    border-left: 2px solid alpha(white, 0.14);
+}
+
+.agent-step-row .working {
+    color: @zc_gray_500;
 }
 
 .agent-step-detail {
@@ -1418,14 +1597,16 @@ window.dark-glass .call-control-btn.active-warning {
     color: #f6d32d;
 }
 
+/* Estado "info" dessaturado: usa a rampa neutra em vez do azul vivo — o
+   painel de call-control não deve piscar mais forte que o conteúdo da call. */
 .call-control-btn.active-info {
-    background-color: alpha(#1c71d8, 0.15);
-    color: #1c71d8;
+    background-color: alpha(@zc_gray_700, 0.14);
+    color: @zc_gray_700;
 }
 
 window.dark-glass .call-control-btn.active-info {
-    background-color: alpha(#3584e4, 0.25);
-    color: #78aeed;
+    background-color: alpha(@zc_gray_300, 0.22);
+    color: @zc_gray_200;
 }
 
 .call-end-btn {
@@ -1433,4 +1614,287 @@ window.dark-glass .call-control-btn.active-info {
     padding: 4px 12px;
     font-weight: 600;
     font-size: 12px;
+}
+
+/* Histórico da sessão, ao lado da onda. Superfície rebaixada em relação ao
+   cartão da chamada: o registro é registro, não conteúdo da onda. */
+.live-log-panel {
+    border-radius: 10px;
+    padding: 6px 8px;
+}
+
+window.light-glass .live-log-panel,
+.live-log-panel {
+    background-color: rgba(0, 0, 0, 0.025);
+    border: 1px solid rgba(0, 0, 0, 0.05);
+}
+
+window.dark-glass .live-log-panel {
+    background-color: rgba(0, 0, 0, 0.25);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.live-log-title {
+    font-size: 11px;
+    font-weight: 500;
+    color: @zc_gray_500;
+}
+
+window.dark-glass .live-log-title {
+    color: @zc_gray_300;
+}
+
+.live-log-empty {
+    font-size: 11px;
+    color: @zc_gray_500;
+}
+
+window.dark-glass .live-log-empty {
+    color: @zc_gray_400;
+}
+
+/* Indicador de captação: é ESTADO, não controle. Sem `:hover` de propósito —
+   reagir ao ponteiro prometeria um clique que não existe. */
+.live-recording {
+    font-size: 11px;
+    font-weight: 500;
+    color: @zc_error;
+    transition: opacity 300ms ease;
+}
+
+/* Meio-ciclo da piscada, alternado por um timer em Python: o GTK4 CSS não tem
+   `@keyframes` nem anima `transform`. A transição de opacidade existe só para o
+   pulso não ser um corte de 1 frame. */
+.live-recording-dim {
+    opacity: 0.25;
+}
+
+/* Separa os controles de transmissão do botão destrutivo. */
+.call-control-divider {
+    margin: 4px 3px;
+    opacity: 0.35;
+}
+
+/* ========================================================================= */
+/* Sistema de Interação Superhuman — velocidade, foco e feedback imediato     */
+/* ------------------------------------------------------------------------- */
+/* Inspirado no Superhuman: paleta sóbria, tipografia refinada, atalhos       */
+/* fluidos e microinterações que reforçam a sensação de controle.             */
+/*                                                                            */
+/* RESPEITA AS REGRAS ANTI-LED DESTE ARQUIVO:                                 */
+/*   · transições só em propriedades discretas (nunca `transform`/`scale`)    */
+/*     — o GTK4 CSS não anima transform, e um scale "de brinquedo" aqui       */
+/*     causa relayout de widget, que é justamente o oposto de fluido;         */
+/*   · foco usa `background-image` (tint), nunca `border-color` nem halo;     */
+/*   · acento sempre via `@accent_color`;                                      */
+/*   · números tabulares em tudo que é métrica ou atalho.                     */
+/* ========================================================================= */
+
+/* --- Tokens de movimento: uma única curva, poucos tempos --- */
+/* Curva "fast-out, slow-in" (Material standard), usada em todo o app.
+   Os tempos seguem a escala do Superhuman: 90ms (feedback imediato),
+   150ms (hover/estado), 220ms (transição de layout). */
+@define-color zc_focus_tint rgba(107, 114, 128, 0.14);
+@define-color zc_focus_tint_dark rgba(255, 255, 255, 0.14);
+
+/* --- Anel de foco: rápido, monocromático e sem halo --- */
+/* Reforça o requisito de navegação por teclado: o foco precisa ser óbvio
+   no mesmo instante em que se navega por Tab — 90ms, não 200ms. */
+button:focus-visible,
+.glass-chip:focus-visible,
+.glass-row:focus-visible,
+.sidebar-chat-row:focus-visible,
+.audio-visualizer-area:focus-visible,
+drawingarea:focus-visible,
+.prompt-action-pill:focus-visible,
+.prompt-tag-chip:focus-visible,
+.command-row:focus-visible,
+.agent-card:focus-visible,
+.drop-zone:focus-visible,
+entry:focus-visible {
+    transition: background-image 90ms cubic-bezier(0.2, 0.8, 0.2, 1.0),
+                color 90ms cubic-bezier(0.2, 0.8, 0.2, 1.0);
+}
+
+/* --- Feedback imediato de "pressionado" --- */
+/* O `:active` é o que faz o clique parecer instantâneo. Sem ele, o usuário
+   aperta o botão e nada acontece até a ação concluir. */
+button:active,
+.glass-icon-btn:active,
+.prompt-action-pill:active,
+.command-row:active,
+.glass-chip:active {
+    transition-duration: 60ms;
+}
+
+/* --- Atalhos de teclado no fluxo de texto (kbd) --- */
+/* Renderiza aceleradores como <kbd> dentro de captions, menus e o painel de
+   comandos. Números tabulares garantem que a coluna não dance quando o
+   atalho muda (Ctrl+9 vs Ctrl+10). */
+.kbd,
+.shortcut-key {
+    font-family: monospace;
+    font-size: 11px;
+    font-weight: 600;
+    font-feature-settings: "tnum" 1;
+    padding: 1px 5px;
+    border-radius: 4px;
+    background-color: alpha(currentColor, 0.06);
+    border: 1px solid alpha(currentColor, 0.09);
+    color: alpha(currentColor, 0.75);
+}
+
+/* Um par de teclas combinadas ("Ctrl" + "K") fica alinhado, com o separador
+   sem peshar a linha. */
+.shortcut-chord {
+    font-feature-settings: "tnum" 1;
+    letter-spacing: 0.2px;
+}
+
+.shortcut-chord .sep {
+    opacity: 0.45;
+    padding: 0 1px;
+}
+
+/* --- Superfície de comando: onde o teclado manda --- */
+/* O painel de comandos e o seletor de modelo são os pontos em que o app mais
+   precisa transmitir velocidade: linha focada responde em 90ms. */
+.command-row,
+.model-row,
+.topic-row {
+    transition: background-image 90ms cubic-bezier(0.2, 0.8, 0.2, 1.0),
+                background-color 90ms cubic-bezier(0.2, 0.8, 0.2, 1.0),
+                color 90ms cubic-bezier(0.2, 0.8, 0.2, 1.0);
+}
+
+.command-row:selected,
+.command-row.selected,
+.command-row:hover,
+.model-row:hover,
+.topic-row:hover {
+    transition-duration: 60ms;
+}
+
+/* --- Linhas densas de tabela (Infra/Network): varredura por teclado --- */
+/* `currentColor` mantém a linha neutra no claro e no escuro — e o hover
+   responde em 90ms para acompanhar a velocidade de quem navega com setas. */
+.network-table-row {
+    transition: background-color 90ms cubic-bezier(0.2, 0.8, 0.2, 1.0);
+}
+
+.network-table-row:hover,
+.network-table-row:selected {
+    transition-duration: 60ms;
+}
+
+/* --- Cartões: entrada e hover discretos, sem salto de layout --- */
+.assistant-message-card,
+.agent-card,
+.glass-card,
+.live-session-card {
+    transition: background-color 150ms cubic-bezier(0.2, 0.8, 0.2, 1.0),
+                border-color 150ms cubic-bezier(0.2, 0.8, 0.2, 1.0),
+                box-shadow 150ms cubic-bezier(0.2, 0.8, 0.2, 1.0);
+}
+
+/* --- Estados de ação do agente: cor como conteúdo, nunca halo --- */
+/* "desfazer" e "executado" são a espinha dorsal do controle: o usuário
+   precisa ver o rastro do que aconteceu sem que um LED pisque na tela. */
+.action-done,
+.action-undone {
+    transition: opacity 150ms cubic-bezier(0.2, 0.8, 0.2, 1.0),
+                color 150ms cubic-bezier(0.2, 0.8, 0.2, 1.0);
+}
+
+/* --- Indicador de digitação: pulso curto e discreto --- */
+/* A animação de "pensando" precisa parecer viva sem chamar mais atenção que
+   a resposta. Pulsos de 1.2s, opacidade baixa. */
+.typing-dot {
+    transition: opacity 150ms ease;
+}
+
+/* --- Barras de rolagem: reagem ao ponteiro, não ao tamanho --- */
+scrollbar slider {
+    transition: background-color 150ms cubic-bezier(0.2, 0.8, 0.2, 1.0);
+}
+
+/* --- Chips e pílulas: pressão e seleção imediatas --- */
+.prompt-tag-chip,
+.glass-chip,
+.prompt-action-pill {
+    transition: background-image 90ms cubic-bezier(0.2, 0.8, 0.2, 1.0),
+                background-color 90ms cubic-bezier(0.2, 0.8, 0.2, 1.0);
+}
+
+/* --- Botão principal "Pedir": único ponto de acento saturado --- */
+/* Coerente com a economia de cor do Superhuman — o acento aparece uma vez,
+   onde a ação acontece. Foco e hover são feedback, não decoração. */
+button.suggested-action {
+    transition: background-color 120ms cubic-bezier(0.2, 0.8, 0.2, 1.0),
+                background-image 120ms cubic-bezier(0.2, 0.8, 0.2, 1.0);
+}
+
+button.suggested-action:active {
+    transition-duration: 60ms;
+}
+
+/* --- Acessibilidade: nada de mascarar ausência de animação --- */
+/* O GTK4 já reduz animações quando o sistema pede. As regras acima só
+   definem tempos curtos, então não há nada a desligar aqui — e um
+   `prefers-reduced-motion` não tem equivalente no GTK4 CSS. Em vez de
+   fingir suporte, mantemos durações baixas o suficiente para não incomodar. */
+
+/* --- Preferência do usuário: desligar micro-animações por completo --- */
+/* Classe aplicada em runtime (window.reduced-motion) para quem quiser
+   interface estática. Um único seletor neutraliza a escala toda. */
+window.reduced-motion * {
+    transition-duration: 0ms;
+    animation-duration: 0ms;
+}
+
+/* --- Cobertura por componente (consistência Superhuman) --- */
+
+/* Botões de ícone do header (menu, nova conversa, paleta, voz): o `:active`
+   imediato é o que faz o clique "responder" ao dedo. */
+.glass-icon-btn {
+    transition: background-image 90ms cubic-bezier(0.2, 0.8, 0.2, 1.0),
+                background-color 90ms cubic-bezier(0.2, 0.8, 0.2, 1.0),
+                color 90ms cubic-bezier(0.2, 0.8, 0.2, 1.0);
+}
+
+/* Barra de status: itens densos que mudam a cada turno. A transição só de cor
+   evita o "pisca" quando um valor muda de 1.2k para 1.3k. */
+.status-item,
+.status-text,
+.status-bar-tokens {
+    transition: color 150ms cubic-bezier(0.2, 0.8, 0.2, 1.0);
+}
+
+/* Linhas da barra lateral de conversas: a superfície mais percorrida por
+   teclado no app. Hover/seleção em 60ms para acompanhar a seta. */
+.sidebar-chat-row {
+    transition: background-color 90ms cubic-bezier(0.2, 0.8, 0.2, 1.0),
+                background-image 90ms cubic-bezier(0.2, 0.8, 0.2, 1.0);
+}
+
+.sidebar-chat-row:hover {
+    transition-duration: 60ms;
+}
+
+/* Chips de sugestão da tela inicial */
+.suggestion-chip {
+    transition: background-color 90ms cubic-bezier(0.2, 0.8, 0.2, 1.0),
+                background-image 90ms cubic-bezier(0.2, 0.8, 0.2, 1.0);
+}
+
+/* Botão de enviar/parar do prompt: resposta tátil imediata. */
+.prompt-send-btn,
+.prompt-stop-btn {
+    transition: background-color 90ms cubic-bezier(0.2, 0.8, 0.2, 1.0),
+                background-image 90ms cubic-bezier(0.2, 0.8, 0.2, 1.0);
+}
+
+.prompt-send-btn:active,
+.prompt-stop-btn:active {
+    transition-duration: 60ms;
 }

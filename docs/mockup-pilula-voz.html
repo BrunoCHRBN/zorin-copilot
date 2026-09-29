@@ -1,0 +1,596 @@
+<!DOCTYPE html>
+<html lang="pt-BR" data-page-node-id="Z2lptE4y6pojLQSooPqEey">
+<head data-page-node-id="nHeyot3JCtycmkAUh2a3la">
+<meta charset="utf-8" data-page-node-id="g2LRM2SznFe0KNudxJpf3C">
+<title>Pílula de voz — mockup de estados</title>
+<style>
+  /* ------------------------------------------------------------------
+     Tokens copiados de src/zorin_copilot/data/zorin-copilot.css.
+     Se a folha do app mudar, estes valores mudam junto — o mockup é uma
+     cópia, não a fonte.
+     ------------------------------------------------------------------ */
+  :root {
+    --zc_gray_50:#f7f8f9;  --zc_gray_100:#eceef0; --zc_gray_200:#dde0e4;
+    --zc_gray_300:#c4c9cf; --zc_gray_400:#9aa1aa; --zc_gray_500:#6b7280;
+    --zc_gray_600:#525b66; --zc_gray_700:#3d454e; --zc_gray_800:#282e35;
+    --zc_gray_900:#171a1f;
+    --zc_error:#c0392b; --zc_success:#3d8b63; --zc_warn:#b8860b; --zc_speak:#7d5a8c;
+    --accent:#6b7280;
+
+    --bg-page:#eceef0;
+    --bg-card:#ffffff;
+    --fg:#171a1f;
+    --fg-dim:#525b66;
+    --fg-faint:#6b7280;
+    --hairline:rgba(0,0,0,.10);
+  }
+
+  * { box-sizing:border-box; }
+  body {
+    margin:0; padding:40px 32px 64px;
+    background:var(--bg-page); color:var(--fg);
+    font:14px/1.5 "Inter","Cantarell",system-ui,-apple-system,"Segoe UI",sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  h1 { font-size:20px; font-weight:600; margin:0 0 6px; letter-spacing:-.01em; }
+  h2 { font-size:14px; font-weight:600; margin:40px 0 14px; letter-spacing:-.005em; }
+  .lede { margin:0 0 8px; color:var(--fg-dim); max-width:80ch; }
+  .note {
+    margin:0 0 32px; padding:12px 14px; max-width:80ch;
+    border:1px solid var(--hairline); border-radius:12px; background:var(--bg-card);
+    color:var(--fg-dim); font-size:13px;
+  }
+  .note b { color:var(--fg); font-weight:600; }
+  .note ul { margin:8px 0 0; padding-left:18px; }
+  .note li { margin:3px 0; }
+  code {
+    font:12px/1.4 ui-monospace,"JetBrains Mono",Menlo,monospace;
+    background:rgba(107,114,128,.10); padding:1px 5px; border-radius:5px;
+    color:var(--fg);
+  }
+  table.meas { border-collapse:collapse; margin-top:8px; font-size:12px; }
+  table.meas th, table.meas td {
+    text-align:left; padding:3px 12px 3px 0; vertical-align:top;
+  }
+  table.meas th { color:var(--fg); font-weight:600; }
+
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(520px,1fr)); gap:26px 30px; }
+  .cell { display:flex; flex-direction:column; gap:9px; }
+  .cell > .label { font-size:12px; font-weight:600; letter-spacing:.02em; color:var(--fg); }
+  .cell > .sub {
+    font-size:11.5px; color:var(--fg-faint); margin-top:-5px;
+    font-variant-numeric:tabular-nums;
+  }
+
+  /* Palco: no app a pílula flutua sobre a área de trabalho; aqui um fundo
+     neutro só para o vidro ter contra o que se destacar. */
+  .stage {
+    padding:24px 20px; border-radius:14px; border:1px solid var(--hairline);
+    background:linear-gradient(135deg, rgba(107,114,128,.10), rgba(107,114,128,.02)), var(--zc_gray_200);
+    display:flex; justify-content:center;
+  }
+  .stage.dark {
+    background:linear-gradient(135deg, rgba(107,114,128,.16), rgba(23,26,31,.10)), var(--zc_gray_800);
+    border-color:rgba(255,255,255,.10);
+  }
+
+  /* ------------------------------------------------------------------
+     A pílula.
+
+     Geometria MEDIDA do app com `Gtk.Widget.measure()` (não estimada):
+       container natural  = 479 × 70  (com timer)
+                            449 × 70  (sem timer)
+       janela             ≈ container + margens 8+8 / 6+6
+     A janela é não-redimensionável, então ela adota o tamanho NATURAL do
+     conteúdo — o `set_default_size(390, 58)` é só um pedido inicial e é
+     MENOR que o conteúdo real. Por isso os quadros abaixo têm largura por
+     estado, e não uma largura única.
+     ------------------------------------------------------------------ */
+  .pill {
+    flex:0 0 auto;
+    width:479px; height:70px;
+    display:flex; align-items:center; gap:12px;
+    padding:0 16px; border-radius:20px;
+    background-color:rgba(23,26,31,.92);
+    border:1px solid rgba(255,255,255,.14);
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,.16),
+      0 0 16px var(--glow, rgba(107,114,128,.55)),
+      0 16px 40px rgba(0,0,0,.50);
+  }
+  .pill.narrow { width:449px; }          /* sem timer: menos conteúdo */
+  .pill.light {
+    background-color:rgba(255,255,255,.94);
+    border-color:rgba(0,0,0,.08);
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,1),
+      0 0 16px var(--glow, rgba(107,114,128,.55)),
+      0 12px 32px rgba(0,0,0,.12);
+  }
+
+  /* Estado ocioso: o container cai para 0.30 e o halo para alpha 0.12. */
+  .pill.idle { opacity:.30; }
+  .pill.idle .status, .pill.idle .hint { opacity:.75; }
+
+  /* Tints de estado — sempre background-image, nunca border-color. */
+  .pill.connecting {
+    background-image:linear-gradient(0deg, rgba(107,114,128,.10), rgba(107,114,128,.10));
+  }
+  .pill.light.connecting {
+    background-image:linear-gradient(0deg, rgba(107,114,128,.07), rgba(107,114,128,.07));
+  }
+  .pill.muted   { background-image:linear-gradient(0deg, rgba(192,57,43,.14), rgba(192,57,43,.14)); }
+  .pill.light.muted { background-image:linear-gradient(0deg, rgba(192,57,43,.10), rgba(192,57,43,.10)); }
+  .pill.privacy { background-image:linear-gradient(0deg, rgba(184,134,11,.16), rgba(184,134,11,.16)); }
+  .pill.light.privacy { background-image:linear-gradient(0deg, rgba(184,134,11,.12), rgba(184,134,11,.12)); }
+  .pill.interrupting { background-image:linear-gradient(0deg, rgba(192,57,43,.22), rgba(192,57,43,.22)); }
+  .pill.light.interrupting { background-image:linear-gradient(0deg, rgba(192,57,43,.16), rgba(192,57,43,.16)); }
+
+  /* Avatar 40×40 = 32 de conteúdo + 4px de padding de cada lado. */
+  .avatar {
+    position:relative; flex:0 0 auto;
+    width:40px; height:40px; border-radius:9999px;
+    display:flex; align-items:center; justify-content:center;
+    background:linear-gradient(135deg, rgba(154,161,170,.45), rgba(107,114,128,.65));
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.25);
+  }
+  .pill.light .avatar { background:linear-gradient(135deg, var(--zc_gray_700), var(--zc_gray_500)); }
+  /* Privacidade ativa: o avatar também se tinge de âmbar
+     (alpha(@voice_pill_thinking_color, .32) → .22). A regra existia na folha do
+     app desde o "Dynamic Island v2" mas nada a aplicava — ver a nota de
+     fidelidade. Aqui ela aparece porque agora está ligada. */
+  .pill.privacy .avatar {
+    background:linear-gradient(135deg, rgba(184,134,11,.32), rgba(184,134,11,.22));
+  }
+  .avatar svg { width:16px; height:16px; color:#fff; display:block; }
+  /* Respiração do CONNECTING: no app é opacidade dirigida pelo frame clock. */
+  .avatar.breathe { opacity:.72; }
+
+  .text { flex:1 1 auto; min-width:0; display:flex; flex-direction:column; gap:1px; }
+  .title-row { display:flex; align-items:center; gap:2px; font-size:11.5px; white-space:nowrap; }
+  .title { font-weight:700; color:rgba(255,255,255,.95); }
+  .pill.light .title { color:var(--zc_gray_900); }
+  .sep { opacity:.5; margin:0 4px; color:rgba(255,255,255,.75); }
+  .pill.light .sep { color:var(--fg-dim); }
+  .timer { color:rgba(255,255,255,.62); font-variant-numeric:tabular-nums; font-size:11.5px; }
+  .pill.light .timer { color:var(--fg-dim); }
+
+  .status-row { display:flex; align-items:center; gap:5px; }
+  .status, .hint {
+    font-size:11.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+    color:rgba(255,255,255,.62);
+  }
+  .pill.light .status, .pill.light .hint { color:var(--fg-dim); }
+  .hint { color:var(--accent); }
+  /* Mudo: o texto de status assume a cor do estado. */
+  .pill.muted .status { color:var(--zc_error); }
+  /* Chip de ferramenta. */
+  .pill.chip-ok .status { color:var(--zc_success); font-weight:600; }
+  .pill.chip-fail .status { color:var(--zc_error); font-weight:600; }
+
+  /* Dot de captação: 8px, cor do acento, opacidade dirigida pelo nível. */
+  .mic-dot { flex:0 0 auto; width:8px; height:8px; border-radius:9999px; background:var(--accent); }
+  .mic-dot.armed { opacity:.30; }
+  .mic-dot.loud  { opacity:1; }
+
+  /* REC dot sobre o avatar (vídeo ligado). */
+  .rec {
+    position:absolute; top:-3px; right:-3px;
+    font-size:9px; line-height:1; padding:0 1px;
+    border-radius:9999px; background:rgba(0,0,0,.55); color:var(--zc_error);
+  }
+  .pill.light .rec { background:rgba(255,255,255,.85); }
+
+  /* Visualizador: 80×26 no app (Gtk.DrawingArea + cairo). Aqui, SVG estático. */
+  .viz { flex:0 0 auto; width:80px; height:26px; }
+  .viz svg { width:80px; height:26px; display:block; }
+
+  /* Separador vertical: natural 1×13 (1px + margens 6/6); no Box ele estica
+     até a altura do conteúdo menos as margens → 28px. */
+  .divider { flex:0 0 auto; width:1px; height:28px; background:rgba(255,255,255,.14); }
+  .pill.light .divider { background:rgba(0,0,0,.10); }
+
+  /* Controles: 4 botões de 32px + margem 2px de cada lado, espaçados 5px. */
+  .controls { flex:0 0 auto; display:flex; align-items:center; gap:5px; }
+  .cbtn {
+    width:32px; height:32px; margin:0 2px; border-radius:9999px;
+    display:flex; align-items:center; justify-content:center;
+    color:rgba(255,255,255,.72);
+  }
+  .pill.light .cbtn { color:var(--fg-dim); }
+  .cbtn.destructive { color:var(--zc_error); }
+  .cbtn svg { width:16px; height:16px; display:block; }
+
+  /* ------------------------------------------------------------------
+     Menu do clique-direito (`.pill-popover`).
+
+     A folha do app dá só duas coisas a este menu:
+         background-color: alpha(@card_bg_color, 0.96);  border-radius: 12px;
+     Todo o resto (paddings, realce, chevron, marca de seleção) é o
+     PopoverMenu padrão do libadwaita. Aqui reproduzimos a aparência
+     resultante. Os rótulos vêm de `_build_popover_menu` — inclusive o
+     atalho, que faz parte da string (não é uma coluna de acelerador).
+     ------------------------------------------------------------------ */
+  .menu {
+    flex:0 0 auto; width:270px; padding:6px;
+    border-radius:12px; border:1px solid rgba(255,255,255,.10);
+    background-color:rgba(40,46,53,.96);
+    box-shadow:0 12px 32px rgba(0,0,0,.45);
+    font-size:12.5px; color:rgba(255,255,255,.92);
+  }
+  .menu.light {
+    background-color:rgba(255,255,255,.96);
+    border-color:rgba(0,0,0,.08); color:var(--fg);
+    box-shadow:0 12px 32px rgba(0,0,0,.14);
+  }
+  .mi {
+    display:flex; align-items:center; gap:8px;
+    padding:6px 10px; border-radius:8px; white-space:nowrap;
+  }
+  /* Realce de hover/seleção: no libadwaita o item sob o ponteiro escurece. */
+  .mi.hot { background-color:rgba(255,255,255,.10); }
+  .menu.light .mi.hot { background-color:rgba(0,0,0,.07); }
+  /* Ação puramente informativa (pill.ptt-info é no-op) — não convida ao clique. */
+  .mi.info { opacity:.55; }
+  .mi .ck { width:14px; flex:0 0 auto; display:flex; justify-content:center; }
+  .mi .chev { margin-left:auto; opacity:.5; }
+  /* Sem tamanho explícito o <svg> inline não aparece — vale para a marca de
+     seleção e para o chevron do submenu. */
+  .mi .ck svg, .mi .chev svg { width:14px; height:14px; display:block; }
+  .sub-title {
+    padding:6px 10px 3px; font-size:11px; letter-spacing:.02em; opacity:.55;
+  }
+  /* O submenu abre como um popover PRÓPRIO, ao lado — não como itens
+     aninhados dentro do mesmo painel. */
+  .menu-wrap { display:flex; gap:8px; align-items:flex-start; }
+  .menu-wrap .menu { flex:0 0 auto; }
+  .menu.subpanel { width:172px; }
+
+  footer {
+    margin-top:48px; padding-top:18px; border-top:1px solid var(--hairline);
+    color:var(--fg-faint); font-size:12.5px; max-width:80ch;
+  }
+</style>
+</head>
+<body data-page-node-id="at37Lt5ROpxXBPNo65i9Tt">
+
+<h1 data-page-node-id="LMlSNxlc1SVT4zoijM8jpd">Pílula de voz — estados</h1>
+<p class="lede" data-page-node-id="mJgJDDQ2scsAeCifDQWo1w">
+  Referência visual da <code data-page-node-id="tepQSxEWtBKz8eCy2HjOS5">VoicePillWindow</code> (Dynamic Island). Serve para
+  revisar forma — hierarquia, peso, contraste, legibilidade — porque teste verde
+  não prova que ficou legível. Cada quadro é a pílula em um estado real do app; a
+  última seção cobre o menu do clique-direito, que é superfície separada.
+</p>
+
+<div class="note" data-page-node-id="FiCl9QNpIZKghGA8T4yyXA">
+  <b data-page-node-id="yZFffgeF83j6YNPo4nxbR7">Fidelidade — o que é cópia, o que é aproximação e o que foi medido.</b>
+  <ul data-page-node-id="TK18wwFp06gw4F5plLk5BI">
+    <li data-page-node-id="UbmAdwFfkK4nvhy0JVnWgj"><b data-page-node-id="7YH6l2OHWbj7tGDFAvwzyS">Cópia exata:</b> cores (rampa de cinza, acento grafite <code data-page-node-id="g2ncmlrQSwwExCdfze2Fj2">#6b7280</code>,
+        semânticas), raio de 20px, borda de 1px, sombra especular
+        <code data-page-node-id="hbCIRBxtMNc0WJyWnzP0QG">inset 0 1px 0</code>, halo <code data-page-node-id="mRE4Mx6nHVgntKI2qV0I3z">0 0 16px</code>, tints de estado,
+        opacidade do estado ocioso (0.30 no container, 0.75 no status) e o alpha do
+        halo (0.55 ativo / 0.12 ocioso).</li>
+    <li data-page-node-id="quev5jE88IErErhd6qGFpC"><b data-page-node-id="blr4Bc35Kfsm5IqsBHmwCL">Medido</b> (com <code data-page-node-id="o5PgnXDqKqqERI5maMrZEJ">Gtk.Widget.measure()</code>, sem display), não
+        estimado:
+      <table class="meas" data-page-node-id="zSztapmrm3HFmtZQVgUA8z">
+        <tr data-page-node-id="BAicRpnE1kQ8jTAIDeijUU"><th data-page-node-id="hHBeQsmQrJzkeWOzcM19Vc">Elemento</th><th data-page-node-id="HZZWzUaRl4uOcc9E2yBQ75">Natural (L×A)</th></tr>
+        <tr data-page-node-id="jCxIHOqO5qhGOAXBeDoxl9"><td data-page-node-id="mL07YKAFN4lsUkOb2nk4yo">container, com timer</td><td data-page-node-id="W539VM16jkXg7LYv2v1HXm">479 × 70</td></tr>
+        <tr data-page-node-id="YHnSVnpJUUfYkKtiyWxFIH"><td data-page-node-id="l4jx171eJHOSmPKgooOuZw">container, sem timer</td><td data-page-node-id="htkKtZrOuZmuHeSrUGbuDC">449 × 70</td></tr>
+        <tr data-page-node-id="DczZOdjAGiSBYRasbjWfvt"><td data-page-node-id="CCnL6I9QccMnToQHl6vV4m">avatar</td><td data-page-node-id="Lm1Rq9skHUkAUyUQ6FFzsx">40 × 40</td></tr>
+        <tr data-page-node-id="7DXFI1aUU5vj4XgQutW37s"><td data-page-node-id="v5Ein0LVCEeAW4zNCBgxZ4">visualizador</td><td data-page-node-id="mRJB7L9H1OQjGII78qww6v">80 × 26</td></tr>
+        <tr data-page-node-id="FrtnwBFXS2VZzhS0YRCZHU"><td data-page-node-id="RtHFt7IiYbroaGGaiDgR5q">separador</td><td data-page-node-id="tgH7Rm5JdXN9bt0nE7JdOd">1 × 13</td></tr>
+        <tr data-page-node-id="p0y8BsHUI1ZlzdEXx6LEcp"><td data-page-node-id="pWBK1WAVmVKQG4lIDGIYtp">controles (4 botões)</td><td data-page-node-id="4MB4RLrXbgAZ74VesHBoDX">159 × 32</td></tr>
+        <tr data-page-node-id="8HBrKgPsxefTCQVR5EmQkz"><td data-page-node-id="W3T7nfwhvvGPEHQDNxjy74">cada botão</td><td data-page-node-id="MFDuTT2oFSDcuanoqEF1SM">36 × 32</td></tr>
+        <tr data-page-node-id="RgX2loDAaKapCqOxlKFyIa"><td data-page-node-id="XsOF3E2nF9kFlymibormxm">espaçamento do container</td><td data-page-node-id="WcpoEgVeZN1zmdvqetySdN">12</td></tr>
+      </table>
+      <b data-page-node-id="GFz6jrfxAUqG4VBmfgmDEh">Atenção:</b> a janela é <b data-page-node-id="YOPnrnwo4vX7E4oV9Shlsz">não-redimensionável</b>, então ela adota o
+      tamanho <i data-page-node-id="KmlIImDsBJyVoOOCEHodFs">natural</i> do conteúdo — o <code data-page-node-id="DPkHeAfjeHuVfqYyPu1jfI">set_default_size(390, 58)</code>
+      é apenas um pedido inicial e é <b data-page-node-id="EgIDDGGePQZ36bUgdoecLf">menor</b> que o conteúdo real. Os quadros
+      abaixo usam a largura medida de cada estado (449 sem timer, 479 com timer);
+      uma largura única seria uma mentira sobre a pílula.
+    </li>
+    <li data-page-node-id="0ariOAiwMeqgrqNp3ATX5t"><b data-page-node-id="L5NQtWGXXxGmVeF58I5jik">Aproximação:</b> os ícones são SVGs inline simplificados no lugar dos
+        simbólicos do Adwaita (<code data-page-node-id="w51F4Chkad8ju9iT3YhQw5">network-transmit-receive</code>,
+        <code data-page-node-id="hKzuihgNK2QAfXP215mAGp">starred</code>, <code data-page-node-id="qJtvS1gnaBOOY3X76rGiDA">audio-speakers</code>, <code data-page-node-id="thXo9ErhIALqfhCQlTzAY5">system-run</code>,
+        <code data-page-node-id="BnuwWCNBCOYCzg82Td6XIn">system-search</code>, <code data-page-node-id="dXPHw9ET08CJPngfDX0cG2">dialog-error</code>,
+        <code data-page-node-id="hc9ibz4wgwJvaJeFDlOC5P">audio-input-microphone</code> e a variante
+        <code>-muted</code> (o microfone cortado do estado mudo),
+        <code data-page-node-id="dwEXbvvx0RYj6m2DDDvYaG">dialog-information</code>,
+        <code data-page-node-id="lZUtaXCm5OBooYsRYlD7Vw">window-new</code>, <code data-page-node-id="E5jt6PVLSsjg6CeDEmTdoe">window-close</code>). Forma, peso e cor
+        conferem; o traço não é o mesmo arquivo.</li>
+    <li data-page-node-id="LWVJUIKwgTyC7DDJXDVRF5"><b data-page-node-id="OQKHu3K8YVufIlgDbqUkuG">Aproximação:</b> o visualizador é desenhado por cairo no app
+        (<code data-page-node-id="tzNW5nG7hCAE3g7LWEPUxh">Gtk.DrawingArea</code>); aqui é um SVG estático com a cor do estado.</li>
+    <li><b>Corrigido durante esta verificação:</b> a regra
+        <code>.voice-pill-avatar.pill-privacy-on</code> existia na folha desde o
+        "Dynamic Island v2" e <b>nada a aplicava</b> — o avatar nunca ficava âmbar.
+        Efeito silencioso: "privacidade ativa" e "ouvindo" ficavam a um tint de
+        aviso sutil de distância, sem sinal nenhum no avatar. Agora está ligada em
+        <code>voice_pill.py</code> e travada por
+        <code>test_privacy_avatar_rule_is_wired</code> (regra de CSS que existe
+        precisa ter quem a aplique). O escudo que este mockup desenhava antes era
+        <b>invenção</b> — o app nunca renderizou um; foi removido.</li>
+    <li><b>Aproximação:</b> o <b>menu do clique-direito</b> não é o vidro da pílula — é
+        um <code>PopoverMenu</code> do libadwaita, que a folha do app só pinta com
+        <code>alpha(@card_bg_color, 0.96)</code> e <code>border-radius: 12px</code>.
+        O resto (paddings, realce, chevron, marca de seleção) vem do tema do sistema,
+        então <b>varia com o tema instalado</b>. Aqui reproduzimos a aparência
+        resultante. Os rótulos, sim, são literais de <code>_build_popover_menu</code>
+        — inclusive o atalho, que faz parte da string e por isso não é uma coluna de
+        acelerador alinhada à direita. O quadro do submenu é <b>composto</b>: mostra o
+        submenu aberto ao lado do menu para exibir a marca de posição.</li>
+    <li data-page-node-id="EcyvEf3yELvDlZnxkmomvh"><b data-page-node-id="EFipRFurZMAneoJMThNCiJ">Quadro composto:</b> o REC dot (vídeo ligado) aparece isolado no seu
+        quadro; no app ele coexiste com qualquer estado de áudio.</li>
+    <li data-page-node-id="VkGWdNgeSipl3eGFo3wweS"><b data-page-node-id="FoEzSHMJouWY4xbImJouqQ">Estático:</b> a respiração do <code data-page-node-id="9V4SPUvNsfusdSOsvR3YFD">CONNECTING</code> e o pulso do REC dot
+        são animações por frame clock no app; aqui ficam congeladas no meio do
+        ciclo. A transição de opacidade do fade ocioso (420ms) também não aparece
+        num quadro parado.</li>
+  </ul>
+</div>
+
+<h2 data-page-node-id="6UReaWGbpHRCqjFL8fuyQO">Tema escuro (padrão)</h2>
+<div class="grid" id="dark-grid" data-page-node-id="5E5AUfuyheIpR0OmmACUXr"></div>
+
+<h2 data-page-node-id="CNQZHbsSHsO0Bn1Slp7s9x">Tema claro (<code data-page-node-id="4QFzCnzDXNxz4rbxSCAnpn">light-glass</code>)</h2>
+<div class="grid" id="light-grid" data-page-node-id="aUb9sx0f7Q5Fx0dIs1ZChd"></div>
+
+<h2>Menu do clique-direito (<code>pill-popover</code>)</h2>
+<p class="lede">
+  A pílula abre este menu no clique-direito. É uma <b>superfície separada</b> — o
+  menu flutua sobre a área de trabalho, não dentro do vidro — por isso tem seção
+  própria. Importa porque <b>arrastar falha em vários compositores Wayland</b>:
+  este menu é o caminho confiável para reposicionar, e é onde "ocultar sem
+  encerrar" e "abrir na janela do Copilot" ficam descobertos.
+</p>
+<div class="grid" id="menu-grid"></div>
+
+<footer data-page-node-id="3ZcvU48rLTrovd3Z36pdyz">
+  Fonte dos valores: <code data-page-node-id="BmMiNfcRBHsTvoWJhx7mE6">src/zorin_copilot/data/zorin-copilot.css</code> e
+  <code data-page-node-id="z3Lagvg29piLIByKbRsCRY">src/zorin_copilot/ui/voice_pill.py</code>. Se a folha do app mudar, este
+  arquivo precisa mudar junto — um mockup que mente é pior que nenhum.
+</footer>
+
+<script>
+/* Glifos simplificados (16×16, traço 1.6, currentColor) no lugar dos simbólicos
+   do Adwaita. Mantidos aqui para o mockup não depender de rede. */
+const ICON = {
+  transmit: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2.5 8a5.5 5.5 0 0 1 11 0"/><path d="M5.5 8a2.5 2.5 0 0 1 5 0"/><circle cx="8" cy="11.5" r="1.2" fill="currentColor" stroke="none"/></svg>',
+  star:     '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M8 1.8l1.9 3.9 4.3.6-3.1 3 .7 4.3L8 11.6l-3.8 2 .7-4.3-3.1-3 4.3-.6z"/></svg>',
+  speaker:  '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h2.2L8.5 3.5v9L5.2 10H3z"/><path d="M11 6.2a3 3 0 0 1 0 3.6"/></svg>',
+  run:      '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 2.8l7.5 5.2L4 13.2z"/></svg>',
+  search:   '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="7" cy="7" r="4.2"/><path d="M10.2 10.2L13.5 13.5"/></svg>',
+  error:    '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="8" cy="8" r="6"/><path d="M8 4.8v4"/><circle cx="8" cy="11.2" r=".9" fill="currentColor" stroke="none"/></svg>',
+  mic:      '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><rect x="6" y="2" width="4" height="7" rx="2"/><path d="M3.8 7.5a4.2 4.2 0 0 0 8.4 0"/><path d="M8 11.7V14"/></svg>',
+  micOff:   '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><rect x="6" y="2" width="4" height="7" rx="2"/><path d="M3.8 7.5a4.2 4.2 0 0 0 8.4 0"/><path d="M8 11.7V14"/><path d="M2.5 13.5l11-11"/></svg>',
+  info:     '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="8" cy="8" r="6"/><path d="M8 7.2v4"/><circle cx="8" cy="5" r=".9" fill="currentColor" stroke="none"/></svg>',
+  windowNew:'<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 3.5H3.2v9.3h9.3V9.6"/><path d="M9.4 3.5h3.1v3.1"/><path d="M12.5 3.5L7.6 8.4"/></svg>',
+  close:    '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4 4l8 8M12 4l-8 8"/></svg>',
+};
+
+/* Onda do visualizador: caminho suave (o app usa Catmull-Rom → Bézier).
+   `amp` controla a altura; o silêncio é uma linha quase reta. */
+function wave(color, amp, muted) {
+  const cy = 13, pad = 4, w = 80;
+  if (muted) {
+    return `<svg viewBox="0 0 ${w} 26"><line x1="${pad}" y1="${cy}" x2="${w - pad}" y2="${cy}" stroke="#c0392b" stroke-opacity=".55" stroke-width="1.6"/></svg>`;
+  }
+  const pts = [];
+  for (let x = pad; x <= w - pad; x += 6) {
+    const t = (x - pad) / (w - 2 * pad);
+    const y = cy - amp * Math.sin(t * Math.PI * 2.6) * Math.sin(t * Math.PI) * 9;
+    pts.push([x, y]);
+  }
+  let d = `M ${pts[0][0]} ${pts[0][1].toFixed(2)}`;
+  for (let i = 1; i < pts.length; i++) {
+    const [x0, y0] = pts[i - 1], [x1, y1] = pts[i];
+    const cx = (x0 + x1) / 2;
+    d += ` C ${cx} ${y0.toFixed(2)}, ${cx} ${y1.toFixed(2)}, ${x1} ${y1.toFixed(2)}`;
+  }
+  return `<svg viewBox="0 0 ${w} 26"><path d="${d}" fill="none" stroke="${color}" stroke-width="1.8" stroke-linecap="round" stroke-opacity=".92"/></svg>`;
+}
+
+const GLOW = {
+  accent:'rgba(107,114,128,.55)', idleAccent:'rgba(107,114,128,.12)',
+  speak:'rgba(125,90,140,.55)', warn:'rgba(184,134,11,.55)',
+  success:'rgba(61,139,99,.55)', error:'rgba(192,57,43,.55)',
+};
+const COLOR = { accent:'#6b7280', speak:'#7d5a8c', warn:'#b8860b', success:'#3d8b63', error:'#c0392b' };
+
+/* Monta uma pílula. Só o que difere do padrão é passado.
+   `narrow` = estado sem timer, que mede 449 em vez de 479. */
+function pill(o) {
+  const cls = ['pill'];
+  if (o.light) cls.push('light');
+  if (o.state) cls.push(o.state);
+  if (o.idle) cls.push('idle');
+  if (o.narrow) cls.push('narrow');
+
+  const glow = o.glow ? ` style="--glow:${o.glow}"` : '';
+  const avatarIcon = o.avatarIcon || 'star';
+  const showTimer = o.timer !== undefined ? o.timer : '0:42';
+  const amp = o.amp !== undefined ? o.amp : 0.6;
+
+  return `
+  <div class="${cls.join(' ')}"${glow}>
+    <div class="avatar${o.breathe ? ' breathe' : ''}">
+      ${ICON[avatarIcon]}
+      ${o.rec ? '<span class="rec">&#9679;</span>' : ''}
+    </div>
+    <div class="text">
+      <div class="title-row">
+        <span class="title">Copilot Live</span>
+        ${showTimer ? `<span class="sep">&middot;</span><span class="timer">${showTimer}</span>` : ''}
+      </div>
+      <div class="status-row">
+        ${o.hint
+          ? `<span class="hint">${o.hint}</span>`
+          : `<span class="status">${o.status || ''}</span>`}
+        ${o.micDot ? `<span class="mic-dot ${o.micDot}"></span>` : ''}
+      </div>
+    </div>
+    <div class="viz">${wave(o.waveColor || COLOR.accent, amp, o.waveMuted)}</div>
+    <div class="divider"></div>
+    <div class="controls">
+      <span class="cbtn${o.mutedMic ? ' destructive' : ''}">${ICON[o.mutedMic ? 'micOff' : 'mic']}</span>
+      <span class="cbtn">${ICON.info}</span>
+      <span class="cbtn">${ICON.windowNew}</span>
+      <span class="cbtn">${ICON.close}</span>
+    </div>
+  </div>`;
+}
+
+function cell(label, sub, html, light) {
+  return `<div class="cell">
+    <div class="label">${label}</div>
+    <div class="sub">${sub}</div>
+    <div class="stage${light ? '' : ' dark'}">${html}</div>
+  </div>`;
+}
+
+document.getElementById('dark-grid').innerHTML = [
+  cell('Conectando', '<code>pill-connecting</code> · 449px (sem timer) · avatar respirando (congelado) · tint do acento 0.10',
+    pill({ narrow:true, state:'connecting', status:'Conectando...', avatarIcon:'transmit',
+           breathe:true, glow:GLOW.accent, timer:'' })),
+
+  cell('Ouvindo — mic captando', '<code>LISTENING</code> · dot de captação aceso (opacidade 1.0)',
+    pill({ status:'Ouvindo você...', micDot:'loud', glow:GLOW.accent, amp:0.85 })),
+
+  cell('Ouvindo — silêncio', 'dot armado em repouso (opacidade 0.30): o mic está pronto, mas não ouve nada',
+    pill({ status:'Ouvindo você...', micDot:'armed', glow:GLOW.accent, amp:0.05 })),
+
+  cell('Falando', '<code>SPEAKING</code> · halo na cor <code>@zc_speak</code>',
+    pill({ status:'Falando...', avatarIcon:'speaker', glow:GLOW.speak,
+           waveColor:COLOR.speak, amp:0.9 })),
+
+  cell('Pensando', '<code>THINKING</code> · halo em <code>@zc_warn</code>',
+    pill({ status:'Pensando...', avatarIcon:'search', glow:GLOW.warn,
+           waveColor:COLOR.warn, amp:0.35 })),
+
+  cell('Executando', '<code>EXECUTING</code> · halo em <code>@zc_success</code>',
+    pill({ status:'Executando...', avatarIcon:'run', glow:GLOW.success,
+           waveColor:COLOR.success, amp:0.4 })),
+
+  cell('Microfone mudo', '<code>pill-muted</code> · tint de erro 0.14 + status na cor do estado',
+    pill({ state:'muted', status:'Microfone mudo', mutedMic:true, glow:GLOW.error,
+           waveMuted:true, amp:0 })),
+
+  cell('Interrompendo', '<code>pill-interrupting</code> · tint de erro 0.22 (mais forte que o mudo)',
+    pill({ state:'interrupting', status:'Interrompendo...', glow:GLOW.error,
+           waveColor:COLOR.error, amp:0.5 })),
+
+  cell('Privacidade ativa', '<code>pill-privacy</code> · tint de aviso 0.16 + avatar em âmbar (0.32&rarr;0.22)',
+    pill({ state:'privacy', status:'Ouvindo você...', glow:GLOW.accent,
+           micDot:'loud', amp:0.7 })),
+
+  cell('Erro', '<code>ERROR</code> · 449px (sem timer) · halo de erro · auto-oculta em 12s',
+    pill({ narrow:true, status:'Erro de áudio', avatarIcon:'error', glow:GLOW.error, timer:'' })),
+
+  cell('Ocioso', '<code>pill-idle</code> · container 0.30 · halo 0.12 · status 0.75',
+    pill({ idle:true, status:'Ouvindo você...', micDot:'armed',
+           glow:GLOW.idleAccent, amp:0.05 })),
+
+  cell('Dica de atalho', 'ocupa o lugar do status · uma por vez, ciclo de 12s, 1× por execução',
+    pill({ narrow:true, hint:'Espaço: falar', avatarIcon:'transmit', breathe:true,
+           glow:GLOW.accent, timer:'' })),
+
+  cell('Rajada de chips', '<code>pill-chip-ok</code> · a partir do 2º chip da rajada ganha contador',
+    pill({ state:'chip-ok', status:'2\u00d7 Executando...', avatarIcon:'run',
+           glow:GLOW.success, waveColor:COLOR.success, amp:0.4 })),
+
+  cell('Chip com falha', '<code>pill-chip-fail</code> · texto na cor de erro',
+    pill({ state:'chip-fail', status:'Falha ao executar', avatarIcon:'error', glow:GLOW.error })),
+
+  cell('Vídeo ligado', 'quadro <b>composto</b>: o REC dot coexiste com qualquer estado de áudio',
+    pill({ status:'Ouvindo você...', rec:true, micDot:'loud', glow:GLOW.accent, amp:0.8 })),
+].join('');
+
+document.getElementById('light-grid').innerHTML = [
+  cell('Ouvindo', '<code>light-glass</code> · fundo 0.94 branco, borda 1px preta a 0.08',
+    pill({ light:true, status:'Ouvindo você...', micDot:'loud', glow:GLOW.accent, amp:0.85 }), true),
+
+  cell('Conectando', 'tint do acento mais fraco no claro (0.07 em vez de 0.10)',
+    pill({ light:true, narrow:true, state:'connecting', status:'Conectando...',
+           avatarIcon:'transmit', breathe:true, glow:GLOW.accent, timer:'' }), true),
+
+  cell('Mudo', 'tint de erro a 0.10 (contra 0.14 no escuro)',
+    pill({ light:true, state:'muted', status:'Microfone mudo', mutedMic:true,
+           glow:GLOW.error, waveMuted:true }), true),
+
+  cell('Ocioso', 'mesmo fade: container 0.30 e halo em 0.12',
+    pill({ light:true, idle:true, status:'Ouvindo você...', micDot:'armed',
+           glow:GLOW.idleAccent, amp:0.05 }), true),
+
+  cell('Dica de atalho', 'a dica usa o acento grafite — cor de conteúdo, não chrome',
+    pill({ light:true, narrow:true, hint:'Ctrl+M: mudo', glow:GLOW.accent, timer:'' }), true),
+
+  cell('Privacidade ativa', 'tint de aviso 0.12 + avatar em âmbar',
+    pill({ light:true, state:'privacy', status:'Ouvindo você...',
+           micDot:'loud', glow:GLOW.accent, amp:0.7 }), true),
+].join('');
+
+/* ------------------------------------------------------------------
+   Menu do clique-direito. Os rótulos são LITERAIS de
+   `VoicePillWindow._build_popover_menu` — o atalho faz parte da string
+   ("Interromper agente (i)"), não é uma coluna de acelerador à direita,
+   e por isso não é alinhado. Só `pill.ptt-info` é no-op (informativa).
+   ------------------------------------------------------------------ */
+const CHECK = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8.4l3 3 6-6.5"/></svg>';
+const CHEV  = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 4l4 4-4 4"/></svg>';
+
+function mi(label, opts) {
+  const o = opts || {};
+  const cls = ['mi'];
+  if (o.hot) cls.push('hot');
+  if (o.info) cls.push('info');
+  const chev = o.submenu ? `<span class="chev">${CHEV}</span>` : '';
+  return `<div class="${cls.join(' ')}">` +
+    `<span class="ck">${o.checked ? CHECK : ''}</span>` +
+    `<span>${label}</span>${chev}</div>`;
+}
+
+/* `corner` é a posição atual (o que a ação com estado marca). */
+function menu(corner, opts) {
+  const o = opts || {};
+  const pinned = o.pinned === false ? 'Fixar acima de tudo' : 'Desfixar acima de tudo';
+  const light = o.light ? ' light' : '';
+  const corners = [
+    ['top-center',    'Topo · Centro'],
+    ['top-right',     'Topo · Direita'],
+    ['top-left',      'Topo · Esquerda'],
+    ['bottom-center', 'Base · Centro'],
+  ].map(([k, l]) => mi(l, { checked: k === corner, hot: k === corner })).join('');
+
+  return `<div class="menu-wrap">
+    <div class="menu${light}">
+      ${mi('Detalhes da chamada e tela...')}
+      ${mi('Interromper agente (i)')}
+      ${mi('Pressionar-para-falar (segure Space)', { info:true })}
+      ${mi('Mutar / Desmutar (Ctrl+M)')}
+      ${mi('Posição', { submenu:true, hot:true })}
+      ${mi(pinned)}
+      ${mi('Ocultar sem encerrar (h)')}
+      ${mi('Abrir na janela do Copilot (?)')}
+      ${mi('Encerrar (Esc)')}
+    </div>
+    <div class="menu subpanel${light}">
+      <div class="sub-title">Posição</div>
+      ${corners}
+    </div>
+  </div>`;
+}
+
+document.getElementById('menu-grid').innerHTML = [
+  cell('Menu completo', 'rótulos literais de <code>_build_popover_menu</code> · o atalho faz parte da string',
+    menu('top-center')),
+
+  cell('Submenu "Posição" aberto', 'ação com <b>estado</b> (<code>pill.set-corner</code>): o popover marca a posição atual · quadro composto (o submenu abre ao lado)',
+    menu('top-right')),
+
+  cell('Variante "Fixar acima de tudo"', 'o rótulo depende de <code>pill_pinned</code>: alterna entre fixar e desfixar',
+    menu('bottom-center', { pinned:false })),
+
+  cell('Tema claro', '<code>card_bg_color</code> a 0.96 sobre o vidro claro',
+    menu('top-center', { light:true }), true),
+].join('');
+</script>
+</body>
+</html>

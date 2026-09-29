@@ -1,7 +1,9 @@
 """Testes unitários para o cliente de voz ao vivo (Gemini Live) e execução de ferramentas."""
 
+import json
+import time
 import unittest
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 from zorin_copilot.ai.live import (
     LIVE_TOOLS_DECLARATION,
@@ -31,6 +33,21 @@ class LiveVoiceClientTest(unittest.TestCase):
             "organize_directory", "move_window_to_monitor", "vscode_workspace", "click_and_type",
         ]:
             self.assertIn(expected, func_names)
+
+    def test_live_tools_declared_non_blocking(self):
+        """O Gemini 3.8 Live Extended Thinking exige `behavior: NON_BLOCKING` nas
+        ferramentas; sem isso ele nem invoca as ferramentas e apenas narra a
+        impossibilidade da ação. O payload sanitizado deve carregar o campo em
+        TODA declaração de função (incluindo as vindas de MCP/registry)."""
+        payload = self.client._live_tools_payload()
+        self.assertEqual(len(payload), 1)
+        funcs = payload[0]["functionDeclarations"]
+        self.assertGreater(len(funcs), 0)
+        for fn in funcs:
+            self.assertEqual(
+                fn.get("behavior"), "NON_BLOCKING",
+                f"Ferramenta '{fn.get('name')}' sem behavior=NON_BLOCKING",
+            )
 
     def test_toggle_mute(self):
         """Testa a alternância do estado de mudo do microfone."""
@@ -378,17 +395,35 @@ class LiveVoiceClientTest(unittest.TestCase):
         mock_compose.assert_called_once()
 
     def test_dispatch_tool_calendar_event(self):
-        """Testa agendamento e listagem de evento no calendário via Live API."""
+        """Escrita na agenda passa pelo portão de risco; leitura não.
+
+        `create` é ação externa (com o Google conectado, sai da máquina), então
+        exige confirmação — como `email_compose`. Aprovada, executa de verdade.
+        `list` é leitura e nunca é barrada.
+        """
+        res_list = self.client._dispatch_tool(
+            "calendar_event", {"action": "list", "datetime_str": "amanhã"}
+        )
+        self.assertTrue(res_list["success"])
+
         res_create = self.client._dispatch_tool(
             "calendar_event",
             {"action": "create", "title": "Reunião de Equipe", "datetime_str": "amanhã às 11:00"},
         )
-        self.assertTrue(res_create["success"])
-        self.assertIn("Reunião de Equipe", res_create["message"])
+        self.assertFalse(res_create["success"])
+        self.assertTrue(res_create["requires_confirmation"])
+        cid = res_create["confirmation_id"]
 
-        res_list = self.client._dispatch_tool("calendar_event", {"action": "list", "datetime_str": "amanhã"})
-        self.assertTrue(res_list["success"])
-        self.assertGreaterEqual(res_list["count"], 1)
+        res_ok = self.client._dispatch_tool(
+            "confirm_action", {"confirmation_id": cid, "approve": True}
+        )
+        self.assertTrue(res_ok["success"])
+        self.assertIn("Reunião de Equipe", res_ok["message"])
+
+        res_after = self.client._dispatch_tool(
+            "calendar_event", {"action": "list", "datetime_str": "amanhã"}
+        )
+        self.assertGreaterEqual(res_after["count"], 1)
 
     @patch("zorin_copilot.core.browser.BrowserManager.search", return_value=(True, "Pesquisa aberta", "https://google.com/search?q=Python+3.12+novidades"))
     def test_dispatch_tool_browser_search(self, mock_search):
@@ -639,7 +674,11 @@ class LiveSetupAndVoiceTest(unittest.TestCase):
             "Aoede",
         )
         self.assertIn("thinkingConfig", gen_cfg)
-        self.assertEqual(gen_cfg["thinkingConfig"]["thinkingBudget"], 2048)
+        # Gemini 3.x abandonou o `thinkingBudget` (formato 2.5) em favor
+        # de `thinkingLevel` (LOW/MEDIUM/HIGH). O 3.8 Live Extended
+        # Thinking devolve 1007 no setup se vier sem isso.
+        self.assertEqual(gen_cfg["thinkingConfig"]["thinkingLevel"], "HIGH")
+        self.assertNotIn("thinkingBudget", gen_cfg["thinkingConfig"])
 
     @patch.object(CopilotConfig, "save")
     def test_set_voice_and_set_model(self, mock_save):
@@ -729,6 +768,165 @@ class LiveUnifiedToolsTest(unittest.TestCase):
         self.assertIn("git_status", func_names)
         self.assertIn("run_command", func_names)
         self.assertNotIn("done", func_names)
+
+
+class LiveRollingSummaryTest(unittest.TestCase):
+    """WS3: resumo contínuo da sessão (rolling summary) injetado como contexto.
+
+    O resumo não é um comando: entra via realtimeInput (contexto), igual a
+    send_context_update, mantendo o modelo aterrado em sessões longas.
+    """
+
+    def setUp(self):
+        self.config = CopilotConfig(gemini_api_key="fake-key-live")
+        self.client = GeminiLiveClient(config=self.config)
+
+    def test_build_summary_text_includes_recent_turns_and_actions(self):
+        """O resumo traz duração, últimas falas e ações executadas."""
+        self.client._is_running = True
+        self.client._session_start_time = time.time() - 125  # 2m5s
+        self.client._transcripts_log = [
+            {"role": "user", "text": "abre o navegador"},
+            {"role": "assistant", "text": "Abrindo o Chrome para você..."},
+        ]
+        self.client._executed_actions_log = [{"name": "launch_app"}]
+        text = self.client._build_live_summary_text()
+        self.assertIn("Resumo contínuo", text)
+        self.assertIn("2m05s", text)
+        self.assertIn("abre o navegador", text)
+        self.assertIn("Abrindo o Chrome", text)
+        self.assertIn("launch_app", text)
+
+    def test_build_summary_text_empty_when_no_activity(self):
+        """Sem transcrições nem ações, não há resumo para enviar (tick pulado)."""
+        self.client._transcripts_log = []
+        self.client._executed_actions_log = []
+        self.assertEqual(self.client._build_live_summary_text(), "")
+
+    def test_build_summary_text_truncates_long_turns(self):
+        """Falas longas são truncadas para não estourar o contexto a cada tick."""
+        self.client._transcripts_log = [{"role": "user", "text": "x" * 400}]
+        text = self.client._build_live_summary_text()
+        self.assertNotIn("x" * 400, text)
+        self.assertTrue(text.endswith("..."))
+
+    def test_summary_loop_disabled_when_interval_zero(self):
+        """Intervalo 0 desliga o resumo: retorna sem enviar nem levantar erro."""
+        import asyncio
+
+        self.config.live_summary_interval_min = 0
+        asyncio.run(self.client._summary_loop())
+        self.assertIsNone(self.client._ws)  # não tentou enviar
+
+    def test_summary_loop_quits_when_not_running(self):
+        """Se a sessão não está ativa, o loop nem dorme: não envia nada."""
+        import asyncio
+
+        self.config.live_summary_interval_min = 0.05
+        self.client._is_running = False
+        self.client._ws = MagicMock()
+        asyncio.run(self.client._summary_loop())
+        self.client._ws.send.assert_not_called()
+
+    def test_summary_loop_sends_periodically(self):
+        """A cada intervalo ele injeta um realtimeInput com o resumo acumulado."""
+        import asyncio
+
+        self.config.live_summary_interval_min = 0.01  # 0.6s
+        self.client._is_running = True
+        self.client._ws = MagicMock()
+        self.client._ws.send = AsyncMock()
+        self.client._transcripts_log = [{"role": "user", "text": "teste de resumo"}]
+
+        async def _drive():
+            task = asyncio.ensure_future(self.client._summary_loop())
+            # Deixa o primeiro tick (0.6s) disparar o envio, depois cancela.
+            await asyncio.sleep(1.0)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        asyncio.run(_drive())
+        self.client._ws.send.assert_called()
+        sent = self.client._ws.send.call_args[0][0]
+        payload = json.loads(sent)
+        self.assertIn("realtimeInput", payload)
+        self.assertIn("teste de resumo", payload["realtimeInput"]["text"])
+
+    def test_summary_loop_cancels_cleanly(self):
+        """O stop() cancela a task; ela deve terminar (done), não ficar pendente."""
+        import asyncio
+
+        self.config.live_summary_interval_min = 0.05
+        self.client._is_running = True
+        self.client._ws = MagicMock()
+        self.client._transcripts_log = [{"role": "user", "text": "oi"}]
+
+        async def _run():
+            task = asyncio.ensure_future(self.client._summary_loop())
+            self.client._summary_task = task
+            await asyncio.sleep(0.01)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            return task
+
+        asyncio.run(_run())
+        self.assertTrue(self.client._summary_task.done())
+
+
+class LiveEchoIsolationTest(unittest.TestCase):
+    """WS2/B3: isolamento de eco/loopback do microfone no envio ao servidor (modo nuvem).
+
+    `_echo_isolation_blocks_send(rms)` deve bloquear o envio enquanto o assistente
+    fala/processa (eco acústico dos alto-falantes), preservando o barge-in voluntário
+    (voz alta do usuário) e atuando independentemente do ducking.
+    """
+
+    def setUp(self):
+        self.config = CopilotConfig(gemini_api_key="fake-key-live")
+        self.client = GeminiLiveClient(config=self.config, executor=MagicMock())
+
+    def test_isolation_off_never_blocks(self):
+        self.config.live_mic_speaker_isolation = False
+        self.client.state = LiveVoiceState.SPEAKING
+        self.assertFalse(self.client._echo_isolation_blocks_send(100.0))
+        self.client.state = LiveVoiceState.EXECUTING
+        self.assertFalse(self.client._echo_isolation_blocks_send(100.0))
+
+    def test_listening_does_not_block(self):
+        self.client.state = LiveVoiceState.LISTENING
+        self.assertFalse(self.client._echo_isolation_blocks_send(100.0))
+
+    def test_speaking_low_rms_blocks(self):
+        self.client.state = LiveVoiceState.SPEAKING
+        self.assertTrue(self.client._echo_isolation_blocks_send(100.0))
+
+    def test_speaking_high_rms_allows_bargein(self):
+        # Barge-in voluntário: voz alta do usuário perto do mic libera o envio.
+        self.client.state = LiveVoiceState.SPEAKING
+        self.assertFalse(self.client._echo_isolation_blocks_send(3000.0))
+
+    def test_executing_low_rms_blocks(self):
+        self.client.state = LiveVoiceState.EXECUTING
+        self.assertTrue(self.client._echo_isolation_blocks_send(100.0))
+
+    def test_thinking_low_rms_blocks(self):
+        self.client.state = LiveVoiceState.THINKING
+        self.assertTrue(self.client._echo_isolation_blocks_send(100.0))
+
+    def test_play_queue_active_blocks(self):
+        # Fila de reprodução não vazia conta como 'assistente ativo'.
+        self.client.state = LiveVoiceState.LISTENING
+        self.client._audio_play_queue.put(b"x")
+        try:
+            self.assertTrue(self.client._echo_isolation_blocks_send(100.0))
+        finally:
+            self.client._audio_play_queue.get_nowait()
 
 
 if __name__ == "__main__":

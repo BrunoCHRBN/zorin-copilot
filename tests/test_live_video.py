@@ -173,7 +173,13 @@ class LiveVideoClientTest(unittest.TestCase):
         self.assertFalse(self.client.is_video_streaming())
 
     def test_sensitive_window_detection(self):
-        """Verifica se palavras-chave bancárias e de segurança disparam o Privacy Shield."""
+        """O Privacy Shield usa a decisão real do gate (Entrega E / P1-9).
+
+        Antes este teste **repetia a lógica de produção** (`any(kw in combined ...)`), o
+        que o tornava um espelho: ele afirmava a implementação, não o contrato — e continuou
+        verde depois de a decisão mudar para `PrivacyGatekeeper`, testando código morto.
+        Agora ele chama a mesma porta que o laço de vídeo chama.
+        """
         # Palavras sensíveis padrão
         sensitive_cases = [
             ("bitwarden", "Bitwarden Password Vault"),
@@ -185,9 +191,10 @@ class LiveVideoClientTest(unittest.TestCase):
         ]
 
         for app, title in sensitive_cases:
-            combined = f"{app} {title}".lower()
-            is_sensitive = any(kw in combined for kw in self.client.sensitive_keywords)
-            self.assertTrue(is_sensitive, f"Falha ao detectar contexto sensível para: {app} / {title}")
+            self.assertTrue(
+                self.client._window_is_sensitive(app, title),
+                f"Falha ao detectar contexto sensível para: {app} / {title}",
+            )
 
         # Janela normal não deve disparar
         normal_cases = [
@@ -196,9 +203,30 @@ class LiveVideoClientTest(unittest.TestCase):
             ("nautilus", "Downloads"),
         ]
         for app, title in normal_cases:
-            combined = f"{app} {title}".lower()
-            is_sensitive = any(kw in combined for kw in self.client.sensitive_keywords)
-            self.assertFalse(is_sensitive, f"Falso positivo para: {app} / {title}")
+            self.assertFalse(
+                self.client._window_is_sensitive(app, title),
+                f"Falso positivo para: {app} / {title}",
+            )
+
+    def test_sensitive_window_detection_ignores_substrings(self):
+        """Regressão do defeito medido: substring crua ocultava janelas comuns.
+
+        `"bb" in "Hobby"`, `"inter" in "Printer"`, `"c6" in "0xc6f3"` — o matcher antigo
+        ocultava a tela nesses casos. A fronteira de palavra corrige.
+        """
+        substrings = [
+            ("libreoffice-writer", "Hobby project notes.docx"),   # bb
+            ("firefox", "Printer settings - Mozilla Firefox"),     # inter
+            ("code", "interface.py — zorin-copilot"),              # inter
+            ("nautilus", "Winter photos 2026"),                    # inter
+            ("gnome-calculator", "0xc6f3 + 12"),                   # c6
+            ("firefox", "Abbey Road - Wikipedia"),                 # bb
+        ]
+        for app, title in substrings:
+            self.assertFalse(
+                self.client._window_is_sensitive(app, title),
+                f"Falso positivo por substring reintroduzido: {app} / {title}",
+            )
 
 
 class LiveVoiceWidgetUITest(unittest.TestCase):
@@ -282,11 +310,13 @@ class LiveVoiceWidgetUITest(unittest.TestCase):
         mock_client = MagicMock()
         widget = LiveVoiceWidget(live_client=mock_client)
 
-        # Transcrição de usuário e assistente
+        # Transcrição de usuário e assistente (agora em batching: o flush efetiva a legenda)
         widget._ui_on_transcript("user", "que dia é hoje?")
+        widget._flush_transcript()
         self.assertIn("que dia é hoje?", widget.subtitle_lbl.get_text())
 
         widget._ui_on_transcript("assistant", "Hoje é domingo.")
+        widget._flush_transcript()
         self.assertIn("Hoje é domingo.", widget.subtitle_lbl.get_text())
 
         # Execução de ferramentas
@@ -296,6 +326,36 @@ class LiveVoiceWidgetUITest(unittest.TestCase):
         # Mensagem de erro
         widget._ui_on_error("Microfone desconectado")
         self.assertIn("Microfone desconectado", widget.subtitle_lbl.get_text())
+
+    def test_transcript_batching_single_row_per_turn(self):
+        """N chunks de um turno devem virar 1 linha de log (não 1 por token) e a legenda reflete o acumulado."""
+        from zorin_copilot.ui.live_view import LiveVoiceWidget
+
+        def _count_rows(box):
+            n = 0
+            child = box.get_first_child()
+            while child is not None:
+                n += 1
+                child = child.get_next_sibling()
+            return n
+
+        mock_client = MagicMock()
+        widget = LiveVoiceWidget(live_client=mock_client)
+
+        # Streaming do assistente em 3 partes (cumulativas, como o Gemini Live envia)
+        for chunk in ("Hoje", "Hoje é", "Hoje é domingo."):
+            widget._ui_on_transcript("assistant", chunk)
+        widget._flush_transcript()
+
+        # 1 linha de histórico para todo o turno
+        self.assertEqual(_count_rows(widget.log_box), 1)
+        # Legenda reflete o texto completo acumulado, não só o último chunk
+        self.assertIn("Hoje é domingo.", widget.subtitle_lbl.get_text())
+
+        # Troca de papel encerra o turno e abre nova linha
+        widget._ui_on_transcript("user", "Obrigado.")
+        widget._flush_transcript()
+        self.assertEqual(_count_rows(widget.log_box), 2)
 
 
 if __name__ == "__main__":

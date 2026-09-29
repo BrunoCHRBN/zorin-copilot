@@ -37,24 +37,53 @@ class PrivacyGatekeeper:
         re.compile(r"gnome[-_]?keyring", re.IGNORECASE),
         re.compile(r"pinentry", re.IGNORECASE),
         re.compile(r"authenticator", re.IGNORECASE),
+        re.compile(r"seahorse", re.IGNORECASE),
     )
 
-    # Títulos de janelas que revelam dados confidenciais ou navegação anônima
+    # Identidade de aplicativo que a allowlist do usuário **não** pode revelar
+    # (Entrega E / P1-9). São os cofres de credenciais e os prompts de autenticação:
+    # se a senha aparece na tela, o vazamento de pixels para a nuvem é irreversível.
+    # Por isso a decisão é incondicional — ver `evaluate_window`.
+    HARD_BLOCK_APP_PATTERNS: tuple[re.Pattern[str], ...] = SENSITIVE_APP_PATTERNS
+
+    # Títulos de janelas que revelam dados confidenciais ou navegação anônima.
+    #
+    # Entrega E / P1-9: todos ancorados por **fronteira de palavra** (`\b`). O escudo de
+    # vídeo usava substring crua (`"bb" in texto`, `"inter" in texto`), o que ocultava a
+    # tela em "Ho**bb**y", "Pr**inter**", "W**inter**", "0x**c6**f3" e "A**bb**ey" —
+    # medido, não suposto. A fronteira de palavra preserva os verdadeiros positivos
+    # ("BB" bancário, "Banco Inter") sem casar dentro de outra palavra.
     SENSITIVE_TITLE_PATTERNS: tuple[re.Pattern[str], ...] = (
+        # Navegação privada
         re.compile(r"private\s+browsing", re.IGNORECASE),
         re.compile(r"navega[çc][ãa]o\s+an[ôo]nima", re.IGNORECASE),
+        re.compile(r"\ban[ôo]nima\b", re.IGNORECASE),
         re.compile(r"incognito", re.IGNORECASE),
         re.compile(r"inprivate", re.IGNORECASE),
+        # Autenticação e credenciais
         re.compile(r"\bmaster\s+password\b", re.IGNORECASE),
         re.compile(r"\bsenha\s+mestra\b", re.IGNORECASE),
         re.compile(r"\bautentica[çc][ãa]o\b", re.IGNORECASE),
+        re.compile(r"\bsenhas?\b", re.IGNORECASE),
+        re.compile(r"\bpassword\b", re.IGNORECASE),
+        re.compile(r"\bcredenciais?\b", re.IGNORECASE),
+        re.compile(r"\bcredentials?\b", re.IGNORECASE),
+        # Bancos e finanças
         re.compile(r"\bbanco\b", re.IGNORECASE),
+        re.compile(r"\bbank\b", re.IGNORECASE),
         re.compile(r"\bcaixa\s+econ[ôo]mica\b", re.IGNORECASE),
-        re.compile(r"\bitau\b", re.IGNORECASE),
+        re.compile(r"\bita[úu]\b", re.IGNORECASE),
         re.compile(r"\bbradesco\b", re.IGNORECASE),
         re.compile(r"\bsantander\b", re.IGNORECASE),
         re.compile(r"\bnubank\b", re.IGNORECASE),
         re.compile(r"\binter\b", re.IGNORECASE),
+        re.compile(r"\bbb\b", re.IGNORECASE),
+        re.compile(r"\bc6\b", re.IGNORECASE),
+        re.compile(r"\bextrato\b", re.IGNORECASE),
+        re.compile(r"\bcart[ãa]o\b", re.IGNORECASE),
+        re.compile(r"\bcvv\b", re.IGNORECASE),
+        re.compile(r"\birpf\b", re.IGNORECASE),
+        re.compile(r"\bdeclara[çc][ãa]o\b", re.IGNORECASE),
     )
 
     # Padrões de texto contendo credenciais, tokens ou chaves criptográficas
@@ -99,6 +128,68 @@ class PrivacyGatekeeper:
                 )
 
         return PrivacyCheckResult(allowed=True, reason="", is_sensitive=False)
+
+    @staticmethod
+    def _normalize_entries(entries: Sequence[str] | None) -> frozenset[str]:
+        """Normaliza uma lista de identidades de app para comparação exata, sem caixa."""
+        if not entries:
+            return frozenset()
+        return frozenset(str(e).strip().lower() for e in entries if str(e).strip())
+
+    @classmethod
+    def evaluate_window(
+        cls,
+        app_name: str = "",
+        window_title: str = "",
+        allowlist: Sequence[str] | None = None,
+        denylist: Sequence[str] | None = None,
+    ) -> PrivacyCheckResult:
+        """Decisão canônica de privacidade para uma janela (Entrega E / P1-9).
+
+        Substitui o `any(kw in f"{app} {title}".lower() ...)` que o escudo de vídeo usava
+        em `ai/live.py` — substring crua, sem fronteira de palavra, que ocultava a tela em
+        janelas comuns ("Hobby", "Printer settings", "interface.py").
+
+        Precedência, na ordem — cada degrau é deliberado:
+
+        1. **Identidade de cofre/prompt** (`HARD_BLOCK_APP_PATTERNS`) → sensível, **sempre**.
+           É o único caso em que o consentimento do usuário é ignorado: a exposição de uma
+           senha na tela para a nuvem é irreversível, então não há opt-in.
+        2. **Denylist do usuário** → sensível. A negação explícita vence uma entrada de
+           allowlist possivelmente esquecida.
+        3. **Allowlist do usuário** → permitida. É o consentimento que corrige os falsos
+           positivos de título — o usuário diz "esta janela é segura" e é obedecido.
+        4. **Padrões de app e de título** (`should_ingest_window`) → sensível.
+        5. Caso contrário → permitida.
+        """
+        app = (app_name or "").strip()
+        title = (window_title or "").strip()
+
+        # 1. Cofres de credenciais e prompts de autenticação: incondicional.
+        for pattern in cls.HARD_BLOCK_APP_PATTERNS:
+            if pattern.search(app):
+                return PrivacyCheckResult(
+                    allowed=False,
+                    reason=f"Aplicativo de credenciais protegido (não sobrescrevível): '{app}'",
+                    is_sensitive=True,
+                )
+
+        app_low = app.lower()
+
+        # 2. Denylist do usuário.
+        if app_low and app_low in cls._normalize_entries(denylist):
+            return PrivacyCheckResult(
+                allowed=False,
+                reason=f"Aplicativo na denylist do usuário: '{app}'",
+                is_sensitive=True,
+            )
+
+        # 3. Allowlist do usuário: consentimento explícito.
+        if app_low and app_low in cls._normalize_entries(allowlist):
+            return PrivacyCheckResult(allowed=True, reason="", is_sensitive=False)
+
+        # 4. Padrões de identidade e de título.
+        return cls.should_ingest_window(app, title)
 
     @classmethod
     def sanitize_text(cls, text: str) -> str:

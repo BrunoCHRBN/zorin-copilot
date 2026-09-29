@@ -34,9 +34,20 @@ from ..core.config import CopilotConfig
 from ..core.email import EmailManager
 from ..core.fence import NO_MONITOR_LABEL, ScreenFenceManager
 from ..core.memory import MemoryManager
+from ..core.privacy_gate import PrivacyGatekeeper
 from ..core.rag import LocalDocumentRAG
+from ..core.transcript import (
+    ROLE_ASSISTANT,
+    ROLE_USER,
+    entry_role,
+    entry_text,
+    extract_transcription_text,
+    make_entry,
+)
 from ..core.vision import ScreenCaptureService
 from ..core.web_search import DeepWebResearcher, WebSearchClient
+from ..core.audio.buffer import PcmRingBuffer
+from ..core.audio.capture import enrich_capture_cmd, get_processed_capture_source
 from ..shell.executor import ActionExecutor
 from ..shell.input_driver import VirtualInputDriver
 from ..shell.risk import RiskLevel, RiskPolicy, is_blocked_app
@@ -119,6 +130,115 @@ def build_realtime_video_msg(b64_image: str, mime_type: str = "image/jpeg") -> d
     }
 
 
+#: Instrução enviada ao modelo quando o watchdog de THINKING estoura (Entrega D / P1-8).
+#: Em vez de encerrar o turno, pedimos a continuação — o modelo pode ter perdido o fio.
+THINKING_CONTINUATION_NUDGE = (
+    "Você ainda está no mesmo turno. Continue a resposta de onde parou, "
+    "sem repetir o que já foi dito."
+)
+
+#: Caracteres de observação que "custam" um segundo a mais de paciência. Heurística de
+#: leitura/raciocínio, **não medida** contra a API — por isso é um argumento com default
+#: e os limites são configuráveis (`live_thinking_watchdog_*`), para calibrar com dados.
+_CHARS_PER_EXTRA_SECOND = 2000.0
+
+#: Quantas vezes o watchdog aceita esperar de novo quando o servidor diz IN_PROGRESS antes de
+#: tratar como silêncio de verdade. O sinal do servidor é confiável, mas não infinito: um
+#: `IN_PROGRESS` preso não pode prender o microfone do usuário para sempre.
+_MAX_IN_PROGRESS_WAITS = 3
+
+
+def thinking_watchdog_seconds(
+    total_output_chars: int,
+    n_tool_calls: int = 1,
+    base_sec: float = 12.0,
+    max_sec: float = 60.0,
+) -> float:
+    """Timeout do watchdog de THINKING, proporcional ao volume que o modelo vai digerir.
+
+    Entrega D / P1-8. O valor fixo de 12 s tratava igual uma observação de 40 caracteres e
+    um `git log` de 3.500. Aqui o teto (`max_sec`) protege o usuário e o piso (`base_sec`)
+    preserva o comportamento já validado para o turno comum — a função **nunca devolve menos
+    que a base**.
+
+    Cada chamada de ferramenta além da primeira soma 1 s: são mais resultados para o modelo
+    reconciliar na mesma resposta.
+    """
+    base = max(0.0, float(base_sec))
+    topo = max(base, float(max_sec))          # teto incoerente não pode virar piso
+    chars = max(0, int(total_output_chars))
+    chamadas = max(1, int(n_tool_calls))
+    extra = (chars / _CHARS_PER_EXTRA_SECOND) + (chamadas - 1)
+    return min(topo, base + extra)
+
+
+# --- FPS adaptativo do stream de vídeo (Entrega F / P1-6) ------------------------------
+#: Diferença perceptual a partir da qual a tela é considerada "em movimento". É o **mesmo**
+#: limiar que o keep-alive já usa em `_video_stream_worker` (`is_static`), de propósito: um
+#: só limiar, uma só noção de "parado" no módulo.
+MOVING_FRAME_THRESHOLD = 0.02
+
+#: Em movimento, o intervalo base é **dividido** por isto (acelera).
+VIDEO_MOVING_DELAY_FACTOR = 0.5
+#: Parado, o intervalo base é **multiplicado** por isto (desacelera).
+VIDEO_STATIC_DELAY_FACTOR = 2.0
+#: Piso do intervalo: 4 fps. Teto: 4 s por quadro (0,25 fps).
+VIDEO_MIN_DELAY = 0.25
+VIDEO_MAX_DELAY = 4.0
+
+#: Captura do stream contínuo: leve, para não competir com o áudio (P1-6).
+STREAM_CAPTURE_MAX_SIZE = 800
+STREAM_CAPTURE_QUALITY = 70
+#: Captura sob demanda: `max_size=0` desativa o downscale (ver `vision.capture`).
+FULL_CAPTURE_MAX_SIZE = 0
+FULL_CAPTURE_QUALITY = 92
+
+
+def adaptive_video_delay(
+    diff: float | None,
+    base_delay: float,
+    *,
+    moving_factor: float = VIDEO_MOVING_DELAY_FACTOR,
+    static_factor: float = VIDEO_STATIC_DELAY_FACTOR,
+    min_delay: float = VIDEO_MIN_DELAY,
+    max_delay: float = VIDEO_MAX_DELAY,
+) -> float:
+    """Intervalo até o próximo quadro, adaptado ao movimento da tela (Entrega F / P1-6).
+
+    O stream usava um intervalo **fixo** (`delay = max(0.4, 1.0 / fps)`, calculado uma vez em
+    `_video_stream_worker`): 1 quadro/s tanto numa tela parada quanto num vídeo em movimento.
+    Um ritmo só não serve a dois regimes opostos — a tela parada pagava captura + encode sem
+    necessidade, e a tela em movimento ficava picotada para o modelo.
+
+    Aqui o `diff` que o laço **já calculava** (e só usava para o keep-alive) passa a dosar o
+    ritmo: movimento encurta o intervalo, tela parada o alonga. O `base_delay` continua sendo
+    a referência — quem pede 1 fps mantém 1 fps de base, não um número mágico novo.
+
+    Args:
+        diff: diferença perceptual [0..1] entre o quadro atual e o último enviado. `None`
+            significa "não houve captura nova" (falha ou primeira volta): devolve o base.
+        base_delay: intervalo de referência, derivado do `fps` pedido.
+
+    Returns:
+        Intervalo em segundos, sempre dentro de `[min_delay, max_delay]`.
+    """
+    try:
+        base = float(base_delay)
+    except (TypeError, ValueError):
+        base = min_delay
+    base = min(max_delay, max(min_delay, base))
+
+    if diff is None:
+        return base
+    try:
+        d = float(diff)
+    except (TypeError, ValueError):
+        return base
+
+    factor = moving_factor if d >= MOVING_FRAME_THRESHOLD else static_factor
+    return min(max_delay, max(min_delay, base * factor))
+
+
 LIVE_TOOLS_DECLARATION = [
     {
         "functionDeclarations": [
@@ -164,7 +284,14 @@ LIVE_TOOLS_DECLARATION = [
                         "interactive": {
                             "type": "BOOLEAN",
                             "description": "Se true, solicita recorte; se false, tira da tela inteira imediatamente.",
-                        }
+                        },
+                        "full_resolution": {
+                            "type": "BOOLEAN",
+                            "description": (
+                                "Se true, captura em resolução nativa (sem redução) — use quando "
+                                "precisar ler texto pequeno. Mais pesado; prefira só sob demanda."
+                            ),
+                        },
                     },
                 },
             },
@@ -961,8 +1088,59 @@ LIVE_TOOLS_DECLARATION = [
                         },
                         "device_type": {
                             "type": "STRING",
-                            "enum": ["light", "climate", "switch", "all"],
-                            "description": "Filtro por tipo de dispositivo ('light', 'climate', 'switch' ou 'all').",
+                            "enum": ["light", "climate", "switch", "scene", "script", "automation", "all"],
+                            "description": "Filtro por tipo de dispositivo ('light', 'climate', 'switch', 'scene', 'script', 'automation' ou 'all').",
+                        },
+                    },
+                },
+            },
+            {
+                "name": "smart_home_automate",
+                "description": (
+                    "Aciona cenas, scripts e automações do Home Assistant — atalhos que mexem em vários "
+                    "aparelhos de uma vez (ex.: cena 'boa noite' apaga tudo). Use 'trigger_scene', 'run_script' "
+                    "ou 'trigger_automation' para acionar; 'list_scenes'/'list_scripts'/'list_automations' para "
+                    "descobrir os nomes antes de acionar."
+                ),
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "action": {
+                            "type": "STRING",
+                            "enum": [
+                                "trigger_scene",
+                                "run_script",
+                                "trigger_automation",
+                                "list_scenes",
+                                "list_scripts",
+                                "list_automations",
+                            ],
+                            "description": "Ação a executar sobre cenas/scripts/automações.",
+                        },
+                        "name": {
+                            "type": "STRING",
+                            "description": "Nome ou ID da cena/script/automação (ex.: 'boa noite', 'cinema'). Opcional se houver apenas uma.",
+                        },
+                    },
+                    "required": ["action"],
+                },
+            },
+            {
+                "name": "smart_home_events",
+                "description": (
+                    "Lista as mudanças de estado mais recentes da casa captadas em tempo real (quem ligou a "
+                    "luz, quando o ar mudou de modo). Use para responder 'o que acabou de acontecer?'."
+                ),
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "limit": {
+                            "type": "INTEGER",
+                            "description": "Quantidade de eventos a devolver (padrão 10).",
+                        },
+                        "domain": {
+                            "type": "STRING",
+                            "description": "Filtro opcional por domínio (ex.: 'light', 'switch', 'binary_sensor').",
                         },
                     },
                 },
@@ -1241,6 +1419,7 @@ class GeminiLiveClient:
         executor: ActionExecutor | None = None,
         memory: MemoryManager | None = None,
         mcp_manager: Any | None = None,
+        risk_policy: RiskPolicy | None = None,
     ):
         self.config = config or CopilotConfig.load()
         self.executor = executor or ActionExecutor()
@@ -1254,9 +1433,15 @@ class GeminiLiveClient:
         self.fence = ScreenFenceManager()
         self.input_driver = VirtualInputDriver(fence=self.fence)
         self.inspector = DesktopInspector()
-        self.risk_policy = RiskPolicy()
+        self.risk_policy = risk_policy or RiskPolicy()
         self._pending_actions: dict[str, dict[str, Any]] = {}
-        self._bypass_risk_gate = False
+        # Trava do dicionário acima: ele é lido/escrito das threads do executor de
+        # ferramentas. Criada aqui; os testes que montam o cliente via `__new__`
+        # caem em `_pending_guard`, que a cria sob demanda (nunca um no-op).
+        self._pending_lock = threading.Lock()
+        # DocumentTrustManager sob demanda, para higienizar observações devolvidas
+        # ao modelo. Ver `_get_trust_manager`/`_sanitize_tool_output`.
+        self._trust_manager: Any | None = None
         # Comando de texto capturado junto à wake word (Fase 4A), enviado à
         # sessão assim que o setup do Gemini Live completar.
         self._queued_initial_text: str = ""
@@ -1302,7 +1487,22 @@ class GeminiLiveClient:
         self._is_muted = False
         self._is_video_streaming = False
         self.video_mode: str = "active_window"  # "active_window" (padrão) ou "fullscreen"
+        # Identidade do cliente para a UI (Entrega C / P1-5). O cliente declara o que é
+        # e o que sabe fazer — a pílula lê isto em vez de adivinhar por `hasattr`, que é
+        # o que fazia os stubs de vídeo do modo local parecerem capacidades reais.
+        self.mode: str = "cloud"
+        self.supports_video: bool = True
         self.sensitive_keywords: set[str] = set(DEFAULT_SENSITIVE_KEYWORDS)
+        # Entrega E / P1-9: listas de identidade de app do usuário para o Privacy Shield.
+        # A allowlist é o consentimento explícito que corrige os falsos positivos de título;
+        # a denylist acrescenta janelas que o usuário considera sensíveis. A decisão em si
+        # vive em `PrivacyGatekeeper.evaluate_window` — aqui só guardamos a preferência.
+        self._privacy_allowlist: list[str] = list(
+            getattr(self.config, "privacy_shield_allowlist", None) or []
+        )
+        self._privacy_denylist: list[str] = list(
+            getattr(self.config, "privacy_shield_denylist", None) or []
+        )
         self._last_sent_frame_bytes: bytes | None = None
         self._unchanged_frames_count: int = 0
         self._is_privacy_shielded: bool = False
@@ -1314,10 +1514,21 @@ class GeminiLiveClient:
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._ws: Any = None
+        # WS3: task do resumo contínuo da sessão (nasce/morre com a conexão).
+        self._summary_task: asyncio.Task | None = None
 
         # Processos de áudio PipeWire
         self._record_proc: subprocess.Popen | None = None
         self._play_proc: subprocess.Popen | None = None
+
+        # WS2/Entrega B (P0-4): buffer de áudio na queda. A captura de microfone é
+        # desacoplada do WebSocket — uma bomba persistente (`_capture_pump`) enche o
+        # ring buffer e o laço de envio drena. Assim o áudio capturado durante a
+        # reconexão (backoff de 1.5–30 s) não é perdido.
+        self._pcm_buffer = PcmRingBuffer(
+            getattr(config, "live_reconnect_buffer_sec", 3.0)
+        )
+        self._capture_task: asyncio.Task | None = None
 
         # Pipeline desacoplado de reprodução de áudio com Jitter Buffer
         self._audio_play_queue: queue.Queue[bytes | None] = queue.Queue()
@@ -1332,7 +1543,9 @@ class GeminiLiveClient:
         # Rastreamento de ações e transcrições para persistência no chat da demanda
         self._session_start_time: float = 0.0
         self._executed_actions_log: list[dict[str, Any]] = []
-        self._transcripts_log: list[tuple[str, str]] = []
+        # Entrega G / P1-7: forma única `{"role","text"}` (antes era tupla), igual à do
+        # cliente local — os dois devolvem esta lista sob a mesma chave no resumo.
+        self._transcripts_log: list[dict[str, str]] = []
 
     def _set_state(self, state: LiveVoiceState, message: str = "") -> None:
         if getattr(self, "state", None) == state and getattr(self, "_last_state_msg", None) == message:
@@ -1384,7 +1597,8 @@ class GeminiLiveClient:
         self._transcripts_log.clear()
         # Fase 4B: descarta confirmações de risco pendentes da sessão anterior —
         # um confirmation_id nunca deve sobreviver ao fim da chamada.
-        self._pending_actions.clear()
+        with self._pending_guard():
+            self._pending_actions.clear()
 
         # Inicia thread consumidora dedicada do player de áudio (com jitter buffer)
         if hasattr(self, "_player_stop_event"):
@@ -1413,9 +1627,20 @@ class GeminiLiveClient:
         self.stop_video_stream()
         self._is_running = False
         self._stopped_by_user = True
+        # WS3: cancela a task de resumo contínuo remanescente (se houver) de
+        # imediato, evitando que ela fique dormindo até o próximo tick de
+        # intervalo após o encerramento. O cancelamento é thread-safe porque
+        # stop() roda fora do loop de eventos da sessão.
+        _sum_task = getattr(self, "_summary_task", None)
+        if _sum_task is not None and self._loop and self._loop.is_running():
+            try:
+                self._loop.call_soon_threadsafe(_sum_task.cancel)
+            except Exception:
+                pass
         self._terminate_audio_processes()
         # Fase 4B: nenhuma ação de risco pode ficar armada após o encerramento.
-        self._pending_actions.clear()
+        with self._pending_guard():
+            self._pending_actions.clear()
 
         ws = getattr(self, "_ws", None)
         if ws and self._loop and self._loop.is_running():
@@ -1448,6 +1673,84 @@ class GeminiLiveClient:
                 or duration >= 3
             ),
         }
+
+    # --- WS3: Resumo contínuo da sessão (rolling summary) -------------------
+
+    def _build_live_summary_text(self) -> str:
+        """Monta o resumo contínuo da sessão para injeção como contexto dinâmico.
+
+        O texto entra via realtimeInput (igual a send_context_update): ACRESCENTA
+        contexto sem exigir resposta imediata. Mantém o modelo aterrado em sessões
+        longas, compensando a janela curta de contexto da Live API e sobrevivendo
+        a reconexões (é reconstruído a partir dos logs da sessão a cada tick).
+
+        Retorna "" se não houver atividade relevante — nesse caso o loop de
+        resumo simplesmente pula o tick (evita poluir o contexto com resumo vazio).
+        """
+        if not self._transcripts_log and not self._executed_actions_log:
+            return ""
+
+        duration = int(time.time() - self._session_start_time) if self._session_start_time > 0 else 0
+        minutes, seconds = divmod(max(0, duration), 60)
+        stamp = f"{minutes}m{seconds:02d}s" if minutes else f"{seconds}s"
+
+        lines = [f"[Resumo contínuo da sessão — {stamp}]"]
+        if self._transcripts_log:
+            # Últimas 8 falas: reancoram o modelo sem estourar o contexto a cada
+            # tick (transcrições podem ser longas).
+            for entry in self._transcripts_log[-8:]:
+                # Entrega G / P1-7: o rótulo passa por `normalize_role`, então não
+                # depende mais do cliente que gravou (`agent` vs `assistant`). Antes,
+                # como a nuvem nunca gravava `user`, toda linha saía como `copilot:` —
+                # e o resumo injetado após uma reconexão perdia a metade do usuário.
+                tag = "você" if entry_role(entry) == ROLE_USER else "copilot"
+                t = entry_text(entry).strip().replace("\n", " ")
+                if len(t) > 180:
+                    t = t[:177] + "..."
+                lines.append(f"{tag}: {t}")
+        if self._executed_actions_log:
+            acts = []
+            for a in self._executed_actions_log[-6:]:
+                name = a.get("name") or a.get("tool") or "ação"
+                acts.append(str(name))
+            lines.append("Ações executadas: " + ", ".join(acts))
+        return "\n".join(lines)
+
+    async def _summary_loop(self) -> None:
+        """WS3: injeta periodicamente o resumo contínuo da sessão no contexto.
+
+        Roda como task do próprio loop de eventos da sessão: nasce junto com a
+        conexão (em _run_one_session) e é cancelada no encerramento ou na
+        reconexão — logo não vaza entre tentativas do wrapper _live_session.
+
+        O intervalo vem de `live_summary_interval_min` (0 desliga). O envio usa
+        `await self._ws.send(...)` direto no loop (sem run_coroutine_threadsafe)
+        porque esta corrotina JÁ roda no loop da sessão.
+        """
+        interval_min = float(getattr(self.config, "live_summary_interval_min", 4) or 4)
+        if interval_min <= 0:
+            logger.debug("Resumo contínuo desligado (live_summary_interval_min=%s).", interval_min)
+            return
+
+        logger.info("Resumo contínuo da sessão agendado a cada %.1f min.", interval_min)
+        try:
+            while self._is_running and self._ws is not None:
+                await asyncio.sleep(interval_min * 60)
+                if not self._is_running or self._ws is None:
+                    break
+                text = self._build_live_summary_text()
+                if not text:
+                    continue
+                try:
+                    await self._ws.send(json.dumps(build_realtime_text_msg(text)))
+                    logger.info("Resumo contínuo da sessão injetado no contexto (%.1f min).", interval_min)
+                except Exception as exc:  # pragma: no cover - depende de rede/servidor
+                    logger.warning("Falha ao injetar resumo contínuo: %s", exc)
+                    break
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # pragma: no cover
+            logger.warning("Loop de resumo contínuo encerrado prematuramente: %s", exc)
 
     def _terminate_audio_processes(self) -> None:
         """Fecha subprocessos de gravação e reprodução de áudio e desliga a thread do tocador."""
@@ -1688,52 +1991,76 @@ class GeminiLiveClient:
         Sai do loop apenas quando:
         - o usuário chama stop() (_is_running=False); ou
         - as 5 tentativas esgotam — nesse caso fica em ERROR.
+
+        WS2/Entrega B (P0-4): a captura de microfone é uma **bomba persistente**
+        (`_capture_pump`) que sobrevive às reconexões — o áudio do intervalo de
+        backoff fica no ring buffer e é drenado ao reconectar. Nasce/morre com a
+        sessão lógica, não com cada tentativa.
         """
         max_attempts = 5
         base_delay = 1.5
         max_delay = 30.0
 
+        self._pcm_buffer.clear()
+        self._capture_task = asyncio.create_task(self._capture_pump())
+
         attempt = 0
-        while self._is_running:
-            attempt += 1
-            # Suprime a transição para ERROR nos handlers internos durante
-            # uma tentativa de reconexão (o estado já é CONNECTING com a
-            # mensagem "Reconectando...").
-            self._reconnecting = attempt > 1
-            try:
-                await self._run_one_session()
-                return  # saída limpa: usuário parou ou servidor fechou com 1000
-            except _SessionDropped as drop:
-                if not self._is_running:
-                    return
-                logger.warning(
-                    "Sessão Live caiu (tentativa %d/%d): %s",
-                    attempt, max_attempts, drop,
-                )
-            finally:
-                self._reconnecting = False
+        try:
+            while self._is_running:
+                attempt += 1
+                # Suprime a transição para ERROR nos handlers internos durante
+                # uma tentativa de reconexão (o estado já é CONNECTING com a
+                # mensagem "Reconectando...").
+                self._reconnecting = attempt > 1
+                try:
+                    await self._run_one_session()
+                    return  # saída limpa: usuário parou ou servidor fechou com 1000
+                except _SessionDropped as drop:
+                    if not self._is_running:
+                        return
+                    logger.warning(
+                        "Sessão Live caiu (tentativa %d/%d): %s",
+                        attempt, max_attempts, drop,
+                    )
+                finally:
+                    self._reconnecting = False
 
-            if attempt >= max_attempts:
-                final_msg = (
-                    self._last_error
-                    or f"Conexão encerrada após {max_attempts} tentativas sem detalhe do servidor."
-                )
-                logger.error("Sessão Live esgotou tentativas: %s", final_msg)
-                self._set_state(LiveVoiceState.ERROR, final_msg)
-                if self.on_error:
-                    self.on_error(final_msg)
-                return
-
-            delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
-            self._set_state(
-                LiveVoiceState.CONNECTING,
-                f"Reconectando ao Gemini Live (tentativa {attempt + 1}/{max_attempts}) em {delay:.1f}s...",
-            )
-            # Permite cancelar a espera de backoff chamando stop()
-            for _ in range(int(delay * 10)):
-                if not self._is_running:
+                if attempt >= max_attempts:
+                    final_msg = (
+                        self._last_error
+                        or f"Conexão encerrada após {max_attempts} tentativas sem detalhe do servidor."
+                    )
+                    logger.error("Sessão Live esgotou tentativas: %s", final_msg)
+                    self._set_state(LiveVoiceState.ERROR, final_msg)
+                    if self.on_error:
+                        self.on_error(final_msg)
                     return
-                await asyncio.sleep(0.1)
+
+                delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
+                self._set_state(
+                    LiveVoiceState.CONNECTING,
+                    f"Reconectando ao Gemini Live (tentativa {attempt + 1}/{max_attempts}) em {delay:.1f}s...",
+                )
+                # Permite cancelar a espera de backoff chamando stop()
+                for _ in range(int(delay * 10)):
+                    if not self._is_running:
+                        return
+                    await asyncio.sleep(0.1)
+        finally:
+            # Encerra a bomba de captura e o gravador. Antes, cada tentativa criava
+            # um `pw-record` novo sobrescrevendo `_record_proc` sem encerrar o
+            # anterior — vazava um processo por reconexão.
+            task = self._capture_task
+            self._capture_task = None
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
+            self._close_record_proc()
 
     def _a11y_unavailable_msg(self, app_name: str | None = None) -> str:
         """Explica por que a árvore AT-SPI voltou vazia, orientando ações visuais de fallback."""
@@ -1859,6 +2186,8 @@ class GeminiLiveClient:
                     "Para lâmpadas (como Avant Neo ou luzes Tuya), você pode ligar/desligar ('turn_on'/'turn_off'/'toggle'), ajustar brilho de 1 a 100% ('brightness'), temperatura de cor em Kelvin ('color_temp'='2700' para branco quente/relaxante, '4000' para neutro, '6500' para branco frio/foco), ou cores RGB ('color'='azul', 'vermelho', etc.). Se o usuário não especificar a lâmpada (ex: 'acende a luz', 'apaga a lâmpada'), chame sem 'entity' que o sistema seleciona automaticamente a lâmpada configurada. "
                     "Para ar-condicionado, use 'smart_home_control' com device_type='climate', action='set_temperature' e temperature=22.0, ou hvac_mode='cool'/'heat'/'fan_only'. "
                     "Para saber se os aparelhos da casa estão ligados ou checar o estado, use 'smart_home_status'. "
+                    "Para cenas, scripts e automações (atalhos que mexem em vários aparelhos de uma vez, como 'boa noite' ou 'cinema'), use 'smart_home_automate' — acione com 'trigger_scene'/'run_script'/'trigger_automation' e, se não souber o nome, liste antes com 'list_scenes'/'list_scripts'/'list_automations'. "
+                    "Para saber o que mudou na casa há pouco (quem ligou a luz, quando o ar mudou de modo), use 'smart_home_events'. "
                     "- Ações de risco (enviar e-mail, sobrescrever arquivo, atalho destrutivo como Alt+F4, ou digitar em campo de senha) NÃO são executadas de imediato: você receberá um 'confirmation_id' e deve pedir confirmação verbal ao usuário; se aprovada, chame 'confirm_action(confirmation_id, approve=true)'. Se o usuário recusar, chame com approve=false."
                     f"\n\n{self._input_capabilities_prompt()}\n"
                     "\n\nENCERRAMENTO DA SESSÃO (autonomia):\n"
@@ -1914,11 +2243,25 @@ class GeminiLiveClient:
                 # Inicia tarefas concorrentes: Gravação do Mic e Leitura do Servidor
                 mic_task = asyncio.create_task(self._mic_recorder_loop(ws))
                 server_task = asyncio.create_task(self._server_receiver_loop(ws))
+                # WS3: resumo contínuo da sessão — nasce e morre com a conexão, então
+                # não acumula tasks dormentes entre reconexões do wrapper _live_session.
+                summary_task = asyncio.create_task(self._summary_loop())
+                self._summary_task = summary_task
 
-                # Aguarda até que uma das tarefas finalize ou o usuário chame stop()
-                done, pending = await asyncio.wait([mic_task, server_task], return_when=asyncio.FIRST_COMPLETED)
-                for task in pending:
-                    task.cancel()
+                # Aguarda até que uma das tarefas finalize ou o usuário chame stop().
+                # O finally cancela TODAS as tarefas (inclusive o resumo contínuo) mesmo
+                # na saída por exceção — sem isso, uma reconexão deixaria a task antiga
+                # viva e ela reenviaria o resumo com um ws já trocado.
+                done: set = set()
+                try:
+                    done, _pending = await asyncio.wait(
+                        [mic_task, server_task, summary_task],
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                finally:
+                    for _t in (mic_task, server_task, summary_task):
+                        if not _t.done():
+                            _t.cancel()
 
                 # Inspeciona tarefas finalizadas para capturar exceções não tratadas
                 for task in done:
@@ -1945,8 +2288,48 @@ class GeminiLiveClient:
                     self.on_error(str(exc))
             raise _SessionDropped(0, str(exc)) from exc
 
-    async def _mic_recorder_loop(self, ws: Any) -> None:
-        """Lê áudio em tempo real do microfone via pw-record e transmite para o Gemini."""
+    def _echo_isolation_blocks_send(self, rms: float) -> bool:
+        """WS2/B3: isolamento de eco/loopback do microfone para o envio ao servidor.
+
+        Enquanto o assistente fala ou processa, o áudio captado do microfone NÃO é
+        enviado ao servidor de voz — assim a voz do assistente saindo dos
+        alto-falantes (eco acústico da sala) não é transcrita de volta como se fosse
+        o usuário. O barge-in voluntário é preservado: se o usuário falar alto perto
+        do microfone (RMS >= limiar de interrupção), o envio é liberado.
+
+        É independente do ducking (baixamento RMS por estado em `_mic_recorder_loop`):
+        quando `live_mic_speaker_isolation` está ativo, este portão bloqueia o envio
+        mesmo se o ducking estiver desligado. `norm_level` continua sendo calculado e
+        repassado ao visualizador de onda (chamada a `on_audio_level`), conforme B3.
+
+        Retorna True quando o envio deve ser BLOQUEADO por isolamento de eco.
+        """
+        if not getattr(getattr(self, "config", None), "live_mic_speaker_isolation", True):
+            return False
+        is_assistant_active = (
+            self.state == LiveVoiceState.SPEAKING
+            or self.state in (LiveVoiceState.EXECUTING, LiveVoiceState.THINKING)
+            or (hasattr(self, "_audio_play_queue") and not self._audio_play_queue.empty())
+            or (time.monotonic() < getattr(self, "_echo_cooldown_until", 0.0))
+        )
+        if not is_assistant_active:
+            return False
+        interrupt_threshold = getattr(
+            getattr(self, "config", None), "live_voice_interrupt_threshold_rms", 2800.0
+        )
+        # Barge-in voluntário: voz alta do usuário perto do mic libera o envio.
+        if rms >= interrupt_threshold:
+            return False
+        return True
+
+    # ------------------------------------------------------------------
+    # Captura de microfone (bomba persistente + ring buffer — Entrega B / P0-4, WS2)
+    # ------------------------------------------------------------------
+    def _build_recorder_cmd(self) -> list[str] | None:
+        """Monta o comando do gravador (pw-record/arecord) com o source filtrado WS2.
+
+        Retorna ``None`` se não houver gravador de áudio no sistema.
+        """
         if shutil.which("pw-record"):
             cmd = [
                 "pw-record",
@@ -1961,26 +2344,100 @@ class GeminiLiveClient:
         elif shutil.which("arecord"):
             cmd = ["arecord", "-r", "16000", "-f", "S16_LE", "-c", "1", "-"]
         else:
-            logger.error("Nenhum gravador de áudio (pw-record ou arecord) disponível.")
-            return
+            return None
 
+        # WS2/B2: quando disponível, direciona a captura para um source PipeWire já
+        # filtrado (RNNoise NS + AGC) em vez do microfone cru. Sem PipeWire ou sem
+        # módulo de filtro, `get_processed_capture_source` retorna None e `enrich_capture_cmd`
+        # devolve o comando inalterado (microfone padrão). Best-effort, nunca levanta.
+        ns_enabled = getattr(getattr(self, "config", None), "live_mic_ns_enabled", True)
+        agc_enabled = getattr(getattr(self, "config", None), "live_mic_agc_enabled", True)
+        filtered_source = get_processed_capture_source(ns_enabled, agc_enabled)
+        if filtered_source:
+            cmd = enrich_capture_cmd(cmd, filtered_source)
+        return cmd
+
+    def _close_record_proc(self) -> None:
+        """Encerra o gravador corrente (se houver) e limpa a referência. Idempotente."""
+        proc = self._record_proc
+        self._record_proc = None
+        if proc is None:
+            return
         try:
-            self._record_proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-            )
-        except Exception as exc:
-            logger.error(f"Falha ao iniciar gravador de microfone: {exc}")
-            return
+            proc.terminate()
+            proc.wait(timeout=0.5)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
 
+    async def _capture_pump(self) -> None:
+        """Bomba de captura persistente: lê o microfone e enche o ring buffer.
+
+        Vive por toda a sessão lógica (atravessa as reconexões do WebSocket): quando o
+        `ws` cai, o áudio continua entrando no buffer em vez de sumir — é o que fecha a
+        lacuna de transcrição. Se o próprio gravador morre, reabre com um pequeno
+        backoff, encerrando sempre o processo anterior (sem vazar `pw-record`).
+        """
         chunk_size = 3200  # 100ms de áudio a 16kHz 16-bit (1600 amostras * 2 bytes)
         loop = asyncio.get_running_loop()
 
-        while self._is_running and self._record_proc and self._record_proc.poll() is None:
-            # Lê chunk do stdout sem bloquear o loop de eventos
-            pcm_bytes = await loop.run_in_executor(None, self._record_proc.stdout.read, chunk_size)
-            if not pcm_bytes:
+        while self._is_running:
+            cmd = self._build_recorder_cmd()
+            if cmd is None:
+                logger.error("Nenhum gravador de áudio (pw-record ou arecord) disponível.")
+                return
+            try:
+                self._record_proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                )
+            except Exception as exc:
+                logger.error(f"Falha ao iniciar gravador de microfone: {exc}")
+                if not await self._pump_sleep(1.5):
+                    return
+                continue
+
+            try:
+                while self._is_running and self._record_proc and self._record_proc.poll() is None:
+                    # Lê do stdout sem bloquear o loop de eventos.
+                    pcm_bytes = await loop.run_in_executor(
+                        None, self._record_proc.stdout.read, chunk_size
+                    )
+                    if not pcm_bytes:
+                        await asyncio.sleep(0.02)
+                        continue
+                    self._pcm_buffer.push(pcm_bytes)
+            finally:
+                self._close_record_proc()
+
+            if self._is_running:
+                logger.warning("Gravador de microfone caiu; reabrindo...")
+                if not await self._pump_sleep(1.5):
+                    return
+
+    async def _pump_sleep(self, delay: float) -> bool:
+        """Dorme em passos curtos; retorna False se `stop()` foi chamado."""
+        steps = max(1, int(delay / 0.1))
+        for _ in range(steps):
+            if not self._is_running:
+                return False
+            await asyncio.sleep(0.1)
+        return self._is_running
+
+    async def _mic_recorder_loop(self, ws: Any) -> None:
+        """Drena o ring buffer (alimentado pela bomba) e transmite ao Gemini.
+
+        WS2/Entrega B (P0-4): a captura é desacoplada do WebSocket. O áudio acumulado
+        durante uma queda (até `live_reconnect_buffer_sec`) é drenado aqui assim que a
+        sessão reconecta — é o *flush* que fecha a lacuna de transcrição. Depois segue
+        ao vivo, no ritmo da captura.
+        """
+        while self._is_running:
+            pcm_bytes = self._pcm_buffer.pop()
+            if pcm_bytes is None:
                 await asyncio.sleep(0.02)
                 continue
 
@@ -2022,6 +2479,12 @@ class GeminiLiveClient:
                 # 2. Detecta se o assistente está executando ferramentas ou formulando a resposta
                 is_assistant_processing = self.state in (LiveVoiceState.EXECUTING, LiveVoiceState.THINKING)
 
+                # WS2/B3: isolamento de eco — bloqueia o envio enquanto o assistente fala/
+                # processa (eco acústico dos alto-falantes), salvo barge-in voluntário.
+                # Atua independentemente do ducking e preserva o visualizador (norm_level).
+                if self._echo_isolation_blocks_send(rms):
+                    should_send = False
+
                 if ducking_enabled:
                     if is_assistant_speaking:
                         # Durante a fala do assistente, suprime o vazamento do alto-falante para evitar
@@ -2052,14 +2515,9 @@ class GeminiLiveClient:
                     except Exception as exc:
                         if self._is_running:
                             logger.warning(f"Erro ao enviar chunk de áudio: {exc}")
-                        break
-
-        if self._is_running and self._record_proc and self._record_proc.poll() is not None:
-            code = self._record_proc.poll()
-            if code != 0:
-                logger.error(f"Gravador de áudio encerrou inesperadamente com código {code}")
-                if not self._last_error:
-                    self._last_error = f"Microfone desconectado (código {code})"
+                        # ws morto: encerra o laço. O áudio remanescente fica no buffer
+                        # (a bomba continua enchendo) e será drenado na reconexão.
+                        return
 
     async def _server_receiver_loop(self, ws: Any) -> None:
         """Recebe pacotes de áudio, eventos de interrupção e chamadas de ferramentas do Gemini."""
@@ -2180,6 +2638,20 @@ class GeminiLiveClient:
                     self._set_state(LiveVoiceState.LISTENING, "Ouvindo você...")
                     continue
 
+                # Entrega G / P1-7: a fala do **usuário**. O Gemini Live a entrega em
+                # `inputTranscription` — campo que este cliente simplesmente não lia, o que
+                # deixava o transcrito da nuvem só com o lado do copiloto. Como o resumo
+                # contínuo existe para sobreviver a reconexões, a consequência era perder
+                # tudo o que o usuário disse quando a sessão caía.
+                #
+                # `outputTranscription` NÃO é lido de propósito: duplicaria o texto que
+                # `modelTurn.parts[].text` já entrega logo abaixo.
+                user_text = extract_transcription_text(sc.get("inputTranscription"))
+                if user_text:
+                    self._transcripts_log.append(make_entry(ROLE_USER, user_text))
+                    if self.on_transcript:
+                        self.on_transcript(ROLE_USER, user_text)
+
                 model_turn = sc.get("modelTurn", {})
                 parts = model_turn.get("parts", [])
 
@@ -2193,9 +2665,9 @@ class GeminiLiveClient:
 
                     # Transcrição textual (se enviada pelo modelo)
                     if "text" in p:
-                        self._transcripts_log.append(("assistant", p["text"]))
+                        self._transcripts_log.append(make_entry(ROLE_ASSISTANT, p["text"]))
                         if self.on_transcript:
-                            self.on_transcript("assistant", p["text"])
+                            self.on_transcript(ROLE_ASSISTANT, p["text"])
 
                 if sc.get("turnComplete"):
                     if hasattr(self, "_audio_play_queue") and self._audio_play_queue is not None:
@@ -2261,7 +2733,10 @@ class GeminiLiveClient:
                 "id": call_id,
                 "name": name,
                 "response": {
-                    "output": output,
+                    # O modelo recebe a observação higienizada (conteúdo externo
+                    # envolvido como não confiável). O log de auditoria e o callback
+                    # de UI, acima, ficam com o resultado cru.
+                    "output": self._sanitize_tool_output(name, output),
                 }
             })
 
@@ -2280,22 +2755,90 @@ class GeminiLiveClient:
         # cliques de mouse ou sons do sistema cancelem a fala da IA antes de começar
         self._echo_cooldown_until = max(getattr(self, "_echo_cooldown_until", 0.0), time.monotonic() + 1.2)
 
-        # Watchdog de resiliência: se o modelo não gerar fala ou responder silenciosamente,
-        # restaura para LISTENING após 7 segundos para não manter a interface presa em THINKING
-        async def _thinking_timeout_watchdog():
-            await asyncio.sleep(7.0)
-            if (
-                getattr(self, "_is_running", False)
-                and self.state == LiveVoiceState.THINKING
-                and (not hasattr(self, "_audio_play_queue") or self._audio_play_queue.empty())
-            ):
-                logger.debug("Watchdog: timeout em THINKING após toolResponse, restaurando LISTENING.")
-                self._set_state(LiveVoiceState.LISTENING, "Ouvindo você...")
-
+        # Watchdog de resiliência (Entrega D / P1-8). Antes: `asyncio.sleep(12.0)` fixo, que
+        # (a) contradizia o `interaction_status` do servidor, (b) liberava para LISTENING e
+        # assim **reabria o microfone** no meio da geração — o "corte de turno" — e (c) não
+        # considerava o volume devolvido pelas ferramentas. Agora o timeout é adaptativo e o
+        # watchdog pede continuação antes de liberar.
+        total_chars = sum(
+            len(str(r.get("response", {}).get("output") or "")) for r in responses
+        )
+        cfg = getattr(self, "config", None)
+        timeout = thinking_watchdog_seconds(
+            total_chars,
+            len(responses),
+            base_sec=float(getattr(cfg, "live_thinking_watchdog_base_sec", 12.0)),
+            max_sec=float(getattr(cfg, "live_thinking_watchdog_max_sec", 60.0)),
+        )
         try:
-            asyncio.create_task(_thinking_timeout_watchdog())
+            asyncio.create_task(self._thinking_watchdog(ws, timeout))
         except Exception:
             pass
+
+    async def _thinking_watchdog(self, ws: Any, timeout: float) -> None:
+        """Vigia o estado THINKING depois de devolver as observações (Entrega D / P1-8).
+
+        Regras, em ordem:
+
+        1. **O servidor manda.** Se `interaction_status == "IN_PROGRESS"`, o turno está vivo:
+           re-arma sem liberar o microfone. O watchdog antigo ignorava esse campo e desmentia
+           a única fonte que sabe se o turno continua.
+        2. **Estourou com continuação disponível:** pede a continuação ao modelo e permanece em
+           THINKING — o microfone segue fechado, então a resposta não é interrompida por ruído
+           da sala (é o portão de eco de `_echo_isolation_blocks_send`, que só bloqueia em
+           THINKING/EXECUTING/SPEAKING).
+        3. **Esgotou os pedidos:** aí sim libera para LISTENING, mas com rótulo **honesto**. Não
+           manter THINKING para sempre: prenderia o microfone e o usuário não teria como falar.
+        """
+        cfg = getattr(self, "config", None)
+        max_nudges = max(0, int(getattr(cfg, "live_thinking_max_nudges", 2)))
+        remaining = max_nudges
+        in_progress_waits = 0
+
+        while True:
+            await asyncio.sleep(max(0.05, float(timeout)))
+
+            if not getattr(self, "_is_running", False):
+                return
+            if self.state != LiveVoiceState.THINKING:
+                return  # o modelo falou ou o usuário interrompeu: o turno seguiu sem nós
+            if hasattr(self, "_audio_play_queue") and not self._audio_play_queue.empty():
+                return  # já há áudio na fila: a resposta chegou
+
+            # 1. O servidor diz que ainda está trabalhando: respeitar, sem liberar o mic.
+            #    Limitado: um IN_PROGRESS preso (servidor travado) não pode prender o usuário.
+            if (
+                getattr(self, "_interaction_status", "IDLE") == "IN_PROGRESS"
+                and in_progress_waits < _MAX_IN_PROGRESS_WAITS
+            ):
+                in_progress_waits += 1
+                logger.debug(
+                    "Watchdog: servidor em IN_PROGRESS (%d/%d); mantendo THINKING.",
+                    in_progress_waits, _MAX_IN_PROGRESS_WAITS,
+                )
+                continue
+
+            # 2. Pede continuação em vez de encerrar o turno.
+            if remaining > 0:
+                remaining -= 1
+                self._set_state(LiveVoiceState.THINKING, "Ainda processando…")
+                try:
+                    await ws.send(json.dumps(build_realtime_text_msg(THINKING_CONTINUATION_NUDGE)))
+                    logger.info("Watchdog: pedido de continuação enviado (%d restantes).", remaining)
+                except Exception as exc:
+                    # Não interrompe o laço: o nudge já foi descontado, então as próximas
+                    # voltas esgotam e caem na liberação honesta. Sair daqui deixaria o
+                    # estado preso em THINKING — com o microfone fechado.
+                    logger.warning("Watchdog: falha ao pedir continuação: %s", exc)
+                continue
+
+            # 3. Último recurso: libera o microfone, dizendo a verdade.
+            logger.debug("Watchdog: sem resposta após os pedidos de continuação; liberando o mic.")
+            self._set_state(
+                LiveVoiceState.LISTENING,
+                "Sem resposta do modelo — pode falar de novo.",
+            )
+            return
 
     def _wait_for_app_focus(self, app_name: str, timeout: float = 3.0) -> bool:
         """Espera a janela do app recém-aberto subir e receber foco (AT-SPI2).
@@ -2430,11 +2973,38 @@ class GeminiLiveClient:
         # Coordenadas já em pixels absolutos (> 1000)
         return int(x), int(y), "pixels absolutos"
 
-    def _dispatch_tool(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
-        """Despacha a execução concreta para os subsistemas do Zorin Copilot."""
+    @staticmethod
+    def _format_live_automation_list(items: list[dict[str, Any]], singular: str, plural: str) -> dict[str, Any]:
+        """Formata a listagem de cenas/scripts/automações para resposta falada."""
+        if not items:
+            return {
+                "success": True,
+                "count": 0,
+                "items": [],
+                "message": f"Nenhuma {singular} configurada no Home Assistant.",
+            }
+        names = [f"{it.get('friendly_name')}" for it in items]
+        return {
+            "success": True,
+            "count": len(items),
+            "items": items,
+            "message": f"{len(items)} {plural} disponíveis: " + ", ".join(names) + ".",
+        }
+
+    def _dispatch_tool(
+        self, name: str, args: dict[str, Any], *, approved: bool = False
+    ) -> dict[str, Any]:
+        """Despacha a execução concreta para os subsistemas do Zorin Copilot.
+
+        `approved=True` marca uma chamada **já autorizada pelo usuário** (o
+        re-despacho de `confirm_action`). O selo é por chamada, nunca estado do
+        cliente: antes era um booleano de instância (`_bypass_risk_gate`) e, como
+        as ferramentas rodam em threads do executor, uma aprovação em curso abria
+        o portão para qualquer chamada concorrente — fail-open silencioso.
+        """
         # Portão de risco: ações perigosas não executam imediatamente — exigem
         # confirmação explícita via tool `confirm_action` (voz/"sim" ou "não").
-        if not getattr(self, "_bypass_risk_gate", False) and getattr(self, "risk_policy", None) is not None:
+        if not approved and getattr(self, "risk_policy", None) is not None:
             level, desc = self.risk_policy.classify(name, args)
             if level == RiskLevel.CONFIRM:
                 return self._require_confirmation(name, args, desc)
@@ -2501,7 +3071,17 @@ class GeminiLiveClient:
 
             elif name == "capture_screen":
                 interactive = bool(args.get("interactive", False))
-                ok, img_bytes, mode = ScreenCaptureService.capture(interactive=interactive)
+                # Entrega F / P1-6: sob demanda, o modelo pode pedir resolução nativa para
+                # ler texto pequeno — o stream contínuo continua leve (800/70) para não
+                # competir com o áudio. Sem o parâmetro, o caminho é o de sempre.
+                if bool(args.get("full_resolution", False)):
+                    ok, img_bytes, mode = ScreenCaptureService.capture(
+                        interactive=interactive,
+                        max_size=FULL_CAPTURE_MAX_SIZE,
+                        quality=FULL_CAPTURE_QUALITY,
+                    )
+                else:
+                    ok, img_bytes, mode = ScreenCaptureService.capture(interactive=interactive)
                 if ok and img_bytes:
                     return {
                         "success": True,
@@ -2902,10 +3482,11 @@ class GeminiLiveClient:
                         GhostCursorOverlay.get_default().type_at(cx, cy, text=text, label=f"Digitando em '{element.name}'")
                     except Exception as exc:
                         logger.debug("Ghost cursor indisponível no live type_element: %s", exc)
-                # Campos de senha: nunca digitar sem confirmação explícita.
-                if element.role in ("password_text", "password") and not getattr(
-                    self, "_bypass_risk_gate", False
-                ):
+                # Campos de senha: nunca digitar sem confirmação explícita. O selo
+                # `approved` (re-despacho de uma confirmação já dada) dispensa o
+                # segundo portão — senão o usuário confirmaria duas vezes a mesma
+                # digitação.
+                if element.role in ("password_text", "password") and not approved:
                     return self._require_confirmation(
                         name, args, "digitação em campo de senha"
                     )
@@ -2936,7 +3517,8 @@ class GeminiLiveClient:
                 cid = args.get("confirmation_id", "")
                 approve = bool(args.get("approve", False))
                 self._sweep_expired_pending()
-                pending = self._pending_actions.pop(cid, None)
+                with self._pending_guard():
+                    pending = self._pending_actions.pop(cid, None)
                 if pending is None:
                     return {
                         "success": False,
@@ -2947,12 +3529,13 @@ class GeminiLiveClient:
                     }
                 if not approve:
                     return {"success": True, "message": "Ação cancelada pelo usuário."}
-                # Reexecuta a ação original ignorando o portão de risco.
-                self._bypass_risk_gate = True
-                try:
-                    return self._dispatch_tool(pending["name"], dict(pending["args"]))
-                finally:
-                    self._bypass_risk_gate = False
+                # Reexecuta a ação original como já aprovada. O selo vai por
+                # chamada (`approved=True`), não por estado do cliente: assim a
+                # aprovação vale só para ESTA ação e não vaza para uma chamada
+                # concorrente.
+                return self._dispatch_tool(
+                    pending["name"], dict(pending["args"]), approved=True
+                )
 
             elif name == "contact_lookup":
                 q = args.get("query", "").strip()
@@ -2984,8 +3567,9 @@ class GeminiLiveClient:
                 if not fact:
                     return {"success": False, "message": "Nenhum fato informado para memorizar."}
                 category = args.get("category", "").strip() or "preferencia"
-                # Chave determinística a partir do início do fato (atualiza se repetido).
-                key = " ".join(fact.lower().split())[:48]
+                # Chave canônica derivada do conteúdo — mesma regra do chat e das
+                # ferramentas, para o mesmo fato nunca virar duas linhas.
+                key = self.memory.fact_key(fact)
                 self.memory.save_fact(key, fact, category=category, source="voz ao vivo")
                 # Fase 4C: injeta o fato no contexto IMEDIATAMENTE — o
                 # systemInstruction é estático, então sem isso o modelo só
@@ -3005,23 +3589,19 @@ class GeminiLiveClient:
                 return {"success": ok, "message": msg, "details": data}
 
             elif name == "calendar_event":
-                act = args.get("action", "create")
-                if act == "create":
-                    t = args.get("title", "")
-                    dt_str = args.get("datetime_str", "amanhã às 10h")
-                    dur = int(args.get("duration_minutes", 60))
-                    desc = args.get("description", "")
-                    loc = args.get("location", "")
-                    ok, msg, data = self.cal_mgr.create_event(t, dt_str, duration_minutes=dur, description=desc, location=loc)
-                    return {"success": ok, "message": msg, "event": data}
-                elif act == "list":
-                    day = args.get("datetime_str", "today")
-                    events = self.cal_mgr.list_events(day)
-                    return {"success": True, "events": events, "count": len(events)}
-                elif act == "delete":
-                    eid = args.get("event_id", "")
-                    ok = self.cal_mgr.delete_event(eid)
-                    return {"success": ok, "message": f"Compromisso {eid} removido." if ok else "Evento não encontrado."}
+                # Delega ao registro de ferramentas: ele é a **fonte única** do
+                # roteamento Google↔local (ver `ToolRegistry._tool_calendar_event`).
+                # Duplicar aqui significaria manter duas regras de "qual agenda"
+                # em sincronia — e elas divergiriam em silêncio.
+                result = self.tool_registry.call("calendar_event", args)
+                payload: dict[str, Any] = {
+                    "success": bool(result.get("ok")),
+                    "message": result.get("message") or result.get("error", ""),
+                }
+                for key in ("event", "events", "count", "busy", "source"):
+                    if key in result:
+                        payload[key] = result[key]
+                return payload
 
             elif name == "browser_search":
                 q = args.get("query", "").strip()
@@ -3142,6 +3722,58 @@ class GeminiLiveClient:
                 dev_type = args.get("device_type")
                 domain = None if dev_type in (None, "all", "") else dev_type
                 return ha.get_status(entity_or_query=query, domain=domain)
+
+            elif name == "smart_home_automate":
+                from ..core.home_assistant import HomeAssistantManager
+                ha = HomeAssistantManager.get_default()
+                bloqueio = ha.unavailable()
+                if bloqueio:
+                    return bloqueio
+                action = str(args.get("action") or "").strip().lower()
+                entity_name = str(args.get("name") or "").strip()
+                if action == "list_scenes":
+                    items = ha.list_scenes()
+                    return self._format_live_automation_list(items, "cena", "cenas")
+                if action == "list_scripts":
+                    items = ha.list_scripts()
+                    return self._format_live_automation_list(items, "script", "scripts")
+                if action == "list_automations":
+                    items = ha.list_automations()
+                    return self._format_live_automation_list(items, "automação", "automações")
+                if action == "trigger_scene":
+                    return ha.trigger_scene(scene=entity_name)
+                if action == "run_script":
+                    return ha.run_script(script=entity_name)
+                if action == "trigger_automation":
+                    return ha.trigger_automation(automation=entity_name)
+                return {"success": False, "message": f"Ação '{action}' inválida para smart_home_automate."}
+
+            elif name == "smart_home_events":
+                from ..core.home_assistant import HomeAssistantManager
+                ha = HomeAssistantManager.get_default()
+                bloqueio = ha.unavailable()
+                if bloqueio:
+                    return bloqueio
+                limit = int(args.get("limit") or 10)
+                domain = str(args.get("domain") or "").strip() or None
+                events = ha.recent_events(limit=limit)
+                if domain:
+                    events = [e for e in events if e.get("domain") == domain]
+                if not events:
+                    status = ha.realtime_status()
+                    msg = (
+                        "O canal de eventos em tempo real não está ativo."
+                        if not status.get("running")
+                        else "Nenhuma mudança de estado registrada ainda."
+                    )
+                    return {"success": True, "count": 0, "events": [], "message": msg}
+                lines = [f"{e.get('friendly_name')}: {e.get('old_state')} → {e.get('state')}" for e in events]
+                return {
+                    "success": True,
+                    "count": len(events),
+                    "events": events,
+                    "message": "Últimas mudanças de estado:\n• " + "\n• ".join(lines),
+                }
 
             elif name == "search_code":
                 from ..core.system_inspect import CodeSearchEngine
@@ -3284,31 +3916,99 @@ class GeminiLiveClient:
     # aguardando decisão do usuário antes de expirar automaticamente.
     PENDING_CONFIRMATION_TTL_SEC = 120
 
+    def _pending_guard(self) -> threading.Lock:
+        """Trava do dicionário de confirmações pendentes, criada sob demanda.
+
+        Os testes montam o cliente via ``__new__`` (sem ``__init__``), então a
+        trava nasce no primeiro uso. É sempre uma trava real — nunca um no-op —
+        para que o estado compartilhado entre as threads do executor não corra.
+        """
+        lock = self.__dict__.get("_pending_lock")
+        if lock is None:
+            lock = threading.Lock()
+            self.__dict__["_pending_lock"] = lock
+        return lock
+
     def _store_pending(self, name: str, args: dict[str, Any]) -> str:
         """Armazena uma ação aguardando confirmação e devolve seu id."""
         import uuid
 
         self._sweep_expired_pending()
         cid = uuid.uuid4().hex[:8]
-        self._pending_actions[cid] = {
-            "name": name,
-            "args": dict(args),
-            "created_at": time.time(),
-        }
+        with self._pending_guard():
+            self._pending_actions[cid] = {
+                "name": name,
+                "args": dict(args),
+                "created_at": time.time(),
+            }
         return cid
 
     def _sweep_expired_pending(self) -> int:
         """Remove confirmações pendentes mais antigas que o TTL. Retorna quantas expiraram."""
         now = time.time()
-        expired = [
-            cid
-            for cid, p in self._pending_actions.items()
-            if now - p.get("created_at", now) > self.PENDING_CONFIRMATION_TTL_SEC
-        ]
+        with self._pending_guard():
+            expired = [
+                cid
+                for cid, p in self._pending_actions.items()
+                if now - p.get("created_at", now) > self.PENDING_CONFIRMATION_TTL_SEC
+            ]
+            for cid in expired:
+                self._pending_actions.pop(cid, None)
         for cid in expired:
-            self._pending_actions.pop(cid, None)
             logger.info("Confirmação de risco %s expirou (TTL=%ds) e foi descartada.", cid, self.PENDING_CONFIRMATION_TTL_SEC)
         return len(expired)
+
+    def _get_trust_manager(self) -> Any | None:
+        """Devolve o ``DocumentTrustManager`` para higienizar observações, criando um por padrão.
+
+        Mesmo contrato de ``ai/agent_router.LLMPlanner._trust_manager``: cria sob
+        demanda e degrada para ``None`` (sem envoltório) se o ambiente não permitir,
+        em vez de derrubar a conversa ao vivo.
+        """
+        if getattr(self, "_trust_manager", None) is not None:
+            return self._trust_manager
+        try:
+            from ..core.trust import DocumentTrustManager
+
+            self._trust_manager = DocumentTrustManager(config=self.config)
+        except Exception as exc:  # pragma: no cover - depende de ambiente
+            logger.debug("TrustManager indisponível no Live: %s", exc)
+            self._trust_manager = None
+        return self._trust_manager
+
+    @staticmethod
+    def _sanitize_observation_value(tm: Any, tool: str, value: Any) -> Any:
+        """Aplica ``sanitize_tool_observation`` a toda string de um resultado de ferramenta.
+
+        Percorre dicts/listas para alcançar o conteúdo aninhado (ex.: ``content`` de
+        ``read_file``, ``items`` de uma busca) sem tocar em campos não-textuais.
+        Strings curtas de status passam intactas — quem decide envolver é o
+        ``DocumentTrustManager``.
+        """
+        if isinstance(value, str):
+            return tm.sanitize_tool_observation(tool, value)
+        if isinstance(value, dict):
+            return {
+                k: GeminiLiveClient._sanitize_observation_value(tm, tool, v)
+                for k, v in value.items()
+            }
+        if isinstance(value, list):
+            return [GeminiLiveClient._sanitize_observation_value(tm, tool, v) for v in value]
+        return value
+
+    def _sanitize_tool_output(self, name: str, output: Any) -> Any:
+        """Higieniza o resultado de uma ferramenta antes de devolvê-lo ao modelo.
+
+        Fecha a lacuna em que o Live reinjetava a observação crua (arquivo, página,
+        tela, saída de comando) no modelo: o loop de agente já envolve esse conteúdo
+        como não confiável (``agent_router.build_planner_prompt``), o Live não. Só o
+        payload enviado ao modelo é higienizado; o log de auditoria e o callback de
+        UI seguem com o resultado cru.
+        """
+        tm = self._get_trust_manager()
+        if tm is None:
+            return output
+        return self._sanitize_observation_value(tm, name, output)
 
     def _require_confirmation(self, name: str, args: dict[str, Any], desc: str) -> dict[str, Any]:
         """Bloqueia a execução e devolve um id de confirmação para o modelo solicitar ao usuário."""
@@ -3359,10 +4059,18 @@ class GeminiLiveClient:
             clean_params = sanitize_gemini_schema(raw_params)
             if clean_params.get("type") != "OBJECT":
                 clean_params = {"type": "OBJECT", "properties": {}, "required": []}
+            # `behavior: NON_BLOCKING` é OBRIGATÓRIO no Gemini 3.8 Live Extended
+            # Thinking: ferramentas declaradas como BLOCKING são rejeitadas pela
+            # API (o freeze da sessão contradiz o design "pensar enquanto fala").
+            # No 3.8 Live comum o default já é NON_BLOCKING, então declarar
+            # explicitamente aqui mantém os dois modelos corretos e garante que
+            # o modelo Extended Thinking efetivamente *invoca* as ferramentas em
+            # vez de apenas narrar a impossibilidade da ação.
             sanitized_decls.append({
                 "name": d_name,
                 "description": d_desc,
                 "parameters": clean_params,
+                "behavior": "NON_BLOCKING",
             })
 
         return [{"functionDeclarations": sanitized_decls}]
@@ -3388,9 +4096,19 @@ class GeminiLiveClient:
                 }
             },
         }
+        # Gemini 3.8 Live (não-Extended) REJEITA `thinkingConfig` no setup —
+        # a doc de migração do Gemini 3.1 → 3.8 é categórica. A família 3.x
+        # também abandonou o campo `thinkingBudget` (tokens) usado em 2.5:
+        # o 3.8 Live Extended Thinking exige `thinkingLevel` (string) com
+        # um dos valores LOW / MEDIUM / HIGH (MINIMAL não é suportado e
+        # devolve erro). Sem isso a BidiGenerateContent fecha o WebSocket
+        # com código 1007 ("Thinking level must be specified for this
+        # model!"). "HIGH" é o padrão aqui porque o modelo foi escolhido
+        # justamente para raciocínio profundo — saída maior, cobrada como
+        # tokens de output.
         if "extended-thinking" in model_name:
             generation_config["thinkingConfig"] = {
-                "thinkingBudget": 2048,
+                "thinkingLevel": "HIGH",
             }
 
         return {
@@ -3623,23 +4341,48 @@ class GeminiLiveClient:
         else:
             return self.start_video_stream(fps=fps)
 
+    def _window_is_sensitive(self, app_name: str, window_title: str) -> bool:
+        """Decisão única de privacidade para a janela ativa (Entrega E / P1-9).
+
+        Substitui o `any(kw in f"{app} {title}".lower() for kw in self.sensitive_keywords)`
+        que existia aqui — substring crua, sem fronteira de palavra, que ocultava a tela em
+        janelas comuns ("Hobby"→`bb`, "Printer"→`inter`, "0xc6f3"→`c6`; medido).
+
+        Delega para `PrivacyGatekeeper.evaluate_window`, que é a **mesma** decisão que já
+        protege a ingestão da RNN: identidade de cofre é incondicional, a denylist vence a
+        allowlist, e a allowlist do usuário libera o resto. Ter um só matcher evita o que
+        havia antes — duas políticas de privacidade divergentes no produto, sendo a do
+        vazamento mais grave (pixels da tela) a mais fraca.
+        """
+        verdict = PrivacyGatekeeper.evaluate_window(
+            app_name,
+            window_title,
+            allowlist=getattr(self, "_privacy_allowlist", None),
+            denylist=getattr(self, "_privacy_denylist", None),
+        )
+        return verdict.is_sensitive
+
     def _video_stream_worker(self, fps: float = 1.0) -> None:
         """Loop em background com Frame Diffing adaptativo, Crop na janela ativa e Privacy Shield."""
-        delay = max(0.4, 1.0 / max(0.2, fps))
+        base_delay = max(0.4, 1.0 / max(0.2, fps))
         self._last_sent_frame_bytes = None
         self._unchanged_frames_count = 0
         self._is_privacy_shielded = False
         self._last_focused_window_title = ""
 
         while self._is_video_streaming and self._is_running:
+            # Entrega F / P1-6: o intervalo passa a ser por volta. Sem captura nova (sem
+            # WebSocket, ou exceção no pipeline) mantém-se a taxa pedida.
+            frame_delay = base_delay
             if self._ws and self._loop and self._loop.is_running():
                 try:
                     # 1. Identifica janela ativa e seus limites na tela
                     app_name, win_title, rect = self.inspector.get_active_window_info()
-                    title_low = f"{app_name} {win_title}".lower()
 
-                    # 2. Avaliação de Privacidade (Privacy Shield)
-                    is_sensitive = any(kw in title_low for kw in self.sensitive_keywords)
+                    # 2. Avaliação de Privacidade (Privacy Shield) — Entrega E / P1-9.
+                    #    Uma só decisão (`PrivacyGatekeeper`), ancorada por fronteira de
+                    #    palavra e por identidade de app, com allowlist/denylist do usuário.
+                    is_sensitive = self._window_is_sensitive(app_name, win_title)
 
                     if is_sensitive:
                         if not self._is_privacy_shielded:
@@ -3673,7 +4416,7 @@ class GeminiLiveClient:
                                 except Exception:
                                     pass
 
-                        time.sleep(delay * 1.5)
+                        time.sleep(base_delay * 1.5)
                         continue
 
                     # 3. Restaura visão se usuário retornou para janela não-sensível
@@ -3703,7 +4446,10 @@ class GeminiLiveClient:
                     self._last_streamed_crop_rect = crop_rect
                     self._last_streamed_window_info = (app_name, win_title)
                     ok, img_bytes, _ = ScreenCaptureService.capture(
-                        interactive=False, max_size=800, quality=70, crop_rect=crop_rect
+                        interactive=False,
+                        max_size=STREAM_CAPTURE_MAX_SIZE,
+                        quality=STREAM_CAPTURE_QUALITY,
+                        crop_rect=crop_rect,
                     )
 
                     if ok and img_bytes and self._is_video_streaming and self._is_running:
@@ -3721,6 +4467,11 @@ class GeminiLiveClient:
                         diff = ScreenCaptureService.compute_frame_diff(
                             img_bytes, self._last_sent_frame_bytes
                         )
+
+                        # Entrega F / P1-6: o `diff` deixa de ser só o gatilho do keep-alive e
+                        # passa a **dosar o ritmo** — rápido quando a tela muda, lento quando
+                        # está parada. Antes o intervalo era fixo em `base_delay`.
+                        frame_delay = adaptive_video_delay(diff, base_delay)
 
                         # Se a diferença for insignificante (< 2%) e ainda não expirou o keep-alive (8 quadros)
                         is_static = (diff < 0.02) and (self._last_sent_frame_bytes is not None)
@@ -3747,7 +4498,7 @@ class GeminiLiveClient:
                 except Exception as exc:
                     logger.debug(f"Erro no pipeline de streaming de vídeo: {exc}")
 
-            time.sleep(delay)
+            time.sleep(frame_delay)
 
         self._is_video_streaming = False
         if self.on_video_state_change:

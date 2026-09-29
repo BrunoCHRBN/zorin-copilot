@@ -1,13 +1,17 @@
 # Decisão de design: Pipeline de voz 100% local, contínuo e soberano (offline) utilizando
-# faster-whisper (STT na CPU via INT8) e Piper TTS (voz neural brasileira masculina pt_BR-faber-medium
-# em CPU via AVX2), consumindo 0 MB de VRAM da GPU para preservar a AMD RX 7600 exclusivamente
-# para o LLM local (Qwen 2.5 7B / MiniCPM-V) e o compositor gráfico GNOME Wayland.
+# faster-whisper (STT na CPU via INT8) e Piper TTS (voz neural brasileira em CPU via AVX2),
+# consumindo 0 MB de VRAM da GPU para preservar a AMD RX 7600 exclusivamente para o LLM
+# local (Qwen 2.5 7B / MiniCPM-V) e o compositor gráfico GNOME Wayland.
+#
+# A voz **não** é fixa: a chave vem de `piper_voice_model` e o caminho e a URL são
+# derivados dela por `core/identity.voice_urls()`. O padrão é `pt_BR-faber-medium`.
 
 """Módulo de processamento de voz local contínua (Whisper STT + Piper TTS) do Zorin Copilot."""
 
 from __future__ import annotations
 
 import collections
+import importlib.util
 import io
 import json
 import logging
@@ -28,7 +32,10 @@ try:
 except ImportError:
     np = None
 
+from ..core.audio.capture import enrich_capture_cmd, get_processed_capture_source
 from ..core.config import CopilotConfig
+from ..core.identity import DEFAULT_LOCAL_VOICE, voice_urls
+from ..core.transcript import ROLE_ASSISTANT, ROLE_USER, make_entry
 from .actions import ActionPlan, ActionType, DesktopAction
 from .engine import IntentEngine
 from .live import LiveVoiceState
@@ -40,10 +47,15 @@ MODELS_BASE_DIR = Path(os.path.expanduser("~/.local/share/zorin-copilot/models")
 PIPER_MODELS_DIR = MODELS_BASE_DIR / "piper"
 WHISPER_MODELS_DIR = MODELS_BASE_DIR / "whisper"
 
-# URLs oficiais para download automático do modelo Piper pt_BR-faber-medium
-PIPER_VOICE_NAME = "pt_BR-faber-medium"
-PIPER_MODEL_URL = f"https://huggingface.co/rhasspy/piper-voices/resolve/main/pt/pt_BR/faber/medium/{PIPER_VOICE_NAME}.onnx"
-PIPER_CONFIG_URL = f"https://huggingface.co/rhasspy/piper-voices/resolve/main/pt/pt_BR/faber/medium/{PIPER_VOICE_NAME}.onnx.json"
+# Voz padrão do Piper. O **nome** é a única fonte do caminho e da URL: a derivação
+# mora em `core/identity.voice_urls()`.
+#
+# Antes havia aqui duas constantes (`PIPER_MODEL_URL` / `PIPER_CONFIG_URL`) com a URL
+# do **faber** cravada, enquanto o caminho do arquivo saía de `voice_name`. Era isso
+# que fazia pedir `pt_BR-cadu-medium` baixar o faber, salvar com o nome do cadu e
+# registrar "carregado com sucesso: pt_BR-cadu-medium" — o log confirmando a voz
+# errada. Caminho e URL agora saem do mesmo lugar, então não há como divergirem.
+PIPER_VOICE_NAME = DEFAULT_LOCAL_VOICE
 
 
 def clean_text_for_speech(text: str) -> str:
@@ -199,6 +211,21 @@ def build_spoken_response(
     return result
 
 
+def piper_available() -> bool:
+    """Diz se o motor de voz local (Piper) pode ser carregado.
+
+    Checagem **barata**: pergunta pelo módulo, sem carregar o modelo ONNX (que é
+    pesado e por isso é lazy no `speak()`). Existe para que a falta do motor seja
+    **dita no arranque** em vez de se manifestar como silêncio a cada anúncio —
+    falha silenciosa é o pior defeito desta família de recursos.
+
+    O extra `voice` do `pyproject.toml` é opcional (piper-tts e faster-whisper
+    puxam nativos pesados). Sem ele a voz local fica indisponível e o resto do
+    app continua funcionando — o que é aceitável, desde que seja visível.
+    """
+    return importlib.util.find_spec("piper") is not None
+
+
 class LocalVoiceSynthesizer:
     """Sintetizador neural de voz offline baseado no Piper TTS rodando na CPU via AVX2."""
 
@@ -213,22 +240,46 @@ class LocalVoiceSynthesizer:
         self._stop_event = threading.Event()
 
     def ensure_model_available(self) -> bool:
-        """Verifica se os arquivos do modelo estão disponíveis ou faz o download."""
+        """Verifica se os arquivos do modelo estão disponíveis ou faz o download.
+
+        **A URL é derivada do nome da voz** (`core/identity.voice_urls`), e é essa
+        derivação que impede o defeito antigo: baixar o modelo de *outra* voz para
+        dentro do arquivo com o nome da voz pedida. Uma voz que não existe agora dá
+        **404 e uma linha de erro nomeando a URL** — falha visível — em vez de outra
+        voz em silêncio.
+        """
         if self.model_path.exists() and self.config_path.exists():
             return True
+
+        urls = voice_urls(self.voice_name)
+        if urls is None:
+            # Recusar é a resposta certa: baixar qualquer coisa aqui seria entregar
+            # uma voz diferente da pedida, que é o defeito que este código teve.
+            logger.error(
+                "Voz Piper '%s' não tem o formato '{locale}-{voz}-{qualidade}' "
+                "(ex.: pt_BR-cadu-medium). Não vou baixar nada.",
+                self.voice_name,
+            )
+            return False
+        model_url, config_url = urls
 
         PIPER_MODELS_DIR.mkdir(parents=True, exist_ok=True)
         try:
             import urllib.request
             logger.info(f"Baixando modelo de voz Piper '{self.voice_name}'...")
             if not self.model_path.exists():
-                urllib.request.urlretrieve(PIPER_MODEL_URL, str(self.model_path))
+                urllib.request.urlretrieve(model_url, str(self.model_path))
             if not self.config_path.exists():
-                urllib.request.urlretrieve(PIPER_CONFIG_URL, str(self.config_path))
+                urllib.request.urlretrieve(config_url, str(self.config_path))
             logger.info("Modelo Piper baixado com sucesso.")
             return True
         except Exception as exc:
-            logger.error(f"Falha ao baixar modelo de voz Piper: {exc}")
+            logger.error(
+                "Falha ao baixar o modelo de voz Piper '%s' de %s: %s",
+                self.voice_name,
+                model_url,
+                exc,
+            )
             return False
 
     def load(self) -> bool:
@@ -526,6 +577,13 @@ class LocalLiveVoiceClient:
         self.fence = None
         self.input_driver = None
 
+        # Identidade do cliente para a UI (Entrega C / P1-5). Este modo é 100% offline:
+        # não há captura de tela, então a pílula precisa saber disso para **rotular** os
+        # recursos de tela como indisponíveis, em vez de mostrar controles mortos.
+        # Os stubs de `:1090-1101` continuam existindo como contrato de compatibilidade.
+        self.mode: str = "local"
+        self.supports_video: bool = False
+
         # Callbacks registrados pela interface (LiveVoiceWidget)
         self.on_state_change: Optional[Callable[[LiveVoiceState, str], None]] = None
         self.on_audio_level: Optional[Callable[[float], None]] = None
@@ -538,6 +596,14 @@ class LocalLiveVoiceClient:
         self.on_video_frame_preview: Optional[Callable[[bytes], None]] = None
         self.on_privacy_state_change: Optional[Callable[[bool, str], None]] = None
         self.on_window_focus_change: Optional[Callable[[str, str], None]] = None
+
+        # Gancho de UI injetado pela janela, com o **mesmo contrato** do caminho
+        # Gemini Live (`(problema, grafo, foco) -> dict`). O caminho local não tem
+        # `ToolRegistry` (só `ActionPlan`/`ActionType`), então o comando de voz do
+        # Quadro Negro não caberia lá — ele entra por este gancho, disparado pelo
+        # detector puro `core/study_intent`. Sem gancho, o comando é ignorado e a
+        # fala segue o fluxo normal do IntentEngine.
+        self.board_opener: Optional[Callable[[str, Optional[Any], str], dict]] = None
 
     def _set_state(self, state: LiveVoiceState, message: str = "") -> None:
         self.state = state
@@ -576,18 +642,9 @@ class LocalLiveVoiceClient:
         """Interrompe e encerra a sessão de voz."""
         self._is_running = False
         self.synthesizer.interrupt()
-
-        if self._record_proc:
-            try:
-                self._record_proc.terminate()
-                self._record_proc.wait(timeout=0.3)
-            except Exception:
-                try:
-                    self._record_proc.kill()
-                except Exception:
-                    pass
-            self._record_proc = None
-
+        # Encerra o gravador corrente; o laço de reconexão de `_mic_loop` vê
+        # `_is_running == False` e sai sem tentar reabrir (inclusive durante o backoff).
+        self._close_recorder()
         self._set_state(LiveVoiceState.DISCONNECTED, "Chamada de voz encerrada.")
 
     def is_active(self) -> bool:
@@ -616,13 +673,71 @@ class LocalLiveVoiceClient:
         if self.state == LiveVoiceState.SPEAKING:
             self._set_state(LiveVoiceState.LISTENING, "Ouvindo...")
 
-    def _mic_loop(self) -> None:
-        """Lê áudio contínuo do microfone via PipeWire (pw-record) com VAD e detecção de fim de fala."""
+    # ------------------------------------------------------------------
+    # Captura de microfone (com reconexão automática — Entrega B / P0-4)
+    # ------------------------------------------------------------------
+    def _build_recorder_cmd(self) -> Optional[list[str]]:
+        """Monta o comando do gravador (pw-record/arecord) com o source filtrado WS2.
+
+        Retorna ``None`` se não houver gravador de áudio no sistema.
+        """
         if shutil.which("pw-record"):
             cmd = ["pw-record", "--raw", "--rate", "16000", "--channels", "1", "--format", "s16", "-"]
         elif shutil.which("arecord"):
             cmd = ["arecord", "-r", "16000", "-f", "S16_LE", "-c", "1", "-"]
         else:
+            return None
+
+        # WS2/B2: direciona a captura para um source PipeWire filtrado (NS + AGC) quando
+        # disponível. Sem PipeWire/filtro, `get_processed_capture_source` retorna None e o
+        # comando fica inalterado (microfone padrão). Best-effort, nunca levanta.
+        ns_enabled = getattr(getattr(self, "config", None), "live_mic_ns_enabled", True)
+        agc_enabled = getattr(getattr(self, "config", None), "live_mic_agc_enabled", True)
+        filtered_source = get_processed_capture_source(ns_enabled, agc_enabled)
+        if filtered_source:
+            cmd = enrich_capture_cmd(cmd, filtered_source)
+        return cmd
+
+    def _open_recorder(self) -> Optional[subprocess.Popen]:
+        """Abre o gravador de microfone. Retorna o ``Popen`` ou ``None`` em falha (não levanta)."""
+        cmd = self._build_recorder_cmd()
+        if cmd is None:
+            return None
+        try:
+            return subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception as exc:
+            logger.error(f"Falha ao iniciar microfone: {exc}")
+            return None
+
+    def _close_recorder(self) -> None:
+        """Encerra o gravador corrente (se houver) e limpa a referência. Idempotente."""
+        proc = self._record_proc
+        self._record_proc = None
+        if proc is None:
+            return
+        try:
+            proc.terminate()
+            proc.wait(timeout=0.3)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+    def _mic_loop(self) -> None:
+        """Lê áudio do microfone com VAD e **reconexão automática** do gravador.
+
+        Se o gravador morre (mic desconectado, PipeWire reiniciado) ou a leitura falha,
+        reabre com backoff exponencial (1.5s→30s, até ``live_local_reconnect_max_attempts``)
+        em vez de encerrar a thread em silêncio — espelhando o wrapper ``_live_session`` do
+        ``GeminiLiveClient``. Só vai a ERROR ao esgotar as tentativas. A fala em curso
+        (``_speech_buffer``/``_preroll_buffer``) é **preservada** entre reaberturas.
+        """
+        if not (shutil.which("pw-record") or shutil.which("arecord")):
             err = "Nenhum gravador de áudio (pw-record ou arecord) disponível no sistema."
             logger.error(err)
             self._set_state(LiveVoiceState.ERROR, err)
@@ -630,103 +745,152 @@ class LocalLiveVoiceClient:
                 self.on_error(err)
             return
 
-        try:
-            self._record_proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+        reconnect_enabled = getattr(getattr(self, "config", None), "live_local_reconnect_enabled", True)
+        configured_max = getattr(getattr(self, "config", None), "live_local_reconnect_max_attempts", 5)
+        max_attempts = max(1, int(configured_max)) if reconnect_enabled else 1
+        base_delay = 1.5
+        max_delay = 30.0
+
+        attempt = 0
+        last_reason = ""
+        while self._is_running:
+            attempt += 1
+            self._record_proc = self._open_recorder()
+            if self._record_proc is None:
+                last_reason = "Falha ao abrir o gravador de microfone"
+            else:
+                if attempt > 1:
+                    # Recuperou: a reconexão deu certo, volta a ouvir.
+                    self._set_state(LiveVoiceState.LISTENING, "Ouvindo microfone...")
+                last_reason = self._capture_loop()
+                self._close_recorder()
+
+            if not self._is_running:
+                return
+
+            if attempt >= max_attempts:
+                err = last_reason or f"Microfone indisponível após {max_attempts} tentativa(s)."
+                logger.error(f"Captura de microfone encerrada: {err}")
+                self._set_state(LiveVoiceState.ERROR, err)
+                if self.on_error:
+                    self.on_error(err)
+                return
+
+            delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
+            self._set_state(
+                LiveVoiceState.CONNECTING,
+                f"Reconectando microfone (tentativa {attempt + 1}/{max_attempts}) em {delay:.1f}s...",
             )
-        except Exception as exc:
-            err = f"Falha ao iniciar microfone: {exc}"
-            logger.error(err)
-            self._set_state(LiveVoiceState.ERROR, err)
-            if self.on_error:
-                self.on_error(err)
-            return
+            if not self._sleep_cancellable(delay):
+                return
 
+    def _sleep_cancellable(self, delay: float) -> bool:
+        """Dorme ``delay`` segundos em passos curtos; retorna False se ``stop()`` foi chamado."""
+        deadline = time.monotonic() + max(0.0, delay)
+        while time.monotonic() < deadline:
+            if not self._is_running:
+                return False
+            time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+        return self._is_running
+
+    def _capture_loop(self) -> str:
+        """Laço de leitura de áudio (RMS + VAD) até o gravador morrer ou a sessão parar.
+
+        Retorna o motivo da saída (usado no log da reconexão).
+        """
         chunk_size = 3200  # 100ms de áudio a 16kHz s16 mono (1600 amostras * 2 bytes)
-
-        while self._is_running and self._record_proc and self._record_proc.poll() is None:
+        proc = self._record_proc
+        while self._is_running and proc and proc.poll() is None:
             try:
-                pcm_chunk = self._record_proc.stdout.read(chunk_size)
-            except Exception:
-                break
+                pcm_chunk = proc.stdout.read(chunk_size)
+            except Exception as exc:
+                return f"Erro de leitura do microfone: {exc}"
 
             if not pcm_chunk:
                 time.sleep(0.02)
                 continue
 
-            # Calcula volume RMS para o visualizador de onda e VAD
-            num_samples = len(pcm_chunk) // 2
-            norm_level = 0.0
-            if num_samples > 0:
-                try:
-                    samples = struct.unpack(f"<{num_samples}h", pcm_chunk)
-                    rms = math.sqrt(sum(s * s for s in samples) / num_samples)
-                    if rms > 70.0:
-                        norm_level = min(1.0, ((rms - 70.0) / 1800.0) ** 0.7)
-                    else:
-                        norm_level = 0.0
-                except Exception:
-                    norm_level = 0.0
+            self._process_chunk(pcm_chunk)
 
-            if self.on_audio_level:
-                try:
-                    self.on_audio_level(norm_level)
-                except Exception:
-                    pass
+        if proc is not None:
+            code = proc.poll()
+            if code is not None and code != 0:
+                return f"Gravador de microfone encerrou com código {code}"
+        return "Gravador de microfone encerrou"
 
-            if self._is_muted:
-                continue
-
-            # Isolamento acústico e anti-eco: Enquanto o assistente fala ou processa,
-            # ignoramos a entrada do microfone para evitar auto-interrupção e eco dos alto-falantes.
-            if self.state in (LiveVoiceState.SPEAKING, LiveVoiceState.THINKING, LiveVoiceState.EXECUTING):
-                self._speech_buffer.clear()
-                self._preroll_buffer.clear()
-                self._is_user_speaking = False
-                self._silence_chunks = 0
-                continue
-
-            # VAD no estado de escuta
-            if self.state in (LiveVoiceState.LISTENING, LiveVoiceState.CONNECTED):
-                if norm_level > self.silence_threshold:
-                    if not self._is_user_speaking:
-                        self._is_user_speaking = True
-                        # Resgata os últimos 400ms gravados antes do limiar ser atingido (pre-roll)
-                        self._speech_buffer = list(self._preroll_buffer)
-                        self._silence_chunks = 0
-                    self._speech_buffer.append(pcm_chunk)
-                    self._silence_chunks = 0
+    def _process_chunk(self, pcm_chunk: bytes) -> None:
+        """Processa um chunk de áudio: nível RMS, isolamento de eco e VAD."""
+        # Calcula volume RMS para o visualizador de onda e VAD
+        num_samples = len(pcm_chunk) // 2
+        norm_level = 0.0
+        if num_samples > 0:
+            try:
+                samples = struct.unpack(f"<{num_samples}h", pcm_chunk)
+                rms = math.sqrt(sum(s * s for s in samples) / num_samples)
+                if rms > 70.0:
+                    norm_level = min(1.0, ((rms - 70.0) / 1800.0) ** 0.7)
                 else:
-                    self._preroll_buffer.append(pcm_chunk)
-                    if self._is_user_speaking:
-                        self._speech_buffer.append(pcm_chunk)
-                        self._silence_chunks += 1
-                        # Pausa prolongada detectada -> Fim de frase do usuário
-                        if self._silence_chunks >= self.silence_chunks_timeout:
-                            self._is_user_speaking = False
-                            if len(self._speech_buffer) >= self.min_speech_chunks:
-                                full_pcm = b"".join(self._speech_buffer)
-                                self._speech_buffer = []
-                                self._preroll_buffer.clear()
+                    norm_level = 0.0
+            except Exception:
+                norm_level = 0.0
 
-                                # Validação acústica de energia: descarta ruído de fundo/respiração
-                                num_samples = len(full_pcm) // 2
-                                if num_samples > 0:
-                                    try:
-                                        s_arr = struct.unpack(f"<{num_samples}h", full_pcm)
-                                        buf_rms = math.sqrt(sum(s * s for s in s_arr) / num_samples)
-                                        if buf_rms < 125.0:
-                                            logger.debug(f"Buffer de voz descartado por baixa energia (RMS {buf_rms:.1f} < 125).")
-                                            continue
-                                    except Exception:
-                                        pass
+        if self.on_audio_level:
+            try:
+                self.on_audio_level(norm_level)
+            except Exception:
+                pass
 
-                                # Dispara processamento em thread separada para não bloquear leitura do mic
-                                threading.Thread(target=self._process_utterance, args=(full_pcm,), daemon=True).start()
-                            else:
-                                self._speech_buffer = []
+        if self._is_muted:
+            return
+
+        # Isolamento acústico e anti-eco: Enquanto o assistente fala ou processa,
+        # ignoramos a entrada do microfone para evitar auto-interrupção e eco dos alto-falantes.
+        if self.state in (LiveVoiceState.SPEAKING, LiveVoiceState.THINKING, LiveVoiceState.EXECUTING):
+            self._speech_buffer.clear()
+            self._preroll_buffer.clear()
+            self._is_user_speaking = False
+            self._silence_chunks = 0
+            return
+
+        # VAD no estado de escuta
+        if self.state in (LiveVoiceState.LISTENING, LiveVoiceState.CONNECTED):
+            if norm_level > self.silence_threshold:
+                if not self._is_user_speaking:
+                    self._is_user_speaking = True
+                    # Resgata os últimos 400ms gravados antes do limiar ser atingido (pre-roll)
+                    self._speech_buffer = list(self._preroll_buffer)
+                    self._silence_chunks = 0
+                self._speech_buffer.append(pcm_chunk)
+                self._silence_chunks = 0
+            else:
+                self._preroll_buffer.append(pcm_chunk)
+                if self._is_user_speaking:
+                    self._speech_buffer.append(pcm_chunk)
+                    self._silence_chunks += 1
+                    # Pausa prolongada detectada -> Fim de frase do usuário
+                    if self._silence_chunks >= self.silence_chunks_timeout:
+                        self._is_user_speaking = False
+                        if len(self._speech_buffer) >= self.min_speech_chunks:
+                            full_pcm = b"".join(self._speech_buffer)
+                            self._speech_buffer = []
+                            self._preroll_buffer.clear()
+
+                            # Validação acústica de energia: descarta ruído de fundo/respiração
+                            num_samples = len(full_pcm) // 2
+                            if num_samples > 0:
+                                try:
+                                    s_arr = struct.unpack(f"<{num_samples}h", full_pcm)
+                                    buf_rms = math.sqrt(sum(s * s for s in s_arr) / num_samples)
+                                    if buf_rms < 125.0:
+                                        logger.debug(f"Buffer de voz descartado por baixa energia (RMS {buf_rms:.1f} < 125).")
+                                        return
+                                except Exception:
+                                    pass
+
+                            # Dispara processamento em thread separada para não bloquear leitura do mic
+                            threading.Thread(target=self._process_utterance, args=(full_pcm,), daemon=True).start()
+                        else:
+                            self._speech_buffer = []
 
     def _process_utterance(self, pcm_data: bytes) -> None:
         """Processa a fala do usuário: Whisper STT -> Qwen 2.5 IntentEngine -> Piper TTS."""
@@ -740,11 +904,11 @@ class LocalLiveVoiceClient:
                 return
 
             logger.info(f"Voz transcrita: '{user_text}'")
-            self._transcripts_log.append({"role": "user", "text": user_text})
+            self._transcripts_log.append(make_entry(ROLE_USER, user_text))
 
             if self.on_transcript:
                 try:
-                    self.on_transcript("user", user_text)
+                    self.on_transcript(ROLE_USER, user_text)
                 except Exception as exc:
                     logger.warning(f"Erro no callback on_transcript(user): {exc}")
 
@@ -754,7 +918,17 @@ class LocalLiveVoiceClient:
                 except Exception as exc:
                     logger.warning(f"Erro no callback on_user_message: {exc}")
 
-            # 2. Raciocínio e Geração de Ações via IntentEngine
+            # 2. Atalho determinístico do Quadro Negro (navegação de UI).
+            # "abre o quadro e mostra a fatoração" é navegação, não ação de
+            # desktop — o IntentEngine local só produz ActionPlan/ActionType e
+            # não tem como expressá-la. No caminho Gemini Live o mesmo comando é
+            # uma ferramenta (`study_show_board`); aqui o detector puro faz o
+            # papel dela. Casa -> fecha o turno aqui. Não casa -> segue para o
+            # IntentEngine (custo zero: é só regex).
+            if self._handle_board_command(user_text):
+                return
+
+            # 3. Raciocínio e Geração de Ações via IntentEngine
             self._set_state(LiveVoiceState.THINKING, "Processando solicitação...")
             try:
                 plan: ActionPlan = self.engine.parse(user_text)
@@ -765,7 +939,7 @@ class LocalLiveVoiceClient:
                     actions=[],
                 )
 
-            # 3. Execução de Ações do Desktop (apenas ações reais, sem ANSWER ou SMART_OCR)
+            # 4. Execução de Ações do Desktop (apenas ações reais, sem ANSWER ou SMART_OCR)
             executable_actions = [
                 a for a in plan.actions
                 if a.action_type not in (ActionType.ANSWER, ActionType.SMART_OCR)
@@ -793,7 +967,7 @@ class LocalLiveVoiceClient:
                     except Exception as exc:
                         logger.warning(f"Erro ao executar ação de desktop por voz: {exc}")
 
-            # 4. Resposta em Voz (Piper TTS)
+            # 5. Resposta em Voz (Piper TTS)
             response_text = plan.thought or plan.extracted_text or "Comando processado com sucesso."
 
             # Higienização da exibição em tela: se abriu URL e a resposta continha citações brutas [1], [2]
@@ -810,24 +984,9 @@ class LocalLiveVoiceClient:
                     else:
                         response_text = "Abri a página solicitada no seu navegador para você conferir as opções."
 
-            self._transcripts_log.append({"role": "agent", "text": response_text})
-
-            if self.on_transcript:
-                try:
-                    self.on_transcript("agent", response_text)
-                except Exception as exc:
-                    logger.warning(f"Erro no callback on_transcript(agent): {exc}")
-
-            if self.on_agent_message:
-                try:
-                    self.on_agent_message(response_text)
-                except Exception as exc:
-                    logger.warning(f"Erro no callback on_agent_message: {exc}")
-
             # Síntese de voz concisa e fluida via Piper TTS (sem ler rodapés, promoções ou citações técnicas)
             speech_text = build_spoken_response(plan.thought or plan.extracted_text, executable_actions=executable_actions)
-            self._set_state(LiveVoiceState.SPEAKING, "Falando...")
-            self.synthesizer.speak(speech_text)
+            self._finish_turn(response_text, speech_text)
 
         except Exception as exc:
             logger.exception(f"Erro inesperado no processamento de voz: {exc}")
@@ -840,6 +999,88 @@ class LocalLiveVoiceClient:
             self._silence_chunks = 0
             if self._is_running:
                 self._set_state(LiveVoiceState.LISTENING, "Ouvindo você...")
+
+    def _finish_turn(self, response_text: str, speech_text: str) -> None:
+        """Publica e fala a resposta final do turno (caminho comum).
+
+        Extraído porque o atalho do Quadro Negro fecha o turno exatamente como o
+        caminho do IntentEngine — duplicar isso significaria manter dois lugares
+        em sincronia toda vez que um callback novo for acrescentado.
+        """
+        # Entrega G / P1-7: papel canônico (`assistant`), não o histórico `"agent"` — o
+        # mesmo vocabulário do cliente de nuvem. `normalize_role` continua lendo `"agent"`
+        # para dados antigos.
+        self._transcripts_log.append(make_entry(ROLE_ASSISTANT, response_text))
+
+        if self.on_transcript:
+            try:
+                self.on_transcript(ROLE_ASSISTANT, response_text)
+            except Exception as exc:
+                logger.warning(f"Erro no callback on_transcript(assistant): {exc}")
+
+        if self.on_agent_message:
+            try:
+                self.on_agent_message(response_text)
+            except Exception as exc:
+                logger.warning(f"Erro no callback on_agent_message: {exc}")
+
+        self._set_state(LiveVoiceState.SPEAKING, "Falando...")
+        self.synthesizer.speak(speech_text)
+
+    def _handle_board_command(self, user_text: str) -> bool:
+        """Trata "abre o quadro e mostra X" fora do IntentEngine.
+
+        Devolve ``True`` quando a fala era um comando do Quadro Negro e o turno
+        já foi fechado aqui — o chamador então **não** deve seguir para o
+        IntentEngine. Devolve ``False`` quando não é o caso (ou quando não há
+        gancho de UI injetado), e a fala segue o fluxo normal.
+
+        O trabalho pesado de decidir *o que* abrir é do detector puro
+        (`core/study_intent`), e a resolução do problema continua no gancho da
+        janela — que já sabe fazer álgebra pura e, se preciso, escalar ao modelo
+        fora da main thread. Aqui só se liga um ao outro.
+        """
+        from ..core.board_outcome import (
+            BOARD_FAILED,
+            BoardOutcome,
+            message_for,
+            outcome_from_payload,
+        )
+        from ..core.study_intent import parse_board_command
+
+        command = parse_board_command(user_text)
+        if command is None or self.board_opener is None:
+            return False
+
+        try:
+            result = self.board_opener(command.problem, None, command.focus)
+        except Exception as exc:
+            logger.warning(f"Falha ao abrir o Quadro Negro por voz: {exc}")
+            # Exceção do gancho é FALHA, não desfecho desconhecido: o log da
+            # sessão precisa dizer o que aconteceu, não ficar ambíguo.
+            result = BoardOutcome(
+                BOARD_FAILED, message_for(BOARD_FAILED), detail=str(exc)
+            ).to_dict()
+
+        # O desfecho vem do gancho. Antes, `success: True` e a frase "Quadro Negro
+        # aberto" eram fixos — então uma abertura que não aconteceu (sem provedor
+        # de IA, por exemplo) era falada e registrada como sucesso.
+        outcome = outcome_from_payload(result)
+        spoken = outcome.message or message_for(outcome.status)
+
+        self._executed_actions_log.append({
+            "type": "study_show_board",
+            "description": spoken,
+            "success": outcome.accepted,
+            "status": outcome.status,
+        })
+        if self.on_tool_executed:
+            try:
+                self.on_tool_executed("study_show_board", spoken, outcome.accepted)
+            except Exception:
+                pass
+        self._finish_turn(spoken, spoken)
+        return True
 
     def get_session_summary(self) -> dict[str, Any]:
         """Retorna o resumo estruturado da chamada de voz para consolidação no chat principal."""

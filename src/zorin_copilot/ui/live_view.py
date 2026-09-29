@@ -1,6 +1,10 @@
-# Decisão de design: interface imersiva de voz ao vivo com Glassmorphism, visualizador dinâmico de áudio
-# e registro rolável da sessão. Ações executadas e transcrição são acumuladas em lista (não
-# substituídas), para que o usuário possa revisar o que foi feito durante a chamada.
+# Decisão de design: interface imersiva de voz ao vivo com material de vidro sóbrio
+# QUASE OPACO — não é "glassmorphism"/frosted glass: o GTK4 não tem `backdrop-filter` e
+# o Mutter não desfoca janela por app_id (ver data/zorin-copilot.css:5-18). O desfoque,
+# quando existe, é do compositor (`.blur-real`, Hyprland/wlroots); caso contrário cai no
+# fallback de opacidade (`.blur-fallback`). Inclui visualizador dinâmico de áudio e
+# registro rolável da sessão. Ações executadas e transcrição são acumuladas em lista
+# (não substituídas), para que o usuário possa revisar o que foi feito durante a chamada.
 
 """Componente de interface gráfica em GTK4 para o chat de voz ao vivo (Gemini Live)."""
 
@@ -20,8 +24,28 @@ from gi.repository import Gtk, Gdk, GLib, Pango  # noqa: E402
 from ..ai.live import GeminiLiveClient, LiveVoiceState
 from ..core.config import CopilotConfig
 from ..core.fence import NO_MONITOR_LABEL
+from .style import reduced_motion_enabled
 
 LOG_MAX_HEIGHT = 170
+#: Altura inicial do histórico, casada com a da onda (85px): as duas colunas
+#: nascem com a mesma altura, em vez de uma espremer a outra.
+LOG_MIN_HEIGHT = 85
+#: Largura fixa do histórico. Fixa de propósito: um painel que muda de largura
+#: conforme o texto chega faz a onda (que fica ao lado) redimensionar sozinha.
+LOG_PANEL_WIDTH = 260
+#: Meio-ciclo da piscada do indicador de gravação. O GTK4 não tem `@keyframes`,
+#: então a piscada é um timer em Python, não CSS.
+RECORD_BLINK_MS = 600
+
+#: Ícones do botão de modo. Precisam ser distintos entre si E distintos dos
+#: outros botões do dock: o estado "Tela Inteira" usava `video-display-symbolic`,
+#: que é exatamente o glifo do botão vizinho "Transmitir Tela" — dois controles
+#: diferentes com a mesma cara. Todos os nomes abaixo foram conferidos no tema
+#: instalado (`/usr/share/icons`); o `window-popup-symbolic` sugerido na proposta
+#: NÃO existe e deixaria o botão sem ícone.
+MODE_ICON_WINDOW = "focus-windows-symbolic"
+MODE_ICON_FULLSCREEN = "view-fullscreen-symbolic"
+
 TRANSCRIPT_ROLE_ICONS = {
     "user": "avatar-default-symbolic",
     "assistant": "starred-symbolic",
@@ -76,6 +100,15 @@ class LiveVoiceWidget(Gtk.Box):
         self._audio_level: float = 0.0
         self._elapsed_sec: int = 0
         self._timer_id: int | None = None
+        self._rec_blink_id: int | None = None
+        self._rec_dimmed: bool = False
+
+        # WS1: buffer de batching de transcrição — 1 linha de log por turno e
+        # legenda estável, em vez de 1 linha/1 scroll por chunk de streaming.
+        self._transcript_role: str | None = None
+        self._transcript_buf: dict[str, str] = {}
+        self._transcript_flush_id: int | None = None
+        self._transcript_row_lbl: Gtk.Label | None = None
 
         self._build_ui()
         self._connect_client_events()
@@ -133,17 +166,26 @@ class LiveVoiceWidget(Gtk.Box):
 
         card.append(self._build_header())
 
+        # Palco acústico e histórico LADO A LADO. Antes o histórico vinha abaixo
+        # das legendas e começava oculto, então empurrava a onda para cima e
+        # obrigava a rolar para ver o que já tinha sido dito — justamente o que
+        # a sessão de voz precisa manter à vista.
+        stage_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        stage_row.set_valign(Gtk.Align.START)
+
         # Palco Acústico (moldura suave com fundo rebaixado para as ondas)
         self.stage_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.stage_box.add_css_class("acoustic-stage")
+        self.stage_box.set_hexpand(True)
         self.stage_box.append(self._build_visualizer())
-        card.append(self.stage_box)
+        stage_row.append(self.stage_box)
+
+        # Registro rolável de histórico e ferramentas executadas
+        stage_row.append(self._build_session_log())
+        card.append(stage_row)
 
         # Legendas Dinâmicas em Tempo Real (Live Captions)
         card.append(self._build_live_caption())
-
-        # Registro rolável de histórico e ferramentas executadas
-        card.append(self._build_session_log())
 
         # Dock Unificada de Controles de Chamada
         card.append(self._build_controls())
@@ -185,6 +227,14 @@ class LiveVoiceWidget(Gtk.Box):
         self.video_badge.add_css_class("caption")
         self.video_badge.set_visible(False)
         header_box.append(self.video_badge)
+
+        # Indicador de captação: diz que o microfone está ABERTO agora. É estado,
+        # não botão — por isso não é clicável. Nasce oculto e só aparece quando
+        # há captação de fato (ver `_sync_recording_indicator`).
+        self.rec_lbl = Gtk.Label(label="● Gravando")
+        self.rec_lbl.add_css_class("live-recording")
+        self.rec_lbl.set_visible(False)
+        header_box.append(self.rec_lbl)
 
         icons_map = {
             "waves": "audio-speakers-symbolic",
@@ -269,28 +319,58 @@ class LiveVoiceWidget(Gtk.Box):
 
         return self.caption_container
 
-    def _build_session_log(self) -> Gtk.ScrolledWindow:
-        """Área rolável que acumula ações executadas e a transcrição da chamada."""
+    def _build_session_log(self) -> Gtk.Box:
+        """Histórico da sessão, ao lado da onda.
+
+        Nasce **visível**. Antes começava oculto e só aparecia na primeira linha:
+        além de esconder o histórico (o problema relatado), o painel surgindo no
+        meio de uma frase fazia a onda — que fica ao lado — encolher sozinha.
+        Mostrar o painel vazio, com uma linha dizendo o que vai aparecer ali,
+        mantém a largura estável e explica o espaço em vez de deixá-lo em branco.
+        """
+        panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        panel.add_css_class("live-log-panel")
+        panel.set_size_request(LOG_PANEL_WIDTH, -1)
+        panel.set_valign(Gtk.Align.START)
+
+        title = Gtk.Label(label="Histórico da sessão", xalign=0)
+        title.add_css_class("live-log-title")
+        panel.append(title)
+
         self.log_scrolled = Gtk.ScrolledWindow()
         self.log_scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        self.log_scrolled.set_min_content_height(70)
+        self.log_scrolled.set_min_content_height(LOG_MIN_HEIGHT)
         self.log_scrolled.set_max_content_height(LOG_MAX_HEIGHT)
-        self.log_scrolled.set_margin_start(6)
-        self.log_scrolled.set_margin_end(6)
         self.log_scrolled.set_propagate_natural_height(True)
-        self.log_scrolled.set_visible(False)
 
         self.log_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         self.log_scrolled.set_child(self.log_box)
-        return self.log_scrolled
+        panel.append(self.log_scrolled)
+
+        self.log_empty_lbl = Gtk.Label(
+            label="Falas e ações da chamada aparecem aqui.",
+            xalign=0,
+        )
+        self.log_empty_lbl.add_css_class("live-log-empty")
+        self.log_empty_lbl.set_wrap(True)
+        panel.append(self.log_empty_lbl)
+
+        return panel
 
     def _build_controls(self) -> Gtk.Box:
         """Constrói a dock unificada de controles de chamada (Call Control Dock)."""
         dock = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         dock.add_css_class("call-control-dock")
-        dock.set_halign(Gtk.Align.CENTER)
         dock.set_margin_top(4)
         dock.set_margin_bottom(4)
+        # A dock passa a ocupar a largura toda para o "Encerrar" poder ir à
+        # direita extrema. Dois espaçadores de peso igual mantêm o grupo de
+        # transmissão visualmente centrado, apesar disso.
+        dock.set_hexpand(True)
+
+        leading_spacer = Gtk.Box()
+        leading_spacer.set_hexpand(True)
+        dock.append(leading_spacer)
 
         # Botão Mudo
         self.mute_btn = Gtk.Button()
@@ -328,7 +408,7 @@ class LiveVoiceWidget(Gtk.Box):
         self.mode_btn.add_css_class("flat")
         self.mode_btn.set_tooltip_text("Alternar: Janela Ativa ou Tela Inteira")
         mode_btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        self.mode_icon = Gtk.Image.new_from_icon_name("window-restore-symbolic")
+        self.mode_icon = Gtk.Image.new_from_icon_name(MODE_ICON_WINDOW)
         self.mode_icon.set_pixel_size(14)
         self.mode_lbl = Gtk.Label(label="Janela")
         mode_btn_box.append(self.mode_icon)
@@ -352,6 +432,18 @@ class LiveVoiceWidget(Gtk.Box):
         self.screen_btn.connect("clicked", self._on_send_screen)
         dock.append(self.screen_btn)
 
+        # Espaçador final: empurra o "Encerrar" para a direita extrema.
+        trailing_spacer = Gtk.Box()
+        trailing_spacer.set_hexpand(True)
+        dock.append(trailing_spacer)
+
+        # Divisor entre os controles de transmissão e o destrutivo. Sem ele,
+        # "Snapshot" e "Encerrar" ficavam vizinhos e o clique errado encerrava a
+        # chamada.
+        divider = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
+        divider.add_css_class("call-control-divider")
+        dock.append(divider)
+
         # Botão Encerrar
         end_btn = Gtk.Button()
         end_btn.add_css_class("destructive-action")
@@ -368,14 +460,13 @@ class LiveVoiceWidget(Gtk.Box):
         dock.append(end_btn)
 
         wrapper = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-        wrapper.set_halign(Gtk.Align.CENTER)
         wrapper.append(dock)
         return wrapper
 
     # ------------------------------------------------------------------
     # Registro da sessão
     # ------------------------------------------------------------------
-    def _append_log_row(self, icon_name: str, markup: str) -> None:
+    def _append_log_row(self, icon_name: str, markup: str) -> Gtk.Label:
         """Adiciona uma linha ao registro rolável e rola até o fim."""
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         row.set_margin_start(4)
@@ -399,8 +490,14 @@ class LiveVoiceWidget(Gtk.Box):
         row.append(lbl)
 
         self.log_box.append(row)
-        self.log_scrolled.set_visible(True)
+        # A linha de "o que aparece aqui" sai de cena na primeira entrada real —
+        # ela existe para o painel vazio não parecer quebrado, não para conviver
+        # com o conteúdo.
+        empty_lbl = getattr(self, "log_empty_lbl", None)
+        if empty_lbl is not None and empty_lbl.get_visible():
+            empty_lbl.set_visible(False)
         self._scroll_log_to_bottom()
+        return lbl
 
     def _scroll_log_to_bottom(self) -> None:
         def _do_scroll():
@@ -438,6 +535,24 @@ class LiveVoiceWidget(Gtk.Box):
         self.live_client.on_video_state_change = lambda active: GLib.idle_add(
             self._update_video_ui, active
         )
+
+        # WS1: a transcrição estava DESCONECTADA (bug silencioso — ninguém ligava
+        # on_transcript a este widget). Conecta com fan-out para não sobrescrever
+        # o callback de outra widget que compartilha o mesmo cliente (ex.: pílula).
+        # Idempotente: reconectar (ex.: expandir da pílula) não empilha wrappers.
+        if not getattr(self, "_transcript_wired", False):
+            self._transcript_wired = True
+            existing_tr = self.live_client.on_transcript
+
+            def _fwd_transcript(role: str, txt: str) -> None:
+                if existing_tr:
+                    try:
+                        existing_tr(role, txt)
+                    except Exception:
+                        pass
+                GLib.idle_add(self._ui_on_transcript, role, txt)
+
+            self.live_client.on_transcript = _fwd_transcript
 
     def _ui_on_state_change(self, state: LiveVoiceState, msg: str) -> bool:
         if state == LiveVoiceState.CONNECTING:
@@ -488,6 +603,7 @@ class LiveVoiceWidget(Gtk.Box):
             self.status_lbl.set_markup("<b>Zorin Copilot Live</b> • Desconectado")
             self.badge_box.set_visible(False)
             self._stop_timer()
+        self._sync_recording_indicator()
         self.drawing_area.queue_draw()
         return GLib.SOURCE_REMOVE
 
@@ -536,28 +652,75 @@ class LiveVoiceWidget(Gtk.Box):
         return "emblem-ok-symbolic" if "ok" in name else "utilities-terminal-symbolic"
 
     def _ui_on_transcript(self, role: str, text: str) -> bool:
-        """Atualiza a legenda ativa em tempo real e acumula no log de histórico."""
+        """Acumula a transcrição em buffer e agenda o flush (~200 ms).
+
+        Evita 1 linha de log / 1 scroll por chunk de streaming: a legenda e o
+        histórico são atualizados no flush, não a cada token.
+        """
         clean = text.strip()
         if not clean:
             return GLib.SOURCE_REMOVE
 
-        role_low = (role or "").lower()
-        if role_low in ("user", "você", "voce"):
-            display_role = "Você"
-            speaker_badge_text = "VOCÊ"
+        role_key = "user" if (role or "").lower() in ("user", "você", "voce") else "assistant"
+
+        # Troca de papel: finaliza o turno anterior imediatamente (sem esperar o timer).
+        if role_key != self._transcript_role:
+            self._commit_transcript_turn()
+            self._transcript_role = role_key
+            self._transcript_buf = {}
+            self._transcript_row_lbl = None
+
+        cur = self._transcript_buf.get(role_key, "")
+        # O Gemini Live envia partes incrementais (delta) ou cumulativas; trata ambas,
+        # inclusive sobreposição parcial entre particulas (evita duplicar "mundomundo!").
+        if len(text) >= len(cur) and text.startswith(cur):
+            self._transcript_buf[role_key] = text
+        elif cur and text and cur.endswith(text):
+            pass  # trecho duplicado (cauda) — ignora
+        else:
+            overlap = 0
+            for k in range(min(len(cur), len(text)), 0, -1):
+                if cur.endswith(text[:k]):
+                    overlap = k
+                    break
+            self._transcript_buf[role_key] = cur + text[overlap:]
+
+        if self._transcript_flush_id is None:
+            self._transcript_flush_id = GLib.timeout_add(200, self._flush_transcript)
+        return GLib.SOURCE_REMOVE
+
+    def _commit_transcript_turn(self) -> None:
+        """Força o flush imediato do turno atual (usado na troca de papel)."""
+        if self._transcript_flush_id is not None:
+            GLib.source_remove(self._transcript_flush_id)
+            self._transcript_flush_id = None
+        self._flush_transcript()
+
+    def _flush_transcript(self) -> bool:
+        """Atualiza a legenda e o histórico com o texto acumulado do turno em curso."""
+        self._transcript_flush_id = None
+        role_key = self._transcript_role
+        if role_key is None:
+            return GLib.SOURCE_REMOVE
+        text = self._transcript_buf.get(role_key, "").strip()
+        if not text:
+            return GLib.SOURCE_REMOVE
+
+        if role_key == "user":
+            display, badge = "Você", "VOCÊ"
             icon = TRANSCRIPT_ROLE_ICONS["user"]
         else:
-            display_role = "Copilot"
-            speaker_badge_text = "COPILOT"
+            display, badge = "Copilot", "COPILOT"
             icon = TRANSCRIPT_ROLE_ICONS["assistant"]
 
-        self.caption_speaker_lbl.set_text(speaker_badge_text)
-        self.caption_text_lbl.set_text(clean)
+        self.caption_speaker_lbl.set_text(badge)
+        self.caption_text_lbl.set_text(text)
 
-        self._append_log_row(
-            icon,
-            f"<b>{display_role}:</b> {clean}  <span alpha='60%'>{self._timestamp()}</span>",
-        )
+        markup = f"<b>{display}:</b> {GLib.markup_escape_text(text)}  <span alpha='60%'>{self._timestamp()}</span>"
+        if self._transcript_row_lbl is None:
+            self._transcript_row_lbl = self._append_log_row(icon, markup)
+        else:
+            self._transcript_row_lbl.set_markup(markup)
         return GLib.SOURCE_REMOVE
 
     def _ui_on_error(self, err: str) -> bool:
@@ -597,8 +760,74 @@ class LiveVoiceWidget(Gtk.Box):
         """Tempo decorrido da chamada, em segundos."""
         return self._elapsed_sec
 
+    # ------------------------------------------------------------------
+    # Indicador de captação ("● Gravando")
+    # ------------------------------------------------------------------
+    def _mic_is_capturing(self) -> bool:
+        """O microfone está aberto **e** captando agora?
+
+        Não basta a chamada estar viva: enquanto o modelo fala, ou enquanto o
+        usuário está mudo, nada entra pelo microfone. Um indicador aceso nesses
+        momentos seria mentira — e é justamente o sinal que o usuário usa para
+        decidir se já pode falar.
+        """
+        try:
+            if self.live_client.is_muted():
+                return False
+        except Exception:
+            # Cliente de teste ou já encerrado: sem resposta, não afirmamos
+            # captação. Falhar para "apagado" é seguro; para "aceso", não.
+            return False
+        return getattr(self.live_client, "state", None) == LiveVoiceState.LISTENING
+
+    def _sync_recording_indicator(self) -> None:
+        """Acerta o indicador com o estado real do microfone."""
+        if not hasattr(self, "rec_lbl"):
+            return
+        capturing = self._mic_is_capturing()
+        self.rec_lbl.set_visible(capturing)
+        if capturing:
+            self._start_record_blink()
+        else:
+            self._stop_record_blink()
+
+    def _start_record_blink(self) -> None:
+        """Pisca o indicador — ou o deixa fixo, se o movimento for reduzido.
+
+        O GTK4 CSS não tem `@keyframes` e não anima `transform`, então a piscada
+        é um timer em Python alternando uma classe. Com ``reduced_motion`` ligado
+        a preferência vale aqui também: o indicador fica aceso e **parado**, em
+        vez de piscar — animação que o usuário pediu para não ter não é detalhe.
+        """
+        if reduced_motion_enabled():
+            self._stop_record_blink()
+            return
+        if self._rec_blink_id is not None:
+            return
+        self._rec_blink_id = GLib.timeout_add(RECORD_BLINK_MS, self._on_record_blink)
+
+    def _stop_record_blink(self) -> None:
+        if self._rec_blink_id is not None:
+            GLib.source_remove(self._rec_blink_id)
+            self._rec_blink_id = None
+        self._rec_dimmed = False
+        if hasattr(self, "rec_lbl"):
+            self.rec_lbl.remove_css_class("live-recording-dim")
+
+    def _on_record_blink(self) -> bool:
+        if self.get_root() is None:
+            self._rec_blink_id = None
+            return GLib.SOURCE_REMOVE
+        self._rec_dimmed = not self._rec_dimmed
+        if self._rec_dimmed:
+            self.rec_lbl.add_css_class("live-recording-dim")
+        else:
+            self.rec_lbl.remove_css_class("live-recording-dim")
+        return GLib.SOURCE_CONTINUE
+
     def do_unroot(self) -> None:
         self._stop_timer()
+        self._stop_record_blink()
         if getattr(self, "_tick_id", 0) != 0:
             try:
                 self.drawing_area.remove_tick_callback(self._tick_id)
@@ -895,6 +1124,9 @@ class LiveVoiceWidget(Gtk.Box):
             self.mute_btn.remove_css_class("active-warning")
             self.caption_speaker_lbl.set_text("COPILOT")
             self.subtitle_lbl.set_text("Ouvindo você... fale naturalmente.")
+        # Mutar não muda o estado da sessão, só o do microfone — sem esta
+        # chamada o indicador continuaria aceso com o mic fechado.
+        self._sync_recording_indicator()
 
     def _on_toggle_video(self, _btn: Gtk.Button) -> None:
         is_active = self.live_client.toggle_video_stream(fps=1.0)
@@ -940,12 +1172,12 @@ class LiveVoiceWidget(Gtk.Box):
     def _update_mode_ui(self, mode: str) -> None:
         if hasattr(self, "mode_icon") and hasattr(self, "mode_lbl"):
             if mode == "active_window":
-                self.mode_icon.set_from_icon_name("window-restore-symbolic")
+                self.mode_icon.set_from_icon_name(MODE_ICON_WINDOW)
                 self.mode_lbl.set_text("Janela")
                 if hasattr(self, "mode_btn"):
                     self.mode_btn.set_tooltip_text("Modo Janela Ativa ativo. Clique para alternar para Tela Inteira.")
             else:
-                self.mode_icon.set_from_icon_name("video-display-symbolic")
+                self.mode_icon.set_from_icon_name(MODE_ICON_FULLSCREEN)
                 self.mode_lbl.set_text("Tela")
                 if hasattr(self, "mode_btn"):
                     self.mode_btn.set_tooltip_text("Modo Tela Inteira ativo. Clique para alternar para Janela Ativa.")

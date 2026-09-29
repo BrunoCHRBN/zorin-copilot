@@ -62,13 +62,71 @@ _CORNER_OFFSETS: dict[str, tuple[float, float]] = {
     "bottom-center": (0.50, 0.93),
 }
 
+# Rótulos humanos para o submenu de posição. Os códigos acima são detalhe de
+# implementação (viajam no config e nas âncoras do layer-shell); o usuário pensa
+# em "Topo · Centro", não em "top-center".
+_CORNER_LABELS: dict[str, str] = {
+    "top-center": "Topo · Centro",
+    "top-right": "Topo · Direita",
+    "top-left": "Topo · Esquerda",
+    "bottom-center": "Base · Centro",
+}
+
 # Tempo que a pílula fica ociosa antes de esmaecer (override do config se existir)
 _IDLE_FADE_OPACITY = 0.30
+
+# Nível de áudio (0..1) a partir do qual consideramos que o microfone está
+# captando voz. Abaixo disso o dot fica em repouso (armado, mas silencioso).
+_MIC_ACTIVE_LEVEL = 0.06
+
+# Alpha do brilho externo (`--pill-glow-color`) em estado ativo e ocioso.
+# O fade ocioso precisa apagar o halo, não só o conteúdo — senão a pílula
+# continua "acesa" no canto da tela depois de o usuário parar de falar.
+_GLOW_ALPHA_ACTIVE = 0.55
+_GLOW_ALPHA_IDLE = 0.12
+
+# Dicas de atalho. Vão **uma por vez**: a área de texto da pílula cabe ~17
+# caracteres, então listar tudo junto só renderizaria reticências. O ciclo
+# inteiro roda uma vez por execução do app (não a cada sessão de voz) — repetir
+# a mesma dica a cada invocação vira ruído para quem já sabe os atalhos.
+_HINT_TIPS: tuple[str, ...] = (
+    "Espaço: falar",
+    "Esc: fechar",
+    "Ctrl+M: mudo",
+    "i: interromper",
+    "p: fixar",
+    "?: abrir janela",
+)
+_HINT_INTERVAL_SEC = 2
 
 
 def _session_type_is_wayland() -> bool:
     """Heurística: o usuário está em Wayland? Em Wayland, Window.move() é no-op."""
     return os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland"
+
+
+def _client_mode(client: Any) -> str:
+    """Modo do cliente ativo: ``"local"`` ou ``"cloud"`` (Entrega C / P1-5).
+
+    O cliente **declara** o próprio modo (`ai/live.py` → "cloud", `ai/local_voice.py` →
+    "local"). Dublês de teste e clientes antigos não têm o atributo: nesse caso o valor
+    devolvido é um mock, não a string, e caímos no comportamento histórico (nuvem) para
+    não regredir nada.
+    """
+    return "local" if getattr(client, "mode", None) == "local" else "cloud"
+
+
+def _supports_video(client: Any) -> bool:
+    """O cliente ativo sabe transmitir tela? (Entrega C / P1-5)
+
+    Lê `supports_video` e **exige um bool de verdade**: `MagicMock` devolve um mock (que é
+    truthy), então aceitá-lo faria o modo local parecer capaz de vídeo. Sem o atributo,
+    cai na regra histórica — só o modo nuvem tem vídeo.
+    """
+    declared = getattr(client, "supports_video", None)
+    if isinstance(declared, bool):
+        return declared
+    return _client_mode(client) != "local"
 
 
 class VoicePillWindow(Gtk.Window):
@@ -80,11 +138,17 @@ class VoicePillWindow(Gtk.Window):
         live_client: GeminiLiveClient | LocalLiveVoiceClient,
         on_expand: Optional[Callable[[], None]] = None,
         on_close: Optional[Callable[[], None]] = None,
+        on_hide: Optional[Callable[[], None]] = None,
     ):
         super().__init__(application=application)
         self.live_client = live_client
         self.on_expand_cb = on_expand
         self.on_close_cb = on_close
+        # "Ocultar sem encerrar": esconde a pílula mantendo a sessão de voz viva.
+        # Separado de `on_close` porque as duas intenções colidiam — fechar a
+        # pílula encerrava a conversa, então quem só queria liberar a tela perdia
+        # a sessão.
+        self.on_hide_cb = on_hide
 
         self.set_title("Zorin Copilot Live")
         self.set_decorated(False)
@@ -114,12 +178,21 @@ class VoicePillWindow(Gtk.Window):
         # Sessão / chip / fade
         self._session_start_monotonic: float = 0.0
         self._session_timer_id: int = 0
+        self._autohide_id: int = 0
         self._chip_restore_id: int = 0
         self._chip_active: bool = False
+        self._chip_count: int = 0
         self._chip_saved_text: str = ""
         self._chip_saved_classes: list[str] = []
         self._last_activity_monotonic: float = time.monotonic()
         self._is_idle_faded: bool = False
+        self._capture_on: bool = False
+
+        # Dicas de atalho (uma por vez, ciclo único por execução do app)
+        self._hints_shown: bool = False
+        self._hint_id: int = 0
+        self._hint_index: int = 0
+        self._hint_ticks_left: int = 0
 
         # PTT (push-to-interrupt)
         self._ptt_active: bool = False
@@ -170,7 +243,7 @@ class VoicePillWindow(Gtk.Window):
         na próxima invocação.
         """
         self._stop_tick()
-        for attr in ("_session_timer_id", "_chip_restore_id"):
+        for attr in ("_session_timer_id", "_autohide_id", "_chip_restore_id", "_hint_id"):
             src = getattr(self, attr, 0)
             if src:
                 try:
@@ -178,6 +251,20 @@ class VoicePillWindow(Gtk.Window):
                 except Exception:
                     pass
                 setattr(self, attr, 0)
+        # Indicadores transitórios não podem "vazar" para a próxima exibição:
+        # o dot de captação ficaria aceso numa pílula parada, e o status ficaria
+        # oculto atrás de uma dica que não está mais sendo exibida.
+        if self._capture_on:
+            self._capture_on = False
+            try:
+                self.mic_dot.set_visible(False)
+            except Exception:
+                pass
+        try:
+            self.hint_lbl.set_visible(False)
+            self.status_lbl.set_visible(True)
+        except Exception:
+            pass
 
     def _teardown(self) -> None:
         """Teardown definitivo: a pílula não volta a ser usada. Idempotente.
@@ -306,6 +393,16 @@ class VoicePillWindow(Gtk.Window):
         self.title_lbl.add_css_class("caption")
         title_row.append(self.title_lbl)
 
+        # Chip de modo (Entrega C / P1-5). A pílula serve os dois clientes; sem isto o
+        # usuário não tinha como saber se fala com a nuvem ou com o modelo local — e o
+        # popover mostrava os mesmos controles nos dois casos.
+        self._mode = _client_mode(self.live_client)
+        self.mode_chip = Gtk.Label(label="Local" if self._mode == "local" else "Nuvem", xalign=0)
+        self.mode_chip.add_css_class("caption")
+        self.mode_chip.add_css_class("pill-mode")
+        self.mode_chip.add_css_class(f"pill-mode-{self._mode}")
+        title_row.append(self.mode_chip)
+
         self.title_sep = Gtk.Label(label="·")
         self.title_sep.add_css_class("caption")
         self.title_sep.add_css_class("voice-pill-title-sep")
@@ -322,13 +419,41 @@ class VoicePillWindow(Gtk.Window):
 
         text_vbox.append(title_row)
 
+        status_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
         self.status_lbl = Gtk.Label(label="Iniciando...", xalign=0)
         self.status_lbl.add_css_class("caption")
         self.status_lbl.add_css_class("dim-label")
         self.status_lbl.add_css_class("voice-pill-status")
         self.status_lbl.set_ellipsize(Pango.EllipsizeMode.END)
         self.status_lbl.set_max_width_chars(28)
-        text_vbox.append(self.status_lbl)
+        self.status_lbl.set_hexpand(True)
+        status_row.append(self.status_lbl)
+
+        # Dica de atalho transitória. Vive na MESMA linha do status (ocupa o lugar
+        # dele) em vez de virar uma linha nova: a janela é não-redimensionável e
+        # crescer em altura quebraria o footprint compacto da pílula.
+        self.hint_lbl = Gtk.Label(label="", xalign=0)
+        self.hint_lbl.add_css_class("caption")
+        self.hint_lbl.add_css_class("dim-label")
+        self.hint_lbl.add_css_class("pill-hint")
+        self.hint_lbl.set_ellipsize(Pango.EllipsizeMode.END)
+        self.hint_lbl.set_max_width_chars(20)
+        self.hint_lbl.set_hexpand(True)
+        self.hint_lbl.set_visible(False)
+        status_row.append(self.hint_lbl)
+
+        # Indicador explícito de captação: acende quando o microfone está de fato
+        # captando (nível acima do limiar e não mudo). O visualizador mostra a
+        # *forma* do áudio; este dot responde "o mic está me ouvindo?".
+        self.mic_dot = Gtk.Label(label="●")
+        self.mic_dot.add_css_class("pill-mic-dot")
+        self.mic_dot.set_valign(Gtk.Align.CENTER)
+        self.mic_dot.set_can_target(False)
+        self.mic_dot.set_focusable(False)
+        self.mic_dot.set_visible(False)
+        status_row.append(self.mic_dot)
+
+        text_vbox.append(status_row)
         self.container.append(text_vbox)
 
         # 3. Mini Visualizador de Áudio
@@ -355,6 +480,7 @@ class VoicePillWindow(Gtk.Window):
         self.mute_btn.add_css_class("circular")
         self.mute_btn.add_css_class("voice-pill-btn")
         self.mute_btn.set_tooltip_text("Mutar microfone (Ctrl+M)")
+        self._set_accessible_label(self.mute_btn, "Mutar ou desmutar o microfone")
         self.mute_btn.connect("clicked", self._on_toggle_mute)
         controls_box.append(self.mute_btn)
 
@@ -363,14 +489,24 @@ class VoicePillWindow(Gtk.Window):
         self.details_btn.add_css_class("circular")
         self.details_btn.add_css_class("voice-pill-btn")
         self.details_btn.set_tooltip_text("Detalhes da chamada e compartilhamento de tela")
+        self._set_accessible_label(
+            self.details_btn, "Detalhes da chamada e compartilhamento de tela"
+        )
         self.details_btn.connect("clicked", self._on_details_clicked)
         controls_box.append(self.details_btn)
 
-        self.expand_btn = Gtk.Button.new_from_icon_name("view-fullscreen-symbolic")
+        # `view-fullscreen-symbolic` prometia "tela cheia da pílula", mas o que o
+        # botão faz é fechar a pílula e abrir a conversa na janela principal do
+        # Copilot. `window-new-symbolic` diz isso; o rótulo acessível garante que
+        # um botão só-ícone continue nomeado para leitores de tela.
+        self.expand_btn = Gtk.Button.new_from_icon_name("window-new-symbolic")
         self.expand_btn.add_css_class("flat")
         self.expand_btn.add_css_class("circular")
         self.expand_btn.add_css_class("voice-pill-btn")
-        self.expand_btn.set_tooltip_text("Expandir para janela completa (?)")
+        self.expand_btn.set_tooltip_text("Abrir a conversa na janela do Copilot (?)")
+        self._set_accessible_label(
+            self.expand_btn, "Abrir a conversa na janela do Copilot"
+        )
         self.expand_btn.connect("clicked", self._on_expand_clicked)
         controls_box.append(self.expand_btn)
 
@@ -379,6 +515,7 @@ class VoicePillWindow(Gtk.Window):
         self.close_btn.add_css_class("circular")
         self.close_btn.add_css_class("voice-pill-btn")
         self.close_btn.set_tooltip_text("Encerrar conversa de voz (Esc)")
+        self._set_accessible_label(self.close_btn, "Encerrar a conversa de voz")
         self.close_btn.connect("clicked", self._on_close_clicked)
         controls_box.append(self.close_btn)
 
@@ -426,6 +563,17 @@ class VoicePillWindow(Gtk.Window):
         right_click.connect("pressed", self._on_right_click)
         self.add_controller(right_click)
 
+        # Duplo-clique no avatar: ocultar sem encerrar. Custo conhecido — o
+        # `Gtk.WindowHandle` que cobre a pílula usa arraste com o botão primário, e
+        # um GestureClick no avatar reivindica a sequência antes dele. Arrastar
+        # segurando **pelo avatar** deixa de mover a janela; o resto da pílula
+        # continua arrastável, e o ganho é uma saída não-destrutiva que não exige
+        # acertar um botão de 32px.
+        avatar_dbl = Gtk.GestureClick.new()
+        avatar_dbl.set_button(Gdk.BUTTON_PRIMARY)
+        avatar_dbl.connect("pressed", self._on_avatar_pressed)
+        self.avatar_box.add_controller(avatar_dbl)
+
     # ------------------------------------------------------------------
     # Conexão de callbacks do cliente
     # ------------------------------------------------------------------
@@ -461,14 +609,29 @@ class VoicePillWindow(Gtk.Window):
             self.live_client.on_window_focus_change = (
                 lambda app, title: GLib.idle_add(self._ui_on_window_focus_change, app, title)
             )
+        # WS1: a transcrição estava DESCONECTADA (bug silencioso). Conecta com
+        # fan-out para não sobrescrever o callback de outra widget que compartilha
+        # o cliente (ex.: janela completa do Live). Idempotente.
+        if not getattr(self, "_transcript_wired", False) and callable(
+            getattr(self.live_client, "on_transcript", None)
+        ):
+            self._transcript_wired = True
+            existing_tr = self.live_client.on_transcript
+
+            def _fwd_transcript(role: str, txt: str) -> None:
+                if existing_tr:
+                    try:
+                        existing_tr(role, txt)
+                    except Exception:
+                        pass
+                GLib.idle_add(self._ui_on_transcript, role, txt)
+
+            self.live_client.on_transcript = _fwd_transcript
 
     def _install_global_handlers(self) -> None:
         """Handlers ligados ao ciclo de vida da janela (independem do live_client)."""
         # best-effort: pin/unpin com base na config
-        try:
-            self.set_keep_above(bool(getattr(self.config, "pill_pinned", True)))
-        except Exception:
-            pass
+        self._apply_keep_above()
         # Re-resolver a paleta quando o tema claro/escuro (ou alto contraste)
         # mudar; sem isto as cores ficavam presas na primeira resolução.
         try:
@@ -495,6 +658,19 @@ class VoicePillWindow(Gtk.Window):
         except Exception:
             pass
 
+    @staticmethod
+    def _set_accessible_label(widget: Gtk.Widget, label: str) -> None:
+        """Nomeia um controle só-ícone para leitores de tela (best-effort).
+
+        `update_property` depende de GTK ≥ 4.10; num GTK anterior a chamada
+        levantaria. Um botão sem nome acessível é ruim, mas uma pílula que não
+        constrói é pior — daí o silêncio.
+        """
+        try:
+            widget.update_property([Gtk.AccessibleProperty.LABEL], [label])
+        except Exception:
+            pass
+
     def _bump_activity(self) -> None:
         self._last_activity_monotonic = time.monotonic()
         if self._is_idle_faded:
@@ -503,10 +679,34 @@ class VoicePillWindow(Gtk.Window):
     def _set_idle(self, idle: bool) -> None:
         if idle and not self._is_idle_faded:
             self.container.set_opacity(_IDLE_FADE_OPACITY)
+            # O halo externo é pintado via `--pill-glow-color` (inline style, vence
+            # a folha de estilo). Sem invalidar o cache, ele continuaria no alpha
+            # ativo e a pílula seguiria "acesa" mesmo esmaecida.
+            self._set_flag("pill-idle", True)
+            self._glow_color_cache = None
             self._is_idle_faded = True
+            # Ocioso também cede o topo da pilha: uma pílula esmaecida flutuando
+            # sobre o conteúdo atrapalha mais do que ajuda. Volta a subir no
+            # primeiro sinal de atividade (ramo de despertar, abaixo).
+            self._apply_keep_above()
         elif not idle and self._is_idle_faded:
             self.container.set_opacity(1.0)
+            self._set_flag("pill-idle", False)
+            self._glow_color_cache = None
             self._is_idle_faded = False
+            self._apply_keep_above()
+
+    def _apply_keep_above(self) -> None:
+        """`keep_above = pill_pinned E não-ocioso` (dica de WM, best-effort).
+
+        Em Wayland/layer-shell isto é no-op — quem decide a camada é o
+        compositor. Nunca deixa escapar exceção: é dica, não contrato.
+        """
+        try:
+            pinned = bool(getattr(self.config, "pill_pinned", True))
+            self.set_keep_above(pinned and not self._is_idle_faded)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Resolução de paleta (CSS → Python)
@@ -553,14 +753,22 @@ class VoicePillWindow(Gtk.Window):
         A CSS usa essa var na `box-shadow` da pílula — assim o brilho externo
         acompanha o estado (fala/pensando/executando) com `transition` suave.
         Só reescreve quando a cor muda (evita churn de propriedade a cada frame).
+
+        O alpha depende do fade ocioso: ocioso apaga o halo (``_GLOW_ALPHA_IDLE``),
+        senão a pílula continuaria brilhando depois de o usuário parar de falar.
         """
         cache = getattr(self, "_glow_color_cache", None)
-        if cache == rgb:
+        idle = self._is_idle_faded
+        key = (rgb, idle)
+        if cache == key:
             return
-        self._glow_color_cache = rgb
+        self._glow_color_cache = key
         try:
             r, g, b = rgb
-            rgba = "rgba({:.0f},{:.0f},{:.0f},0.55)".format(r * 255, g * 255, b * 255)
+            alpha = _GLOW_ALPHA_IDLE if idle else _GLOW_ALPHA_ACTIVE
+            rgba = "rgba({:.0f},{:.0f},{:.0f},{:.2f})".format(
+                r * 255, g * 255, b * 255, alpha
+            )
             self.container.set_css_property("--pill-glow-color", rgba)
         except Exception:
             pass
@@ -594,9 +802,19 @@ class VoicePillWindow(Gtk.Window):
         self._preparing = True
         self._bump_activity()
         self._set_idle(False)
+        # Sessão nova: zera resíduos da anterior para o dot de captação e o
+        # contador de rajada não reaparecerem com dados velhos.
+        self._chip_count = 0
+        if self._capture_on:
+            self._capture_on = False
+            self.mic_dot.set_visible(False)
         self.status_lbl.set_text("Preparando...")
         self.avatar_icon.set_from_icon_name("network-transmit-receive-symbolic")
         self._current_state = LiveVoiceState.CONNECTING
+        self._set_flag("pill-connecting", True)
+        # Descoberta: a pílula acabou de aparecer e o estado ainda não tem nada
+        # a dizer — é a janela natural para apresentar os atalhos.
+        self._start_hints()
         if not self.get_visible():
             self.present()
         self.place_smart()
@@ -619,6 +837,25 @@ class VoicePillWindow(Gtk.Window):
         if state != LiveVoiceState.CONNECTING:
             self._preparing = False
         self._bump_activity()
+
+        # Estados terminais agendam auto-ocultação: a pílula não pode ficar presa
+        # mostrando "Erro"/"Desconectado" para sempre. Qualquer estado vivo
+        # cancela o agendamento — a sessão se recuperou.
+        if state in (LiveVoiceState.ERROR, LiveVoiceState.DISCONNECTED):
+            self._schedule_autohide()
+        else:
+            self._cancel_autohide()
+
+        # Feedback de conexão: a pílula "respira" (avatar + tint) até o WebSocket
+        # subir. Sem isso, "Conectando..." era só texto parado.
+        self._set_flag("pill-connecting", state == LiveVoiceState.CONNECTING)
+
+        # A dica de atalho ocupa o lugar do texto de status. Ela sobrevive a
+        # CONNECTING/LISTENING (aí os visuais — respiração, dot, onda — já contam
+        # o estado), mas sai assim que o texto passa a ser a única fonte de
+        # informação: falando, pensando, executando ou erro.
+        if state not in (LiveVoiceState.CONNECTING, LiveVoiceState.LISTENING):
+            self._end_hints()
 
         # Map estado → (status, icon) — preserve EXACTAMENTE os textos que os testes pinam
         if state == LiveVoiceState.CONNECTING:
@@ -668,6 +905,108 @@ class VoicePillWindow(Gtk.Window):
 
         self.drawing_area.queue_draw()
         return GLib.SOURCE_REMOVE
+
+    # ------------------------------------------------------------------
+    # Auto-ocultação em estados terminais (erro / desconexão)
+    # ------------------------------------------------------------------
+    def _schedule_autohide(self) -> None:
+        """Agenda o fechamento da pílula após um estado terminal (idempotente).
+
+        Sem isto a pílula ficava presa mostrando "Erro de áudio"/"Desconectado"
+        até o usuário fechar na mão — um estado morto com cara de sessão viva.
+        Respeita ``pill_error_autohide_sec`` (0 = desliga).
+        """
+        if self._autohide_id:
+            return
+        try:
+            delay = int(getattr(self.config, "pill_error_autohide_sec", 12))
+        except Exception:
+            delay = 12
+        if delay <= 0:
+            return
+        self._autohide_id = GLib.timeout_add_seconds(delay, self._do_autohide)
+
+    def _cancel_autohide(self) -> None:
+        """Cancela o auto-hide agendado (a sessão voltou a um estado vivo)."""
+        if self._autohide_id:
+            try:
+                GLib.source_remove(self._autohide_id)
+            except Exception:
+                pass
+            self._autohide_id = 0
+
+    def _do_autohide(self) -> bool:
+        """Fecha a pílula se o estado terminal persistir. Roda no timeout."""
+        # Zera antes de fechar: do_close_request → _release_sources tentaria
+        # remover este mesmo source (já em execução).
+        self._autohide_id = 0
+        if not self._alive or not self.get_visible():
+            return GLib.SOURCE_REMOVE
+        if self._current_state not in (LiveVoiceState.ERROR, LiveVoiceState.DISCONNECTED):
+            return GLib.SOURCE_REMOVE
+        logger.info("Pílula: auto-ocultando após estado %s.", self._current_state)
+        self.do_close_request()
+        return GLib.SOURCE_REMOVE
+
+    # ------------------------------------------------------------------
+    # Dicas de atalho (descoberta)
+    # ------------------------------------------------------------------
+    def _start_hints(self) -> None:
+        """Mostra o ciclo de dicas de atalho, uma vez por execução do app.
+
+        Chamada em `show_preparing`, ou seja no instante em que a pílula aparece
+        pela primeira vez. Sem isso os atalhos de teclado (`Espaço`, `i`, `p`…)
+        só existiam para quem abrisse o menu de clique direito.
+        """
+        if self._hints_shown:
+            return
+        self._hints_shown = True
+        try:
+            enabled = bool(getattr(self.config, "pill_hint_tips", True))
+            total = int(getattr(self.config, "pill_hint_sec", 7))
+        except Exception:
+            enabled, total = True, 7
+        if not enabled or total <= 0:
+            return
+        # Arredonda PARA CIMA: com `total // intervalo` o ciclo era truncado e as
+        # últimas dicas nunca apareciam (6 dicas × 2s num teto de 7s mostravam só
+        # 3). O default do config cobre o ciclo inteiro.
+        self._hint_ticks_left = max(1, -(-total // _HINT_INTERVAL_SEC))
+        self._hint_index = 0
+        self._show_hint_tip()
+        self._hint_id = GLib.timeout_add_seconds(_HINT_INTERVAL_SEC, self._advance_hint)
+
+    def _show_hint_tip(self) -> None:
+        """Troca o texto de status pela dica atual (ocupa o mesmo lugar)."""
+        try:
+            self.hint_lbl.set_text(_HINT_TIPS[self._hint_index % len(_HINT_TIPS)])
+            self.hint_lbl.set_visible(True)
+            self.status_lbl.set_visible(False)
+        except Exception:
+            pass
+
+    def _advance_hint(self) -> bool:
+        self._hint_ticks_left -= 1
+        if self._hint_ticks_left <= 0 or not self._alive:
+            self._end_hints()
+            return GLib.SOURCE_REMOVE
+        self._hint_index += 1
+        self._show_hint_tip()
+        return GLib.SOURCE_CONTINUE
+
+    def _end_hints(self) -> None:
+        """Devolve o lugar ao texto de status (idempotente)."""
+        if self._hint_id:
+            try:
+                GLib.source_remove(self._hint_id)
+            except Exception:
+                pass
+            self._hint_id = 0
+        try:
+            self.hint_lbl.set_visible(False)
+            self.status_lbl.set_visible(True)
+        except Exception:
+            pass
 
     def _ui_on_audio_level(self, level: float) -> bool:
         if not self._alive:
@@ -731,6 +1070,15 @@ class VoicePillWindow(Gtk.Window):
             return GLib.SOURCE_REMOVE
         self._privacy_shielded = bool(shielded)
         self._set_flag("pill-privacy", self._privacy_shielded)
+        # O tratamento do avatar (`.voice-pill-avatar.pill-privacy-on`) foi
+        # desenhado no "Dynamic Island v2" mas nunca foi ligado: a regra existia
+        # na folha e nada a aplicava. Sem ela, "privacidade ativa" e "ouvindo"
+        # ficavam a um tint âmbar sutil de distância — indistinguíveis de relance.
+        # `_set_flag` age no container, então a classe do avatar é aplicada aqui.
+        if self._privacy_shielded:
+            self.avatar_box.add_css_class("pill-privacy-on")
+        else:
+            self.avatar_box.remove_css_class("pill-privacy-on")
         if shielded and label:
             self.avatar_box.set_tooltip_text(f"Privacidade: {label}")
         else:
@@ -753,25 +1101,39 @@ class VoicePillWindow(Gtk.Window):
     # Chip de tool + timer de sessão
     # ------------------------------------------------------------------
     def _show_chip(self, text: str, ok: bool) -> None:
-        """Mostra um chip transitório no status_lbl. Restaura após 3s."""
+        """Mostra um chip transitório no status_lbl. Restaura após 3s.
+
+        Rajadas: quando várias tools rodam em sequência, cada chip reinicia o
+        timer de 3s e o texto pisca de um para o outro sem o usuário conseguir
+        ler nada. Por isso contamos a rajada e prefixamos a partir do segundo
+        chip ("2× Executando…"), deixando explícito que houve progresso.
+        """
         if self._chip_restore_id:
             try:
                 GLib.source_remove(self._chip_restore_id)
             except Exception:
                 pass
             self._chip_restore_id = 0
+        # Um chip é informação que o usuário provocou: ele não pode ficar
+        # invisível atrás da dica de atalho.
+        self._end_hints()
         if not self._chip_active:
-            # Primeiro chip: salvar estado atual
+            # Primeiro chip da rajada: salvar estado atual e zerar o contador.
             self._chip_saved_text = self.status_lbl.get_text()
             self._chip_saved_classes = [
                 c for c in self.container.get_css_classes() if c.startswith("pill-chip-")
             ]
+            self._chip_count = 0
+        self._chip_count += 1
         # Limpa classes antigas de chip
         for cls in self._chip_saved_classes:
             self._set_flag(cls, False)
-        # Aplica nova classe + texto
+        # Aplica nova classe + texto (prefixo de contagem só na rajada)
         self._set_flag("pill-chip-ok" if ok else "pill-chip-fail", True)
-        self.status_lbl.set_text(text)
+        if self._chip_count > 1:
+            self.status_lbl.set_text(f"{self._chip_count}× {text}")
+        else:
+            self.status_lbl.set_text(text)
         self._chip_active = True
         self._chip_restore_id = GLib.timeout_add_seconds(3, self._restore_status)
 
@@ -783,6 +1145,7 @@ class VoicePillWindow(Gtk.Window):
             self._set_flag(cls, True)
         self.status_lbl.set_text(self._chip_saved_text or "")
         self._chip_active = False
+        self._chip_count = 0
         return GLib.SOURCE_REMOVE
 
     def _update_session_timer(self) -> bool:
@@ -822,7 +1185,15 @@ class VoicePillWindow(Gtk.Window):
         self._details_popover.popup()
 
     def _on_toggle_video_stream(self) -> None:
-        """Alterna a transmissão contínua de tela (Live Video) no cliente."""
+        """Alterna a transmissão contínua de tela (Live Video) no cliente.
+
+        Entrega C / P1-5: se o modo ativo não transmite tela (local), diz isso — antes o
+        stub devolvia `False` e a pílula anunciava "Transmissão de tela pausada", que
+        implica um recurso existente e apenas parado.
+        """
+        if not _supports_video(self.live_client):
+            self._show_chip("Compartilhamento de tela indisponível no modo local", ok=False)
+            return
         if hasattr(self.live_client, "toggle_video_stream"):
             now_on = self.live_client.toggle_video_stream(fps=1.0)
             self._video_streaming = bool(now_on)
@@ -866,46 +1237,63 @@ class VoicePillWindow(Gtk.Window):
         screen_sec_lbl.add_css_class("caption")
         screen_sec.append(screen_sec_lbl)
 
+        # Entrega C / P1-5: no modo local os stubs de vídeo (`local_voice.py:1090-1101`)
+        # fazem `hasattr(client, "toggle_video_stream")` passar. Antes, esta seção mostrava
+        # "Compartilhamento pausado" e um botão "Transmitir Tela" que, ao ser clicado,
+        # respondia "Transmissão de tela pausada" — ou seja, afirmava que o recurso existia
+        # e estava apenas parado. O modo local é 100% offline e não captura tela: o honesto
+        # é dizer que não existe, em vez de oferecer um controle morto.
+        supports_video = _supports_video(self.live_client)
+
         is_streaming = getattr(self.live_client, "is_video_streaming", lambda: self._video_streaming)()
         status_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         status_dot = Gtk.Label(label="●" if is_streaming else "○")
         if is_streaming:
             status_dot.add_css_class("pill-rec-dot")
-        status_txt = "Transmitindo para a IA (1 FPS)" if is_streaming else "Compartilhamento pausado"
+        if not supports_video:
+            status_txt = "Indisponível no modo local"
+        elif is_streaming:
+            status_txt = "Transmitindo para a IA (1 FPS)"
+        else:
+            status_txt = "Compartilhamento pausado"
         status_row.append(status_dot)
-        status_row.append(Gtk.Label(label=status_txt, xalign=0))
+        status_lbl_row = Gtk.Label(label=status_txt, xalign=0)
+        status_lbl_row.add_css_class("caption")
+        if not supports_video:
+            status_lbl_row.add_css_class("dim-label")
+        status_row.append(status_lbl_row)
         screen_sec.append(status_row)
 
-        target_name = "Desktop Completo"
-        fence = getattr(self.live_client, "fence", None)
-        if fence:
-            target_win = fence.get_target_window() if hasattr(fence, "get_target_window") else None
-            if target_win:
-                target_name = f"Janela: {target_win.display_name(26)}"
+        if supports_video:
+            target_name = "Desktop Completo"
+            fence = getattr(self.live_client, "fence", None)
+            if fence:
+                target_win = fence.get_target_window() if hasattr(fence, "get_target_window") else None
+                if target_win:
+                    target_name = f"Janela: {target_win.display_name(26)}"
+                else:
+                    active_mon = fence.get_active_monitor() if hasattr(fence, "get_active_monitor") else None
+                    if active_mon:
+                        target_name = f"Monitor: {active_mon.name}"
             else:
-                active_mon = fence.get_active_monitor() if hasattr(fence, "get_active_monitor") else None
-                if active_mon:
-                    target_name = f"Monitor: {active_mon.name}"
-        else:
-            try:
-                from ..core.window_manager import WindowManager
-                w = WindowManager.get_active_or_last_window()
-                if w:
-                    target_name = f"Janela: {w.display_name(26)}"
-            except Exception:
-                pass
+                try:
+                    from ..core.window_manager import WindowManager
+                    w = WindowManager.get_active_or_last_window()
+                    if w:
+                        target_name = f"Janela: {w.display_name(26)}"
+                except Exception:
+                    pass
 
-        target_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        target_icon = Gtk.Image.new_from_icon_name("video-display-symbolic")
-        target_icon.set_pixel_size(14)
-        target_lbl = Gtk.Label(label=target_name, xalign=0)
-        target_lbl.add_css_class("caption")
-        target_lbl.add_css_class("dim-label")
-        target_row.append(target_icon)
-        target_row.append(target_lbl)
-        screen_sec.append(target_row)
+            target_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            target_icon = Gtk.Image.new_from_icon_name("video-display-symbolic")
+            target_icon.set_pixel_size(14)
+            target_lbl = Gtk.Label(label=target_name, xalign=0)
+            target_lbl.add_css_class("caption")
+            target_lbl.add_css_class("dim-label")
+            target_row.append(target_icon)
+            target_row.append(target_lbl)
+            screen_sec.append(target_row)
 
-        if hasattr(self.live_client, "toggle_video_stream"):
             btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
             toggle_vid_btn = Gtk.Button()
             toggle_vid_btn.add_css_class("pill")
@@ -952,9 +1340,15 @@ class VoicePillWindow(Gtk.Window):
         mic_row.append(mic_lbl)
         res_sec.append(mic_row)
 
-        model_name = getattr(self.live_client, "model", "") or getattr(self.config, "gemini_live_model", "Gemini 2.0 Flash Live")
-        from .live_view import live_model_label
-        model_display = live_model_label(model_name)
+        # Entrega C / P1-5: o cliente local não tem `model`, então o fallback antigo
+        # anunciava "Gemini 2.0 Flash Live" enquanto quem respondia era o modelo local
+        # (`config.ollama_model`). A linha passa a nomear o modelo do modo ativo.
+        if self._mode == "local":
+            model_display = getattr(self.config, "ollama_model", "modelo local")
+        else:
+            model_name = getattr(self.live_client, "model", "") or getattr(self.config, "gemini_live_model", "Gemini 2.0 Flash Live")
+            from .live_view import live_model_label
+            model_display = live_model_label(model_name)
         model_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         model_icon = Gtk.Image.new_from_icon_name("starred-symbolic")
         model_icon.set_pixel_size(14)
@@ -974,10 +1368,22 @@ class VoicePillWindow(Gtk.Window):
         voice_row.append(voice_lbl)
         res_sec.append(voice_row)
 
+        # Entrega C / P1-5: o texto era fixo ("ativos"), mas no modo local `fence` é None
+        # (`local_voice.py:576`) e não há captura de tela — a cerca não pode estar ativa.
+        # A causa importa para o rótulo: no local o recurso **não existe**; na nuvem ele
+        # existe e está apenas inativo.
+        fence_active = bool(getattr(self.live_client, "fence", None))
         fence_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         fence_icon = Gtk.Image.new_from_icon_name("security-high-symbolic")
         fence_icon.set_pixel_size(14)
-        fence_lbl = Gtk.Label(label="Cerca Espacial & Cursor Fantasma ativos", xalign=0)
+        if fence_active:
+            fence_lbl = Gtk.Label(label="Cerca Espacial & Cursor Fantasma ativos", xalign=0)
+        elif self._mode == "local":
+            fence_lbl = Gtk.Label(label="Cerca Espacial indisponível no modo local", xalign=0)
+            fence_lbl.add_css_class("dim-label")
+        else:
+            fence_lbl = Gtk.Label(label="Cerca Espacial inativa", xalign=0)
+            fence_lbl.add_css_class("dim-label")
         fence_lbl.add_css_class("caption")
         fence_row.append(fence_icon)
         fence_row.append(fence_lbl)
@@ -1085,6 +1491,32 @@ class VoicePillWindow(Gtk.Window):
                 pass
         self.do_close_request()
 
+    def _on_avatar_pressed(self, _gesture, n_press: int, _x: float, _y: float) -> None:
+        if n_press >= 2:
+            self._on_hide_only()
+
+    def _on_hide_only(self) -> None:
+        """Esconde a pílula **sem** encerrar a sessão de voz.
+
+        Diferente de `_on_close_clicked`: o cliente Live continua conectado e
+        ouvindo; só a janela sai de cena. É a saída para quem quer liberar a tela
+        sem perder a conversa — antes, fechar a pílula era a única forma de
+        escondê-la e isso encerrava a sessão junto.
+
+        Não chama `_release_sources()` direto: esconder já dispara
+        `_on_visible_changed`, que faz isso — chamar duas vezes é inofensivo, mas
+        manter um caminho só evita divergência.
+        """
+        if self._details_popover:
+            try:
+                self._details_popover.popdown()
+            except Exception:
+                pass
+        self.save_geometry()
+        self.set_visible(False)
+        if self.on_hide_cb:
+            self.on_hide_cb()
+
     def _on_interrupt_action(self, *_args) -> None:
         """Interrompe o agente (barge-in) — usado por menu, tecla 'i' e long-press."""
         if callable(getattr(self.live_client, "interrupt", None)):
@@ -1124,6 +1556,22 @@ class VoicePillWindow(Gtk.Window):
             logger.warning("Não foi possível salvar pill_corner: %s", exc)
         self.place_smart()
 
+    def _on_set_corner_action(self, action: Gio.SimpleAction, param) -> None:
+        """Handler da ação com estado `pill.set-corner` (target = código do canto).
+
+        O `set_state` é o que mantém a marca de seleção no submenu alinhada com a
+        posição real — sem ele o PopoverMenu continuaria marcando a posição
+        anterior.
+        """
+        try:
+            corner = param.get_string() if param is not None else ""
+        except Exception:
+            corner = ""
+        if corner not in _CORNER_OFFSETS:
+            return
+        action.set_state(GLib.Variant.new_string(corner))
+        self._on_set_corner(corner)
+
     # ------------------------------------------------------------------
     # Atalhos de teclado
     # ------------------------------------------------------------------
@@ -1144,6 +1592,10 @@ class VoicePillWindow(Gtk.Window):
             return True
         if keyval in (Gdk.KEY_i, Gdk.KEY_I):
             self._on_interrupt_action()
+            return True
+        if keyval in (Gdk.KEY_h, Gdk.KEY_H) and not ctrl:
+            # "Ocultar sem encerrar": libera a tela mantendo a sessão viva.
+            self._on_hide_only()
             return True
         if keyval in (Gdk.KEY_p, Gdk.KEY_P) and not ctrl:
             self._on_set_pinned()
@@ -1183,9 +1635,17 @@ class VoicePillWindow(Gtk.Window):
         menu.append("Mutar / Desmutar (Ctrl+M)", "pill.toggle-mute")
 
         # Submenu de posição
+        # Submenu de posição. Antes listava os códigos crus ("top-center"), o que
+        # não diz nada a quem só quer mover a pílula — e arrastar não funciona em
+        # todo compositor Wayland, então este menu é o caminho confiável.
+        # Ação com ESTADO (não uma por canto): o PopoverMenu marca a posição atual.
         corner_menu = Gio.Menu()
-        for corner in _CORNER_OFFSETS:
-            corner_menu.append(corner, f"pill.corner::{corner}")
+        for corner, label in _CORNER_LABELS.items():
+            item = Gio.MenuItem.new(label, None)
+            item.set_action_and_target_value(
+                "pill.set-corner", GLib.Variant.new_string(corner)
+            )
+            corner_menu.append_item(item)
         menu.append_submenu("Posição", corner_menu)
 
         pinned_label = (
@@ -1194,7 +1654,8 @@ class VoicePillWindow(Gtk.Window):
             else "Fixar acima de tudo"
         )
         menu.append(pinned_label, "pill.toggle-pinned")
-        menu.append("Expandir (?)", "pill.expand")
+        menu.append("Ocultar sem encerrar (h)", "pill.hide-only")
+        menu.append("Abrir na janela do Copilot (?)", "pill.expand")
         menu.append("Encerrar (Esc)", "pill.close")
 
         popover = Gtk.PopoverMenu.new_from_model(menu)
@@ -1206,6 +1667,7 @@ class VoicePillWindow(Gtk.Window):
             ("interrupt", self._on_interrupt_action),
             ("toggle-mute", lambda *_: self._on_toggle_mute(self.mute_btn)),
             ("toggle-pinned", self._on_set_pinned),
+            ("hide-only", lambda *_: self._on_hide_only()),
             ("expand", lambda *_: self._on_expand_clicked(self.expand_btn)),
             ("close", lambda *_: self._on_close_clicked()),
         ):
@@ -1216,11 +1678,18 @@ class VoicePillWindow(Gtk.Window):
         ptt_info = Gio.SimpleAction.new("ptt-info", None)
         ptt_info.connect("activate", lambda *_: None)
         action_group.add_action(ptt_info)
-        # Cantos
-        for corner in _CORNER_OFFSETS:
-            act = Gio.SimpleAction.new(f"corner::{corner}", None)
-            act.connect("activate", self._on_set_corner, corner)
-            action_group.add_action(act)
+        # Posição: ação com estado — é o estado que faz o PopoverMenu marcar a
+        # posição atual no submenu.
+        current_corner = str(getattr(self.config, "pill_corner", "top-center"))
+        if current_corner not in _CORNER_OFFSETS:
+            current_corner = "top-center"
+        corner_action = Gio.SimpleAction.new_stateful(
+            "set-corner",
+            GLib.VariantType.new("s"),
+            GLib.Variant.new_string(current_corner),
+        )
+        corner_action.connect("activate", self._on_set_corner_action)
+        action_group.add_action(corner_action)
 
         self.insert_action_group("pill", action_group)
         return popover
@@ -1260,6 +1729,16 @@ class VoicePillWindow(Gtk.Window):
             pulse = 0.85 + 0.15 * math.sin(self._anim_time * math.pi / 2.0)
             self.rec_dot.set_opacity(pulse)
 
+        # Pulso de conexão: o avatar "respira" até a sessão subir. GTK4 não anima
+        # por CSS, então a opacidade é dirigida pelo frame clock.
+        if self._current_state == LiveVoiceState.CONNECTING:
+            self.avatar_box.set_opacity(0.55 + 0.45 * abs(math.sin(self._anim_time * 2.4)))
+        elif self.avatar_box.get_opacity() < 1.0:
+            self.avatar_box.set_opacity(1.0)
+
+        # Indicador explícito de captação (microfone ativo, não mudo)
+        self._tick_capture_indicator()
+
         # Auto-hide ocioso
         self._tick_idle_check()
 
@@ -1283,6 +1762,40 @@ class VoicePillWindow(Gtk.Window):
             self._set_idle(True)
         else:
             self._set_idle(False)
+
+    def _tick_capture_indicator(self) -> None:
+        """Acende o dot de captação quando o microfone está de fato ouvindo.
+
+        O visualizador mostra a *forma* do áudio; este dot responde à pergunta
+        binária que o usuário realmente faz — "o mic está me ouvindo agora?".
+        Sem ele, um silêncio na tela era ambíguo: podia ser "nada foi dito" ou
+        "o microfone morreu".
+
+        Regras:
+        - Armado (visível, opacidade de repouso) em LISTENING sem mudo.
+        - Opacidade sobe com o nível suavizado: repouso → fala detectada.
+        - Invisível em qualquer outro estado ou com o mic mudo — aí quem
+          comunica é o `pill-muted` + a linha vermelha do visualizador.
+        """
+        try:
+            muted = bool(self.live_client.is_muted()) if hasattr(self.live_client, "is_muted") else False
+        except Exception:
+            muted = False
+
+        armed = self._current_state == LiveVoiceState.LISTENING and not muted
+        if not armed:
+            if self._capture_on:
+                self._capture_on = False
+                self.mic_dot.set_visible(False)
+            return
+
+        if not self._capture_on:
+            self._capture_on = True
+            self.mic_dot.set_visible(True)
+
+        # 0.30 = armado mas silencioso; 1.0 = voz detectada acima do limiar.
+        lvl = self._smooth_audio_level / max(_MIC_ACTIVE_LEVEL, 0.001)
+        self.mic_dot.set_opacity(0.30 + 0.70 * max(0.0, min(1.0, lvl)))
 
     # ------------------------------------------------------------------
     # Visualizer (dispatch por estilo)
