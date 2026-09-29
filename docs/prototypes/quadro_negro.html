@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quadro Negro Digital — Protótipo</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"
+  onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]});"></script>
+<style>
+  :root{
+    --bg:#f4f5f7; --panel:#ffffff; --ink:#1d1f23; --muted:#6b7280;
+    --line:#c7ccd4; --accent:#534ab7; --accent2:#0f6e56; --warn:#ba7517;
+    --blue:#185fa5; --teal:#0f6e56; --amber:#854f0b; --green:#3b6d11;
+    --radius:12px; --shadow:0 1px 3px rgba(0,0,0,.08),0 8px 24px rgba(0,0,0,.06);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--ink)}
+  .app{display:grid;grid-template-rows:auto 1fr;height:100vh}
+  header{display:flex;align-items:center;gap:14px;padding:10px 16px;background:var(--panel);border-bottom:1px solid var(--line);flex-wrap:wrap}
+  header h1{font-size:15px;font-weight:600;margin:0}
+  .toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  button{font:inherit;font-size:13px;border:1px solid var(--line);background:#fff;color:var(--ink);
+    padding:6px 12px;border-radius:8px;cursor:pointer}
+  button:hover{background:#f0f1f4}
+  button.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+  .toggle{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted)}
+  .main{display:grid;grid-template-columns:1fr 360px;min-height:0}
+  .stage{position:relative;overflow:hidden;background:
+    radial-gradient(circle at 1px 1px,#e3e6ec 1px,transparent 0) 0 0/22px 22px,#eef0f3}
+  svg{width:100%;height:100%;display:block;cursor:grab}
+  svg.dragging{cursor:grabbing}
+  .legend{position:absolute;left:14px;bottom:12px;background:rgba(255,255,255,.9);border:1px solid var(--line);
+    border-radius:8px;padding:8px 10px;font-size:12px;color:var(--muted);box(--shadow)}
+  .legend b{color:var(--ink)}
+  .hint{position:absolute;right:14px;top:12px;background:rgba(255,255,255,.9);border:1px solid var(--line);
+    border-radius:8px;padding:6px 10px;font-size:12px;color:var(--muted)}
+  .node rect{stroke-width:1.2}
+  .node text{pointer-events:none;font-size:13px}
+  .node .sub{font-size:11px;fill:var(--muted)}
+  .node.root rect{fill:#EEEDFE;stroke:var(--accent)}
+  .node.branch.method rect{fill:#E1F5EE;stroke:var(--teal)}
+  .node.branch.viewpoint rect{fill:#FAEEDA;stroke:var(--warn)}
+  .node.step rect{fill:#fff;stroke:var(--line)}
+  .node.step.method rect{stroke:var(--teal)}
+  .node.step.viewpoint rect{stroke:var(--warn)}
+  .node.selected rect{stroke-width:2.4}
+  .node.dim{opacity:.28}
+  .node.pulse rect{animation:beat 1s ease-in-out}
+  @keyframes beat{0%,100%{stroke-width:1.2}50%{stroke-width:3.6}}
+  .edge{stroke:var(--line);stroke-width:1.4;fill:none}
+  .edge.active{stroke:var(--accent);stroke-width:2.2}
+  /* side panel */
+  aside{background:var(--panel);border-left:1px solid var(--line);overflow:auto;padding:16px}
+  aside h2{font-size:14px;margin:2px 0 8px}
+  aside h3{font-size:13px;margin:16px 0 6px;color:var(--accent)}
+  .card{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:8px}
+  .card.alt{border-left:3px solid var(--amber)}
+  .card.step{border-left:3px solid var(--teal)}
+  .card .t{font-weight:600;font-size:13px}
+  .card .d{font-size:13px;color:#374151;margin-top:4px;line-height:1.5}
+  .card .j{font-size:12px;color:var(--muted);margin-top:6px;font-style:italic}
+  .katex{font-size:1.02em}
+  .rigor{display:none;border-top:2px dashed var(--warn);margin-top:14px;padding-top:10px}
+  body.rigor-on .rigor{display:block}
+  .rigor .row{display:grid;grid-template-columns:54px 1fr;gap:8px;padding:4px 0;font-size:13px}
+  .rigor .row b{color:var(--warn)}
+  .score li{margin:4px 0;font-size:13px}
+  .tabs{display:flex;gap:6px;flex-wrap:wrap}
+  .tab{font-size:12px;padding:5px 10px;border-radius:999px;border:1px solid var(--line);cursor:pointer;background:#fff}
+  .tab.active{background:var(--accent);color:#fff;border-color:var(--accent)}
+  .muted{color:var(--muted);font-size:12px}
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>Quadro Negro Digital</h1>
+    <div class="toolbar">
+      <div class="tabs" id="tabs"></div>
+      <button id="fit">Ajustar</button>
+      <button id="play" class="primary">▶ Reproduzir</button>
+      <label class="toggle"><input type="checkbox" id="rigor"> Modo rigor chinês</label>
+    </div>
+  </header>
+  <div class="main">
+    <div class="stage">
+      <svg id="svg" viewBox="0 0 960 640" preserveAspectRatio="xMidYMid meet">
+        <defs>
+          <marker id="arw" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M2 1L8 5L2 9" fill="none" stroke="#888" stroke-width="1.4" stroke-linecap="round"/>
+          </marker>
+        </defs>
+        <g id="viewport"></g>
+      </svg>
+      <div class="hint">Arraste para mover · roda do mouse para zoom · clique num nó</div>
+      <div class="legend"><b>Nós:</b> raiz = enunciado · verde = método · âmbar = ponto de vista · branco = passo</div>
+    </div>
+    <aside id="panel">
+      <h2 id="p-title">Selecione um nó no quadro</h2>
+      <div id="p-body" class="muted">Clique no enunciado, num método ou num passo para ver o raciocínio completo, a justificativa e a matemática tipografada.</div>
+      <div class="rigor" id="rigor-panel"></div>
+    </aside>
+  </div>
+</div>
+
+<script>
+/* ---- Dados: o mesmo SolutionGraph do math_solver.py ---- */
+const GRAPH = {
+  problem_statement: "Resolva $x^2 - 5x + 6 = 0$.",
+  givens: "Equação do 2º grau: $a=1,\\, b=-5,\\, c=6$.",
+  unknown: "Valores de $x$ que anulam a expressão.",
+  answer: "$S = \\{2,\\, 3\\}$",
+  branches: [
+    { id:"m_fator", kind:"method", name:"Fatoração",
+      summary:"Escreve o trinômio como produto de dois binômios.",
+      pros:"Mais rápido quando as raízes são inteiras.",
+      steps:[
+        {id:"f1", title:"Identificar a e c", detail:"a = 1, c = 6. Precisamos de dois números cujo produto é 6 e cuja soma é 5.", latex:"a=1,\\; c=6,\\; p\\cdot q = 6,\\; p+q = 5", justification:"Propriedade do produto de binômios $(x+p)(x+q)$."},
+        {id:"f2", title:"Encontrar os fatores", detail:"2 e 3 satisfazem: 2·3 = 6 e 2+3 = 5.", latex:"(x-2)(x-3) = x^2 - 5x + 6", justification:"A soma dos termos constantes iguala o coeficiente de $x$."},
+        {id:"f3", title:"Igualar a zero", detail:"Cada fator pode anular a expressão.", latex:"x-2=0 \\Rightarrow x=2 \\quad|\\quad x-3=0 \\Rightarrow x=3", justification:"Se um produto é zero, algum fator é zero."}
+      ]},
+    { id:"m_bhas", kind:"method", name:"Fórmula de Bhaskara",
+      summary:"Aplica a fórmula geral para $ax^2+bx+c=0$.",
+      pros:"Universal: funciona mesmo sem raízes 'de adivinhação'.",
+      steps:[
+        {id:"b1", title:"Coeficientes", detail:"a = 1, b = -5, c = 6.", latex:"a=1,\\; b=-5,\\; c=6", justification:"Leitura direta do trinômio."},
+        {id:"b2", title:"Discriminante", detail:"Calcula $\\Delta = b^2 - 4ac$.", latex:"\\Delta = (-5)^2 - 4(1)(6) = 25 - 24 = 1", justification:"O sinal de $\\Delta$ classifica o número de raízes reais."},
+        {id:"b3", title:"Aplicar a fórmula", detail:"$x = (-b \\pm \\sqrt{\\Delta}) / 2a$.", latex:"x = \\frac{5 \\pm \\sqrt{1}}{2} = \\frac{5 \\pm 1}{2}", justification:"Fórmula geral válida para todo $a \\neq 0$."},
+        {id:"b4", title:"Raízes", detail:"Separa os dois sinais.", latex:"x_1 = 3,\\; x_2 = 2", justification:"Subtrair e somar $\\sqrt{\\Delta}$ cobre os dois casos."}
+      ]},
+    { id:"v_geo", kind:"viewpoint", name:"Geométrico (数形结合)",
+      summary:"As raízes são os pontos onde a parábola corta o eixo x.",
+      steps:[
+        {id:"g1", title:"Interpretação", detail:"$y = x^2 - 5x + 6$ é uma parábola; as raízes são seus interceptos com o eixo $x$.", latex:"y = x^2 - 5x + 6 \\;\\text{intercepta } x \\text{ em } x=2,3", justification:"Zeros da função = soluções da equação."}
+      ]}
+  ],
+  alternatives:[
+    {name:"Completar o quadrado", desc:"Reescreve como $(x - 5/2)^2 = 1/4$ e tira a raiz — ponte para a fórmula."},
+    {name:"举一反三 (variação)", desc:"Mude 6 → 6,25 e as raízes se tornam iguais ($x=2{,}5$): estuda o caso de raiz dupla."}
+  ],
+  verification:{passed:true, checks:["p(2) = 0.00e+00 → OK","p(3) = 0.00e+00 → OK"]},
+  scoring:{total:5, items:[
+    {step:"Identificar coeficientes", points:1},
+    {step:"Método aplicado corretamente", points:2},
+    {step:"Cálculo do discriminante/raízes", points:1},
+    {step:"Verificação por substituição", points:1}
+  ]}
+};
+
+/* ---- Layout ---- */
+const W = 960, ns = "http://www.w3.org/2000/svg";
+const rootNode = {id:"root", type:"root", label:"Enunciado", sub:GRAPH.problem_statement, x:W/2, y:60, w:280, h:60};
+const branches = GRAPH.branches.map((b,i)=>{
+  const x = 140 + i*((W-280)/(GRAPH.branches.length-1));
+  return {id:b.id, type:"branch", kind:b.kind, ref:b, label:b.name, sub:b.summary, x, y:200, w:200, h:64};
+});
+const stepNodes = [];
+branches.forEach(br=>{
+  (br.ref.steps||[]).forEach((s,j)=>{
+    stepNodes.push({id:s.id, type:"step", kind:br.kind, ref:s, branchId:br.id,
+      label:s.title, sub:s.detail, x:br.x, y:320 + j*86, w:230, h:62});
+  });
+});
+const allNodes = [rootNode, ...branches, ...stepNodes];
+const edges = [];
+branches.forEach(br=>edges.push({from:rootNode, to:br}));
+stepNodes.forEach(n=>{
+  const br = branches.find(b=>b.id===n.branchId);
+  const idx = br.ref.steps.findIndex(s=>s.id===n.id);
+  const prev = idx===0 ? br : stepNodes.find(s=>s.branchId===br.id && br.ref.steps[idx-1].id===s.id);
+  edges.push({from:prev, to:n});
+});
+
+/* ---- Render SVG ---- */
+const vp = document.getElementById("viewport");
+function mk(tag,attrs){const e=document.createElementNS(ns,tag);for(const k in attrs)e.setAttribute(k,attrs[k]);return e;}
+let tx=0,ty=0,k=1;
+function apply(){vp.setAttribute("transform",`translate(${tx},${ty}) scale(${k})`);}
+edges.forEach((e,i)=>{
+  const l=mk("line",{x1:e.from.x,y1:e.from.y+(e.from.h||0),x2:e.to.x,y2:e.to.y,
+    "marker-end":"url(#arw)",class:"edge"});l.dataset.i=i;vp.appendChild(l);e.el=l;
+});
+allNodes.forEach(n=>{
+  const g=mk("g",{class:`node ${n.type} ${n.kind||''}`.trim()});
+  g.appendChild(mk("rect",{x:n.x-n.w/2,y:n.y-n.h/2,width:n.w,height:n.h,rx:10}));
+  const t=mk("text",{x:n.x,y:n.y-(n.sub?6:-2),"text-anchor":"middle"});t.textContent=n.label;g.appendChild(t);
+  if(n.sub){const s=mk("text",{x:n.x,y:n.y+12,"text-anchor":"middle",class:"sub"});
+    s.textContent=(n.sub||"").replace(/\$/g,"").slice(0,46);g.appendChild(s);}
+  g.addEventListener("click",ev=>{ev.stopPropagation();select(n);});
+  vp.appendChild(g);n.el=g;
+});
+
+/* ---- Pan / zoom ---- */
+const svg=document.getElementById("svg");
+let drag=null;
+svg.addEventListener("mousedown",e=>{drag={x:e.clientX,y:e.clientY,tx,ty};svg.classList.add("dragging");});
+window.addEventListener("mouseup",()=>{drag=null;svg.classList.remove("dragging");});
+window.addEventListener("mousemove",e=>{if(!drag)return;tx=drag.tx+(e.clientX-drag.x);ty=drag.ty+(e.clientY-drag.y);apply();});
+svg.addEventListener("wheel",e=>{e.preventDefault();const f=e.deltaY<0?1.1:0.9;tx-=(e.offsetX-tx)*(f-1);ty-=(e.offsetY-ty)*(f-1);k*=f;apply();},{passive:false});
+document.getElementById("fit").onclick=()=>{tx=0;ty=0;k=1;apply();};
+
+/* ---- Selection / panel ---- */
+function math(el,tex){ // render katex if available else fallback
+  if(window.katex){try{el.innerHTML="";katex.render(tex,el,{throwOnError:false});return;}catch(e){}}
+  el.textContent=tex.replace(/\$/g,"");
+}
+function select(n){
+  allNodes.forEach(x=>x.el.classList.remove("selected"));
+  n.el.classList.add("selected");
+  // focus branch + its steps
+  highlightBranch(n.type==="root"?null:(n.branchId||n.id));
+  document.getElementById("p-title").textContent=n.label;
+  const body=document.getElementById("p-body");body.className="";body.innerHTML="";
+  if(n.type==="root"){
+    body.innerHTML=`<div class="card"><div class="t">Enunciado</div><div class="d" id="rt"></div></div>`;
+    math(document.getElementById("rt"),GRAPH.problem_statement);
+  } else if(n.type==="branch"){
+    const b=n.ref;
+    let h=`<div class="card"><div class="t">${b.name}</div><div class="d">${b.summary}</div>`+
+      (b.pros?`<div class="j">Prós: ${b.pros}</div>`:``)+`</div>`;
+    (b.steps||[]).forEach(s=>{h+=stepCard(s);});
+    body.innerHTML=h;
+  } else {
+    body.innerHTML=stepCard(n.ref);
+  }
+  renderMathInElement(body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]});
+  buildRigor();
+}
+function stepCard(s){
+  return `<div class="card step"><div class="t">${s.title}</div><div class="d">${s.detail}</div>`+
+    (s.latex?`<div style="margin-top:6px" class="kbx">${s.latex}</div>`:``)+
+    (s.justification?`<div class="j">Por quê: ${s.justification}</div>`:``)+`</div>`;
+}
+function highlightBranch(id){
+  allNodes.forEach(x=>{
+    const keep = !id || x.id===id || x.branchId===id || x.type==="root";
+    x.el.classList.toggle("dim",!keep);
+  });
+}
+
+/* ---- Tabs (métodos + ponto de vista) ---- */
+const tabs=document.getElementById("tabs");
+branches.forEach(br=>{
+  const t=document.createElement("div");t.className="tab";t.textContent=br.ref.name;
+  t.onclick=()=>{document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active"));t.classList.add("active");select(br);};
+  tabs.appendChild(t);
+});
+const tAll=document.createElement("div");tAll.className="tab active";tAll.textContent="Todos";
+tAll.onclick=()=>{document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active"));tAll.classList.add("active");
+  allNodes.forEach(x=>x.el.classList.remove("dim"));select(rootNode);};
+tabs.prepend(tAll);
+
+/* ---- Rigor panel (已知/求/解/答 + 步骤分) ---- */
+function buildRigor(){
+  const r=document.getElementById("rigor-panel");
+  let h=`<h3>Modo rigor chinês (rigor chinês)</h3>`;
+  h+=`<div class="row"><b>已知</b><div class="d" id="rk"></div></div>`;
+  h+=`<div class="row"><b>求</b><div class="d" id="rk2"></div></div>`;
+  h+=`<div class="row"><b>答</b><div class="d" id="rk3"></div></div>`;
+  h+=`<h3>Verificação (过程性评价)</h3><ul class="score">`+
+     GRAPH.verification.checks.map(c=>`<li>${c}</li>`).join("")+`</ul>`;
+  h+=`<h3>Pontuação por passo (步骤分)</h3><ul class="score">`+
+     GRAPH.scoring.items.map(it=>`<li>${it.step} — <b>${it.points} pt</b></li>`).join("")+
+     `</ul><div class="muted">Total: ${GRAPH.scoring.total} pontos</div>`;
+  h+=`<h3>Abordagens alternativas (举一反三)</h3>`;
+  GRAPH.alternatives.forEach(a=>{h+=`<div class="card alt"><div class="t">${a.name}</div><div class="d">${a.desc}</div></div>`;});
+  r.innerHTML=h;
+  math(document.getElementById("rk"),GRAPH.givens);
+  math(document.getElementById("rk2"),GRAPH.unknown);
+  math(document.getElementById("rk3"),GRAPH.answer);
+  renderMathInElement(r,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]});
+}
+document.getElementById("rigor").addEventListener("change",e=>{
+  document.body.classList.toggle("rigor-on",e.target.checked);
+  if(e.target.checked) buildRigor();
+});
+
+/* ---- Play: percorre os passos em sequência ---- */
+let playing=false;
+document.getElementById("play").onclick=()=>{
+  if(playing)return;playing=true;
+  const seq=[rootNode,...branches.flatMap(br=>stepNodes.filter(s=>s.branchId===br.id))];
+  let i=0;
+  const tick=()=>{
+    allNodes.forEach(x=>x.el.classList.remove("pulse"));
+    if(i>=seq.length){playing=false;select(rootNode);return;}
+    const n=seq[i++];n.el.classList.add("pulse");select(n);
+    setTimeout(tick,1100);
+  };
+  tick();
+};
+
+apply();select(rootNode);
+</script>
+</body>
+</html>
