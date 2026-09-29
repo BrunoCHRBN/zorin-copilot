@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import html
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -16,13 +17,17 @@ from gi.repository import Adw, Gdk, GLib, Gtk, Pango  # noqa: E402
 
 from ...ai.actions import ActionPlan, ActionType, DesktopAction
 from ...core.session import ChatTurn
+from ...core.desktop.env import DESKTOP_LABELS, current_environment
 from ...core.desktop_context import DesktopContext
 from ...core.context_suggestions import ContextSuggestion, ContextSuggestionEngine
 from ...shell.action_status import ActionOutcome, ActionOutcomeRegistry
 from ..markdown import format_markdown_to_markup  # noqa: F401 - reexportado por compatibilidade
+from .sidebar import build_topic_identity
 
 if TYPE_CHECKING:  # pragma: no cover - apenas para type checking
     from ..app import CopilotWindow
+
+logger = logging.getLogger(__name__)
 
 def get_action_icon(action: DesktopAction) -> str:
     """Retorna o ícone semântico padrão mais adequado para a ação proposta."""
@@ -155,6 +160,41 @@ class ChatStreamView:
     # ------------------------------------------------------------------
     # Construção da tela de boas-vindas
     # ------------------------------------------------------------------
+    def _welcome_state_text(self) -> str:
+        """A linha de estado: o que é esta conversa e onde ela roda.
+
+        Mantém as três partes que o plano pediu, mas a terceira mudou de
+        conteúdo. O plano sugeria o aplicativo ativo ("Chrome ativo"); esse fato
+        já tem dono — o banner de contexto logo abaixo, que mostra "No foco:
+        Chrome: <título>" e se atualiza sozinho. Repeti-lo aqui seria dizer a
+        mesma coisa em dois lugares da mesma tela, que é o problema §0.1.
+
+        No lugar dele vai o **ambiente de desktop**. Para este aplicativo isso
+        não é enfeite: é o que decide quais automações funcionam — `hyprctl` no
+        Hyprland, `gsettings` no GNOME. É a informação que ajusta a expectativa
+        de quem vai pedir uma tarefa.
+        """
+        parts = ["Conversa nova"]
+
+        try:
+            env = current_environment()
+        except Exception as exc:  # noqa: BLE001
+            # A sondagem é leitura de arquivos e de PATH, mas roda no caminho de
+            # abertura da janela: se falhar, a tela de boas-vindas ainda tem de
+            # aparecer. Fica só "Conversa nova".
+            logger.debug("Não foi possível descrever o ambiente: %s", exc)
+            return parts[0]
+
+        parts.append(env.distro.display_name)
+
+        desktop = DESKTOP_LABELS.get(
+            env.desktop, env.desktop.capitalize() if env.desktop else ""
+        )
+        if desktop:
+            parts.append(desktop)
+
+        return " · ".join(parts)
+
     def _build_welcome_box(self) -> Gtk.Box:
         welcome_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
         welcome_box.set_valign(Gtk.Align.CENTER)
@@ -165,10 +205,16 @@ class ChatStreamView:
         header_welcome = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         header_welcome.set_halign(Gtk.Align.CENTER)
 
-        welcome_icon = Gtk.Image.new_from_icon_name("starred-symbolic")
-        welcome_icon.set_pixel_size(44)
-        welcome_icon.add_css_class("welcome-icon")
-        header_welcome.append(welcome_icon)
+        # O posto mais visível da tela estava ocupado por uma estrela decorativa
+        # (`starred-symbolic`, 44px) que não dizia nada sobre esta máquina nem
+        # sobre esta sessão. A mesma área passa a dar orientação: o que é a
+        # conversa e onde ela roda. Custa uma linha e responde à primeira
+        # pergunta de quem abre a janela.
+        self.welcome_state_label = Gtk.Label()
+        self.welcome_state_label.add_css_class("caption")
+        self.welcome_state_label.add_css_class("dim-label")
+        self.welcome_state_label.set_label(self._welcome_state_text())
+        header_welcome.append(self.welcome_state_label)
 
         welcome_title = Gtk.Label(label="<b>Como posso ajudar hoje?</b>", use_markup=True)
         welcome_title.add_css_class("title-2")
@@ -198,25 +244,72 @@ class ChatStreamView:
         self.context_banner_box.append(self.context_banner_label)
         welcome_box.append(self.context_banner_box)
 
-        self.suggestions_grid = Gtk.Grid()
-        self.suggestions_grid.set_column_spacing(10)
-        self.suggestions_grid.set_row_spacing(10)
-        self.suggestions_grid.set_halign(Gtk.Align.CENTER)
-        self.suggestions_grid.set_margin_top(10)
-        self._populate_suggestions_grid()
-        welcome_box.append(self.suggestions_grid)
+        # Dois grupos com rótulo, em vez de uma grade 2×2 única. Antes, "Resumir
+        # esta página" (que fala do que está na tela) e "Voz ao Vivo" (que é um
+        # modo de interação) apareciam como pares, sem nada dizendo que são
+        # coisas de naturezas diferentes.
+        self.suggestions_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        self.suggestions_box.set_halign(Gtk.Align.CENTER)
+        self.suggestions_box.set_margin_top(10)
+        self._populate_suggestions()
+        welcome_box.append(self.suggestions_box)
+
+        # Slot próprio para o "Retomar": a lista vem do histórico, que muda
+        # enquanto o app está aberto, então ela é reconstruída à parte — não faz
+        # sentido recriar a tela de boas-vindas inteira só porque uma conversa
+        # foi criada ou excluída.
+        self.resume_slot = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self._refresh_resume_section()
+        welcome_box.append(self.resume_slot)
 
         return welcome_box
 
-    def _populate_suggestions_grid(self) -> None:
-        while child := self.suggestions_grid.get_first_child():
-            self.suggestions_grid.remove(child)
-
+    def _suggestion_budget(self) -> int:
+        """Quantas sugestões o motor pode devolver, segundo a configuração."""
         limit_val = getattr(getattr(self.ctx, "config", None), "context_suggestions_limit", 4)
         try:
-            limit = int(limit_val)
+            return int(limit_val)
         except (ValueError, TypeError):
-            limit = 4
+            return 4
+
+    def _split_suggestions(
+        self, suggestions: list[ContextSuggestion], limit: int
+    ) -> tuple[list[ContextSuggestion], list[ContextSuggestion]]:
+        """Divide as sugestões em (o que está na tela, como interagir).
+
+        A divisão usa `is_contextual`, que o motor já preenche: é `True` para o
+        que foi derivado da janela em foco ou da área de transferência e `False`
+        para os modos globais. Nenhum metadado novo — o que separa os dois grupos
+        já estava nos dados.
+
+        Uma vaga é reservada para os modos. Com contexto rico o motor gasta o
+        orçamento inteiro no que está na tela, e o grupo "Como interagir"
+        desapareceria justamente quando o usuário tem mais sobre o que falar.
+        A reserva acontece **dentro** do orçamento configurado: uma sugestão da
+        tela sai para o modo entrar, em vez de acrescentar um chip acima do
+        limite que o usuário escolheu. O descarte é o preço de garantir que a
+        tela sempre ofereça por onde começar — e nada se perde de verdade: voz e
+        recorte continuam na barra de prompt e no cabeçalho.
+        """
+        on_screen = [s for s in suggestions if s.is_contextual]
+        modes = [s for s in suggestions if not s.is_contextual]
+
+        if not modes and limit > 1:
+            modes = [
+                s
+                for s in ContextSuggestionEngine.get_suggestions(None, limit=1)
+                if not s.is_contextual
+            ]
+            if modes:
+                on_screen = on_screen[: limit - len(modes)]
+
+        return on_screen, modes
+
+    def _populate_suggestions(self) -> None:
+        while child := self.suggestions_box.get_first_child():
+            self.suggestions_box.remove(child)
+
+        limit = self._suggestion_budget()
 
         enabled_val = getattr(getattr(self.ctx, "config", None), "context_awareness_enabled", True)
         enabled = bool(enabled_val) if not type(enabled_val).__name__.startswith("MagicMock") else True
@@ -228,37 +321,169 @@ class ChatStreamView:
 
         self.current_suggestions = suggestions
 
+        on_screen, modes = self._split_suggestions(suggestions, limit)
+
+        # O grupo da tela só existe quando há tela sobre o que falar; o dos modos
+        # é o piso da tela vazia — sempre há como começar.
+        self.screen_group = self._build_suggestion_group(
+            "Sobre o que está na tela", on_screen, contextual=True
+        )
+        self.modes_group = self._build_suggestion_group(
+            "Como interagir", modes, contextual=False
+        )
+        for group in (self.screen_group, self.modes_group):
+            if group is not None:
+                self.suggestions_box.append(group)
+
+    def _build_suggestion_group(
+        self,
+        title: str,
+        suggestions: list[ContextSuggestion],
+        *,
+        contextual: bool,
+    ) -> Gtk.Box | None:
+        """Um grupo rotulado de chips. `None` quando não há o que mostrar."""
+        if not suggestions:
+            return None
+
+        group = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+
+        label = Gtk.Label(label=title, xalign=0)
+        # `caption` + `dim-label`, e não o tratamento do `.sidebar-group-label`
+        # (maiúsculas com letter-spacing): lá os rótulos são uma palavra
+        # ("Hoje", "Ontem") e o caixa-alta funciona como marcador; aqui são
+        # frases inteiras, e caixa-alta com espaçamento largo em frase longa
+        # atrapalha a leitura — além de ser o padrão que o sistema visual do
+        # projeto rejeita.
+        label.add_css_class("caption")
+        label.add_css_class("dim-label")
+        group.append(label)
+
+        grid = Gtk.Grid()
+        grid.set_column_spacing(10)
+        grid.set_row_spacing(10)
+        grid.set_halign(Gtk.Align.CENTER)
+        group.append(grid)
+
         for idx, sug in enumerate(suggestions):
-            col = idx % 2
-            row = idx // 2
+            grid.attach(self._build_suggestion_chip(sug, contextual), idx % 2, idx // 2, 1, 1)
 
-            btn = Gtk.Button()
-            btn.add_css_class("card")
-            btn.add_css_class("pill")
-            btn.add_css_class("glass-chip")
-            if sug.is_contextual:
-                btn.add_css_class("context-chip")
-            if sug.description:
-                btn.set_tooltip_text(sug.description)
+        return group
 
-            chip_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-            chip_box.set_halign(Gtk.Align.CENTER)
-            chip_icon = Gtk.Image.new_from_icon_name(sug.icon)
-            chip_icon.set_pixel_size(16)
-            chip_box.append(chip_icon)
+    def _build_suggestion_chip(self, sug: ContextSuggestion, contextual: bool) -> Gtk.Button:
+        """Um chip acionável da tela de boas-vindas."""
+        btn = Gtk.Button()
+        btn.add_css_class("card")
+        btn.add_css_class("pill")
+        btn.add_css_class("glass-chip")
+        if contextual:
+            btn.add_css_class("context-chip")
+        if sug.description:
+            btn.set_tooltip_text(sug.description)
 
-            chip_lbl = Gtk.Label(label=sug.title)
-            chip_box.append(chip_lbl)
-            btn.set_child(chip_box)
+        chip_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        chip_box.set_halign(Gtk.Align.CENTER)
+        chip_icon = Gtk.Image.new_from_icon_name(sug.icon)
+        chip_icon.set_pixel_size(16)
+        chip_box.append(chip_icon)
 
-            def make_chip_click(s=sug):
-                trigger_fn = getattr(self.ctx, "_trigger_suggestion", None)
-                if callable(trigger_fn):
-                    return lambda _: trigger_fn(s)
-                return lambda _: self.ctx._trigger_prompt(s.prompt_template)
+        chip_lbl = Gtk.Label(label=sug.title)
+        chip_box.append(chip_lbl)
+        btn.set_child(chip_box)
 
-            btn.connect("clicked", make_chip_click())
-            self.suggestions_grid.attach(btn, col, row, 1, 1)
+        def make_chip_click(s=sug):
+            trigger_fn = getattr(self.ctx, "_trigger_suggestion", None)
+            if callable(trigger_fn):
+                return lambda _: trigger_fn(s)
+            return lambda _: self.ctx._trigger_prompt(s.prompt_template)
+
+        btn.connect("clicked", make_chip_click())
+        return btn
+
+    # ------------------------------------------------------------------
+    # Retomar
+    # ------------------------------------------------------------------
+    RESUME_LIMIT = 3
+
+    def _recent_topics(self) -> list[dict]:
+        """As últimas conversas do histórico, no máximo `RESUME_LIMIT`.
+
+        Devolve `[]` em vez de levantar quando a memória não responde: a tela de
+        boas-vindas é a primeira coisa que aparece, e não pode depender do banco
+        para existir. Um histórico indisponível é um motivo para não mostrar a
+        seção, não para a janela abrir vazia.
+        """
+        memory = getattr(getattr(self.ctx, "engine", None), "memory", None)
+        if memory is None:
+            return []
+        try:
+            topics = memory.list_chat_topics(limit=self.RESUME_LIMIT)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Não foi possível listar conversas recentes: %s", exc)
+            return []
+        if not isinstance(topics, (list, tuple)):
+            return []
+        return list(topics[: self.RESUME_LIMIT])
+
+    def _build_resume_section(self) -> Gtk.Box | None:
+        """As últimas conversas, na própria tela vazia.
+
+        Sem isto, quem volta ao app tinha de abrir a barra lateral para retomar:
+        a tela de boas-vindas só oferecia começar do zero. Reusa a identidade
+        visual da linha da barra lateral (`build_topic_identity`) **e a mesma
+        classe de linha**, então o hover e o estado ativo vêm de graça e não há
+        um segundo padrão de "linha de conversa" para manter.
+
+        Não leva lixeira de propósito: excluir é ação destrutiva e mora onde já
+        tem confirmação e contexto — a barra lateral. Uma tela de partida não é
+        lugar de apagar coisas.
+        """
+        topics = self._recent_topics()
+        if not topics:
+            return None
+
+        section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+
+        label = Gtk.Label(label="Retomar", xalign=0)
+        label.add_css_class("caption")
+        label.add_css_class("dim-label")
+        section.append(label)
+
+        listbox = Gtk.ListBox()
+        listbox.set_selection_mode(Gtk.SelectionMode.NONE)
+        listbox.connect("row-activated", self._on_resume_activated)
+        # Largura fixa para as três linhas terem a mesma medida e serem
+        # varridas como coluna. É mais larga que os 260px da barra lateral
+        # porque aqui há espaço sobrando e o mesmo conteúdo (título + horário)
+        # não deve encolher só por estar em outra tela.
+        listbox.set_size_request(380, -1)
+        listbox.set_halign(Gtk.Align.CENTER)
+
+        for topic in topics:
+            listbox.append(self._build_resume_row(topic))
+
+        section.append(listbox)
+        return section
+
+    def _build_resume_row(self, topic: dict) -> Gtk.ListBoxRow:
+        row = Gtk.ListBoxRow()
+        row.add_css_class("sidebar-chat-row")
+        row.set_child(build_topic_identity(self.ctx, topic))
+        row._topic_id = topic.get("id")
+        return row
+
+    def _on_resume_activated(self, _listbox, row) -> None:
+        topic_id = getattr(row, "_topic_id", None)
+        if topic_id:
+            self.ctx._resume_topic(topic_id)
+
+    def _refresh_resume_section(self) -> None:
+        """Reconstrói a seção "Retomar" a partir do histórico atual."""
+        while child := self.resume_slot.get_first_child():
+            self.resume_slot.remove(child)
+        section = self._build_resume_section()
+        if section is not None:
+            self.resume_slot.append(section)
 
     def update_context(self, context: DesktopContext | None) -> None:
         """Atualiza dinamicamente as sugestões e o banner de contexto ativo."""
@@ -295,7 +520,7 @@ class ChatStreamView:
         else:
             self.context_banner_box.set_visible(False)
 
-        self._populate_suggestions_grid()
+        self._populate_suggestions()
 
     # ------------------------------------------------------------------
     # Ciclo de vida do fluxo
@@ -306,21 +531,34 @@ class ChatStreamView:
             self.stream_box.remove(child)
 
         if not self.ctx.session.turns:
+            # A lista "Retomar" é lida do histórico, que mudou desde a última vez
+            # que esta tela apareceu (uma conversa foi criada, outra excluída).
+            # Refazê-la aqui mantém a tela honesta sem recriar o widget inteiro.
+            self._refresh_resume_section()
             self.stream_box.append(self.welcome_box)
             self.welcome_box.set_visible(True)
             return
 
         self.welcome_box.set_visible(False)
+        # Contagem de respostas computada UMA vez por rebuild (evita O(n²) — antes
+        # cada create_turn_widget recontava todos os turnos).
+        total_answers = sum(1 for t in self.ctx.session.turns if t.answer and t.answer.strip())
         for turn in self.ctx.session.turns:
             # O plano vem do turno, não de `ctx.current_plan`: antes só o último
             # turno recebia plano e os botões de ação das respostas anteriores
             # desapareciam a cada reconstrução do fluxo.
-            self.stream_box.append(self.create_turn_widget(turn, plan=turn.plan))
+            self.stream_box.append(
+                self.create_turn_widget(turn, plan=turn.plan, n_answers=total_answers)
+            )
 
         self.scroll_to_bottom()
 
     def scroll_to_bottom(self) -> None:
-        """Rola o fluxo rolável de mensagens até o fim com fluidez."""
+        """Rola o fluxo rolável de mensagens até o fim com fluidez.
+
+        Um único agendamento (idle) basta; o timeout de 60 ms em duplicata só
+        causava trabalho redundante sob stream contínuo.
+        """
         def _do_scroll():
             adj = self.scrolled.get_vadjustment()
             if adj:
@@ -328,7 +566,6 @@ class ChatStreamView:
             return GLib.SOURCE_REMOVE
 
         GLib.idle_add(_do_scroll)
-        GLib.timeout_add(60, _do_scroll)
 
     # ------------------------------------------------------------------
     # Renderização de turnos
@@ -339,6 +576,7 @@ class ChatStreamView:
         plan: ActionPlan | None = None,
         image_bytes: bytes | None = None,
         is_pending: bool = False,
+        n_answers: int | None = None,
     ) -> Gtk.Widget:
         """Constrói o widget de um turno completo (pergunta do usuário + resposta do assistente)."""
         turn_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
@@ -348,7 +586,7 @@ class ChatStreamView:
 
             turn_box.append(AgentExecutionWidget.from_result_dict(turn.agent_result, self.ctx, turn))
         else:
-            turn_box.append(self._build_assistant_card(turn, plan, is_pending))
+            turn_box.append(self._build_assistant_card(turn, plan, is_pending, n_answers))
         return turn_box
 
     def _build_user_bubble(self, turn: ChatTurn, image_bytes: bytes | None) -> Gtk.Widget:
@@ -394,6 +632,7 @@ class ChatStreamView:
         turn: ChatTurn,
         plan: ActionPlan | None,
         is_pending: bool,
+        n_answers: int | None = None,
     ) -> Gtk.Widget:
         ctx = self.ctx
         assistant_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
@@ -419,7 +658,9 @@ class ChatStreamView:
         if not is_pending:
             a_hdr.append(self._build_copy_button(turn))
             # Só faz sentido comparar quando há ao menos duas respostas na conversa.
-            n_answers = sum(1 for t in ctx.session.turns if t.answer and t.answer.strip())
+            # Calculado uma vez por rebuild (passado via parâmetro) para não virar O(n²).
+            if n_answers is None:
+                n_answers = sum(1 for t in ctx.session.turns if t.answer and t.answer.strip())
             if n_answers >= 2:
                 a_hdr.append(self._build_compare_button(turn))
         assistant_card.append(a_hdr)
@@ -448,6 +689,15 @@ class ChatStreamView:
 
         ctx.answer_label = ans_lbl
         ctx._raw_answer_text = turn.answer
+
+        # Modo de estudos: quando o turno carrega um SolutionGraph (resposta de
+        # matemática), oferece abrir o raciocínio passo a passo no Quadro Negro.
+        # Também aparece quando só há um `solution_problem` (matemática que a
+        # álgebra pura não cobre): aí o grafo é resolvido sob demanda no clique.
+        solution = getattr(turn, "solution", None)
+        problem = getattr(turn, "solution_problem", "")
+        if solution is not None or problem:
+            assistant_card.append(self._build_blackboard_button(turn))
 
         if plan and plan.actions:
             self._append_actions(assistant_card, plan, turn)
@@ -485,6 +735,46 @@ class ChatStreamView:
         cmp_b.add_css_class("glass-pill")
         cmp_b.connect("clicked", lambda _: self.ctx._open_compare(turn))
         return cmp_b
+
+    def _build_blackboard_button(self, turn: ChatTurn) -> Gtk.Button:
+        """Botão que abre o raciocínio estruturado no Quadro Negro Digital.
+
+        Só é criado quando o turno carrega um ``SolutionGraph`` OU um
+        ``solution_problem`` (matemática que a álgebra pura não cobre). Com grafo,
+        abre direto; só com o problema, delega à janela a resolução sob demanda
+        (model-backed). Mesma linguagem visual dos chips/pílulas do projeto.
+        """
+        btn = Gtk.Button()
+        btn.add_css_class("flat")
+        btn.add_css_class("pill")
+        btn.add_css_class("glass-pill")
+        btn.set_halign(Gtk.Align.START)
+        btn.set_margin_top(4)
+        btn.set_tooltip_text("Abrir o raciocínio passo a passo no Quadro Negro")
+
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        icon = Gtk.Image.new_from_icon_name("view-grid-symbolic")
+        icon.set_pixel_size(14)
+        box.append(icon)
+
+        label = Gtk.Label(label="Ver no Quadro Negro")
+        label.add_css_class("caption")
+        box.append(label)
+        btn.set_child(box)
+
+        def on_open(_b, t=turn):
+            solution = getattr(t, "solution", None)
+            if solution is not None:
+                opener = getattr(self.ctx, "show_blackboard", None)
+                if callable(opener):
+                    opener(solution)
+                return
+            lazy = getattr(self.ctx, "show_blackboard_for_problem", None)
+            if callable(lazy):
+                lazy(getattr(t, "solution_problem", ""))
+
+        btn.connect("clicked", on_open)
+        return btn
 
     @staticmethod
     def _restore_copy_icon(btn: Gtk.Button):

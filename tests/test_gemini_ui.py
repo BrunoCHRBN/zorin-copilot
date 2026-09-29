@@ -162,7 +162,7 @@ class GeminiUILayoutTest(unittest.TestCase):
 
         # Alterna para Janela Ativa (Dinâmica)
         self.win._on_select_active_window_mode(popover)
-        self.assertEqual(self.win.fence_lbl.get_text(), "⚡ Janela Ativa")
+        self.assertEqual(self.win.fence_lbl.get_text(), "Janela Ativa")
         self.assertEqual(self.win.fence.mode, FenceMode.ACTIVE_WINDOW)
 
         # Alterna para Janela Escolhida
@@ -176,7 +176,7 @@ class GeminiUILayoutTest(unittest.TestCase):
             height=500,
         )
         self.win._on_select_window(sample_win, popover)
-        self.assertEqual(self.win.fence_lbl.get_text(), "🪟 Calc")
+        self.assertEqual(self.win.fence_lbl.get_text(), "Calc")
         self.assertEqual(self.win.fence.mode, FenceMode.CHOSEN_WINDOW)
 
 

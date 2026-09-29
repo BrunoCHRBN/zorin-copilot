@@ -84,7 +84,7 @@ class StatusBarWidget:
         self.rag_lbl.add_css_class("tabular-nums")
         self.rag_item = self._make_item(_ICON_RAG, self.rag_lbl)
 
-        self.net_lbl = Gtk.Label(label="Rede …")
+        self.net_lbl = Gtk.Label(label="Rede —")
         self.net_lbl.add_css_class("status-text")
         self.net_lbl.add_css_class("tabular-nums")
         self.net_item = self._make_item(_ICON_NET, self.net_lbl)
@@ -97,16 +97,37 @@ class StatusBarWidget:
         )
         self.net_item.add_controller(net_click)
 
-        # Monta os itens separados por divisórias verticais sutis.
-        for first, item in enumerate(
-            [self.model_item, self.tokens_item, self.load_item, self.ram_item, self.rag_item, self.net_item]
-        ):
-            if first:
-                sep = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
-                sep.set_margin_top(4)
-                sep.set_margin_bottom(4)
-                self.container.append(sep)
-            self.container.append(item)
+        # Três regiões com significados distintos, em vez de seis itens de peso
+        # idêntico enfileirados. Comando (o que a IA é) à esquerda; o que ela
+        # indexa no centro; saúde do SO à direita. O agrupamento é o que torna a
+        # barra escaneável — sem ele, "0 tokens" e "Carga 0.87" parecem a mesma
+        # coisa.
+        self.region_model = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.region_model.add_css_class("status-region")
+        self.region_model.append(self.model_item)
+        self.region_model.append(self.tokens_item)
+
+        self.region_context = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.region_context.add_css_class("status-region")
+        self.region_context.append(self.rag_item)
+
+        self.region_system = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.region_system.add_css_class("status-region")
+        # A cerca espacial (monitor/janela onde as automações agem) é estado do
+        # ambiente e entra aqui — não no topo, onde espremia o título.
+        self._fence_slot = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.region_system.append(self._fence_slot)
+        self.region_system.append(self.load_item)
+        self.region_system.append(self.ram_item)
+        self.region_system.append(self.net_item)
+
+        spacer = Gtk.Box()
+        spacer.set_hexpand(True)
+        self.container.append(self.region_model)
+        self.container.append(self._region_divider())
+        self.container.append(self.region_context)
+        self.container.append(spacer)
+        self.container.append(self.region_system)
 
         self.refresh_all()
         self._disposed = False
@@ -158,6 +179,24 @@ class StatusBarWidget:
         box.append(label)
         return box
 
+    def _region_divider(self) -> Gtk.Separator:
+        """Divisória vertical sutil entre as regiões de significado distinto."""
+        sep = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
+        sep.set_margin_top(4)
+        sep.set_margin_bottom(4)
+        return sep
+
+    def set_fence_widget(self, widget: Gtk.Widget) -> None:
+        """Hospeda o botão da cerca espacial (construído pelo header).
+
+        O widget é criado em `HeaderBarWidget` porque o popover e a lógica de
+        cerca moram lá; a barra de status só o posiciona junto das demais
+        leituras de ambiente.
+        """
+        while child := self._fence_slot.get_first_child():
+            self._fence_slot.remove(child)
+        self._fence_slot.append(widget)
+
     # ------------------------------------------------------------------
     # Atualização
     # ------------------------------------------------------------------
@@ -199,11 +238,16 @@ class StatusBarWidget:
             self.model_item.set_tooltip_text("Nenhum provedor de IA configurado")
 
     def refresh_tokens(self) -> None:
+        """Mostra o consumo da sessão só depois do primeiro token.
+
+        Antes, exibia "0 tokens" numa conversa nova — o que parece erro de
+        contador, não estado. Enquanto não há uso, o item some em vez de mentir.
+        """
         tracker = self.ctx.engine.usage_tracker
         if tracker is None or tracker.session.total_tokens == 0:
-            self.tokens_lbl.set_text("0 tokens")
-            self.tokens_item.set_tooltip_text("Consumo de tokens desta conversa")
+            self.tokens_item.set_visible(False)
             return
+        self.tokens_item.set_visible(True)
         total = tracker.session.total_tokens
         reqs = tracker.requests
         self.tokens_lbl.set_text(f"{format_tokens(total)} tokens")

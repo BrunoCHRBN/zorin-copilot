@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
+import unicodedata
 from typing import TYPE_CHECKING, Any
 
 import requests
@@ -24,6 +26,8 @@ from ...ai.providers import (
     GEMINI_LIVE_VOICE_CHOICES,
 )
 from ...core.config import CopilotConfig
+from ...core.hardware_fit import describe_fit, detect_gpu, detect_ram_bytes, format_gb
+from .command_palette import PaletteCommand, score_command
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..app import CopilotWindow
@@ -31,6 +35,101 @@ if TYPE_CHECKING:  # pragma: no cover
 logger = logging.getLogger(__name__)
 
 DOLPHIN_PRESET_MODEL = "dolphin3:latest"
+
+
+def _label_texts(widget: Gtk.Widget) -> list[str]:
+    """Texto de todos os `Gtk.Label` abaixo de `widget`.
+
+    Usado para montar o texto de busca de uma linha: título, subtítulo e as
+    tags do sufixo ("Visão", "Sem filtro") passam a ser todos pesquisáveis sem
+    precisar registrar cada um à mão.
+    """
+    found: list[str] = []
+    if isinstance(widget, Gtk.Label):
+        text = widget.get_text()
+        if text:
+            found.append(text)
+    child = widget.get_first_child()
+    while child is not None:
+        found.extend(_label_texts(child))
+        child = child.get_next_sibling()
+    return found
+
+
+def _rows_of(group: Adw.PreferencesGroup) -> list[Adw.PreferencesRow]:
+    """Linhas de conteúdo de um grupo, na ordem em que aparecem.
+
+    **Não** são os filhos diretos. O Libadwaita empacota as linhas num
+    `Gtk.ListBox` interno dentro de uma `Gtk.Box` (que também carrega o
+    cabeçalho do grupo), então `group.get_first_child()` devolve um contêiner
+    anônimo — foi exatamente esse o engano que fez o filtro não filtrar nada:
+    a varredura achava um `Box` sem `get_title()` e concluía "não sei descrever,
+    então mostro". A varredura tem de ser recursiva e ancorada no tipo da linha,
+    não na posição dela na árvore.
+
+    Ancora em `Adw.PreferencesRow` de propósito: `ActionRow`, `EntryRow`,
+    `SwitchRow` e `ComboRow` derivam todos dele, então qualquer linha que o
+    grupo possa renderizar entra na varredura sem precisar de registro manual —
+    e uma linha removida do grupo (`group.remove(row)`) sai da varredura
+    sozinha, sem lista paralela para manter em dia.
+    """
+    rows: list[Adw.PreferencesRow] = []
+
+    def visit(widget: Gtk.Widget) -> None:
+        child = widget.get_first_child()
+        while child is not None:
+            if isinstance(child, Adw.PreferencesRow):
+                rows.append(child)
+            else:
+                visit(child)
+            child = child.get_next_sibling()
+
+    visit(group)
+    return rows
+
+
+def _fold(text: str) -> str:
+    """Minúsculas e sem acentos, **preservando a pontuação**.
+
+    Não reusa `normalize_text` do wake word de propósito: lá a pontuação é
+    ruído a remover ("OK, Copilot!" → "ok copilot"), aqui ela é conteúdo.
+    Passar "qwen2.5vl:7b" por lá viraria "qwen2 5vl 7b" e o identificador
+    deixaria de ser encontrável pelo que o usuário digita.
+    """
+    if not text:
+        return ""
+    decomposed = unicodedata.normalize("NFKD", text.lower())
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+
+
+def _use_case_tags(name: str, param_size: str) -> list[str]:
+    """Tags de **caso de uso** de um modelo local, na ordem em que importam.
+
+    O destaque vai para o que o modelo serve, não para o que ele não tem. Um
+    "Sem filtro" em destaque diz pouco sobre a utilidade do modelo e soa como
+    apelo; "Visão" ou "Rápido" responde à pergunta que o usuário tem.
+    """
+    low = name.lower()
+    tags: list[str] = []
+
+    if any(marker in low for marker in ("vl", "vision", "minicpm", "llava", "llama3.2-vision")):
+        tags.append("Visão")
+
+    # Faixa de tamanho: abaixo de 4B cabe com folga e responde rápido; a partir
+    # de 13B já é um modelo que exige paciência e memória.
+    size_match = re.search(r"([\d.]+)\s*b\b", param_size.lower())
+    billions = float(size_match.group(1)) if size_match else 0.0
+    if billions and billions <= 4.0:
+        tags.append("Rápido")
+    elif billions >= 13.0:
+        tags.append("Grande")
+
+    return tags
+
+
+def _is_uncensored(name: str) -> bool:
+    low = name.lower()
+    return "dolphin" in low or "uncensored" in low or "sem-filtro" in low
 
 
 def _format_size(size_bytes: int) -> str:
@@ -52,6 +151,8 @@ class ModelSelectorDialog(Adw.Dialog):
         self.ctx = ctx
         self.config = CopilotConfig.load()
         self._voice_preview_btns: dict[str, Gtk.Button] = {}
+        # Linhas de estado que o filtro nunca esconde (ver `_apply_filter`).
+        self._always_visible_rows: set[Gtk.Widget] = set()
         self.set_title("Selecionar Modelo / Agente")
         self.set_content_width(540)
         self.set_content_height(640)
@@ -79,6 +180,11 @@ class ModelSelectorDialog(Adw.Dialog):
 
         self.toolbar_view.add_top_bar(header)
 
+        # Filtro numa barra fixa, não dentro da rolagem: com 7+ modelos o campo
+        # precisa continuar alcançável depois de rolar, e era justamente a
+        # rolagem longa o problema.
+        self.toolbar_view.add_top_bar(self._build_filter_bar())
+
         # Conteúdo com barra de rolagem
         scrolled = Gtk.ScrolledWindow()
         scrolled.set_vexpand(True)
@@ -92,7 +198,24 @@ class ModelSelectorDialog(Adw.Dialog):
         content_box.set_margin_bottom(20)
 
         # -----------------------------------------------------------------
-        # 1. Agente em Destaque: Dolphin 3.1 (Uncensored)
+        # 1. Provedores em Nuvem
+        #
+        # Vem primeiro de propósito. O subtítulo do diálogo promete "o cérebro
+        # local ou em nuvem", mas a nuvem ficava abaixo dos três grupos locais:
+        # numa janela de 640 px ela simplesmente não aparecia ao abrir, e a
+        # promessa ficava por cumprir. Além disso o provedor padrão do app é a
+        # nuvem, então esta é a seção do estado atual — o que o usuário veio
+        # confirmar é o que ele vê primeiro.
+        # -----------------------------------------------------------------
+        self.cloud_group = Adw.PreferencesGroup(
+            title="Agentes em Nuvem",
+            description="Processamento em servidores de alta capacidade para tarefas complexas.",
+        )
+        self._build_cloud_rows()
+        content_box.append(self.cloud_group)
+
+        # -----------------------------------------------------------------
+        # 2. Agente em Destaque: Dolphin 3.1
         # -----------------------------------------------------------------
         self.featured_group = Adw.PreferencesGroup(
             title="Agente em Destaque",
@@ -103,7 +226,7 @@ class ModelSelectorDialog(Adw.Dialog):
         content_box.append(self.featured_group)
 
         # -----------------------------------------------------------------
-        # 2. Grupo Ollama (Modelos Locais)
+        # 3. Grupo Ollama (Modelos Locais)
         # -----------------------------------------------------------------
         self.ollama_group = Adw.PreferencesGroup(
             title="Modelos Locais (Ollama)",
@@ -114,27 +237,17 @@ class ModelSelectorDialog(Adw.Dialog):
         self.ollama_spinner.set_spinning(True)
         self.ollama_loading_row.add_suffix(self.ollama_spinner)
         self.ollama_group.add(self.ollama_loading_row)
+        self._always_visible_rows.add(self.ollama_loading_row)
         content_box.append(self.ollama_group)
 
         # -----------------------------------------------------------------
-        # 3. Grupo LM Studio / Servidor OpenAI Local
+        # 4. Grupo LM Studio / Servidor OpenAI Local
         # -----------------------------------------------------------------
         self.lmstudio_group = Adw.PreferencesGroup(
             title="LM Studio / Servidor Local Compatível",
             description="Modelos carregados via servidor local (http://127.0.0.1:1234).",
         )
-        self.lmstudio_group.set_visible(False)
         content_box.append(self.lmstudio_group)
-
-        # -----------------------------------------------------------------
-        # 4. Grupo Provedores em Nuvem
-        # -----------------------------------------------------------------
-        self.cloud_group = Adw.PreferencesGroup(
-            title="Agentes em Nuvem",
-            description="Processamento em servidores de alta capacidade para tarefas complexas.",
-        )
-        self._build_cloud_rows()
-        content_box.append(self.cloud_group)
 
         # -----------------------------------------------------------------
         # 5. Grupo Modelos de Voz ao Vivo (Gemini 3.8 Live & Extended Thinking)
@@ -172,10 +285,133 @@ class ModelSelectorDialog(Adw.Dialog):
         scrolled.set_child(content_box)
         self.toolbar_view.set_content(scrolled)
 
+        # Normaliza o estado inicial: com a busca vazia nada é escondido, mas os
+        # grupos sem linha (LM Studio offline) já saem ocultos por um caminho só,
+        # em vez de cada construtor decidir por conta própria.
+        self._apply_filter()
+
+    def _build_filter_bar(self) -> Gtk.Widget:
+        """Campo de busca dos modelos — a rolagem cresce, a busca não.
+
+        Fica na barra de topo do `Adw.ToolbarView`, não dentro do
+        `Gtk.ScrolledWindow`: assim a lista rola por baixo de um campo fixo, que
+        é o padrão do Adw e o que `compare_dialog` já faz. Sem classe CSS
+        própria — o `ToolbarView` já desenha a separação entre o que é fixo e o
+        que rola, e uma classe sem regra só engana quem for ler depois.
+
+        O casamento usa `score_command` do painel de comandos (`Ctrl+K`) para a
+        parte difusa sobre o título, mas **não** o reusa inteiro: veja
+        `_row_matches` para o motivo.
+        """
+        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+
+        self.search_entry = Gtk.SearchEntry()
+        self.search_entry.set_placeholder_text("Filtrar modelos e vozes…")
+        self.search_entry.set_hexpand(True)
+        self.search_entry.set_margin_start(12)
+        self.search_entry.set_margin_end(12)
+        self.search_entry.set_margin_top(6)
+        self.search_entry.set_margin_bottom(6)
+        # `search-changed` já vem com o atraso do GTK, o que evita refiltrar a
+        # cada tecla sem precisar de debounce próprio.
+        self.search_entry.connect("search-changed", lambda _e: self._apply_filter())
+        bar.append(self.search_entry)
+        return bar
+
+    def _filterable_groups(self) -> list[Adw.PreferencesGroup]:
+        """Grupos varridos pelo filtro, na ordem em que aparecem."""
+        return [
+            self.cloud_group,
+            self.featured_group,
+            self.ollama_group,
+            self.lmstudio_group,
+            self.live_group,
+            self.voices_group,
+        ]
+
+    def _apply_filter(self) -> None:
+        """Mostra só as linhas que casam com a busca e esconde grupos vazios.
+
+        Esconder o grupo vazio é o ponto: sem isso o filtro deixaria uma pilha
+        de títulos de seção sem nada embaixo, que é pior que a rolagem original.
+        """
+        query = self.search_entry.get_text().strip().lower()
+
+        for group in self._filterable_groups():
+            rows = _rows_of(group)
+            matching = 0
+            has_status = False
+
+            for row in rows:
+                if row in self._always_visible_rows:
+                    # Linhas de estado ("Buscando modelos…", "Ollama não
+                    # encontrado") não são conteúdo a filtrar: se sumissem, o
+                    # grupo ficaria vazio e o usuário perderia o diagnóstico.
+                    #
+                    # Só sustenta o grupo se estiver de fato à vista. A linha
+                    # "Buscando modelos…" continua na árvore depois do render,
+                    # apenas oculta; contá-la assim mesmo manteria o grupo
+                    # aberto e vazio para qualquer busca — um cabeçalho de seção
+                    # sem nada embaixo, exatamente o que o filtro devia evitar.
+                    has_status = has_status or row.get_visible()
+                    continue
+                if self._row_matches(row, query):
+                    row.set_visible(True)
+                    matching += 1
+                else:
+                    row.set_visible(False)
+
+            # Grupo sem linha alguma também cai aqui: `matching` fica 0 e
+            # `has_status` falso, então ele se esconde. É o caso do LM Studio
+            # quando o render marcou o grupo como visível antes de acrescentar
+            # as linhas e nenhuma linha sobreviveu — um cabeçalho de seção
+            # sozinho é pior que a rolagem original.
+            group.set_visible(matching > 0 or has_status)
+
+    @staticmethod
+    def _row_matches(row: Adw.PreferencesRow, query: str) -> bool:
+        """`True` se a linha casa com a busca (busca vazia casa com tudo).
+
+        Duas camadas, e a segunda existe porque a primeira sozinha não serve
+        aqui. `score_command` do painel de comandos termina numa
+        correspondência por subsequência, que sobre um título curto é ótima
+        ("nconv" acha "Nova conversa") mas sobre os subtítulos deste diálogo —
+        frases inteiras em português — casa com quase tudo: com a busca "gemini"
+        o card do Dolphin entrava, porque "gemini" é subsequência de "Agente
+        local sem censura nem recusas corporativas". Um filtro que mostra cinco
+        de seis seções não filtra.
+
+        Então: difuso sobre o **título** (onde o identificador do modelo vive e
+        onde o usuário digita abreviado) e substring simples sobre o **resto**
+        (subtítulo, especificações, tags), sem acentos para "visao" achar
+        "Visão". Um acerto fraco em prosa longa não basta para trazer a linha.
+
+        Sem rede de proteção para "linha que não sei descrever": `_rows_of` só
+        devolve `Adw.PreferencesRow`, que sempre tem título. A guarda
+        `hasattr(row, "get_title")` que existia aqui devolvia `True` — e foi ela
+        que transformou um erro de varredura em "o filtro não faz nada", sem
+        sintoma nenhum. Melhor falhar alto do que mentir em silêncio.
+        """
+        if not query:
+            return True
+
+        if score_command(query, PaletteCommand(name="", title=row.get_title())) is not None:
+            return True
+
+        return _fold(query) in _fold(" ".join(_label_texts(row)))
+
     def _create_dolphin_card(self) -> Adw.ActionRow:
-        """Cria o card destacado do Agente Dolphin 3.1 Uncensored."""
+        """Cria o card destacado do Agente Dolphin 3.1.
+
+        O título trazia um emoji (🐬) e a tag "Uncensored" vinha com a classe de
+        destaque. Duas correções de §3.1: emoji em rótulo de UI viola a diretriz
+        do projeto (ícone simbólico do Adwaita), e "sem filtro" é uma
+        *característica*, não um argumento de venda — anunciá-la em destaque
+        sugere vantagem onde só há uma escolha de treino. O destaque fica no que
+        o modelo faz.
+        """
         row = Adw.ActionRow()
-        row.set_title("🐬 Dolphin 3.1 (Llama 3.1 8B)")
+        row.set_title("Dolphin 3.1 (Llama 3.1 8B)")
         row.set_subtitle(
             "Agente local sem censura nem recusas corporativas. "
             "Executa automações de desktop, comandos de terminal e análises com total autonomia."
@@ -191,16 +427,22 @@ class ModelSelectorDialog(Adw.Dialog):
         badge_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         badge_box.set_valign(Gtk.Align.CENTER)
 
-        tag_uncensored = Gtk.Label(label="Uncensored")
-        tag_uncensored.add_css_class("caption")
-        tag_uncensored.add_css_class("pill")
-        tag_uncensored.add_css_class("accent")
-        badge_box.append(tag_uncensored)
+        # Caso de uso primeiro: é o que ajuda a escolher.
+        tag_agent = Gtk.Label(label="Autônomo")
+        tag_agent.add_css_class("caption")
+        tag_agent.add_css_class("pill")
+        badge_box.append(tag_agent)
 
         tag_local = Gtk.Label(label="Local GPU")
         tag_local.add_css_class("caption")
         tag_local.add_css_class("pill")
         badge_box.append(tag_local)
+
+        # Característica, não vantagem: vem depois e sem destaque.
+        tag_uncensored = Gtk.Label(label="Sem filtro")
+        tag_uncensored.add_css_class("caption")
+        tag_uncensored.add_css_class("dim-label")
+        badge_box.append(tag_uncensored)
 
         is_active = (
             self.config.provider == "ollama"
@@ -217,7 +459,7 @@ class ModelSelectorDialog(Adw.Dialog):
             lambda _: self._select_model(
                 provider="ollama",
                 model_name=DOLPHIN_PRESET_MODEL,
-                display_name="Dolphin 3.1 (Uncensored)",
+                display_name="Dolphin 3.1 (Sem filtro)",
             ),
         )
         return row
@@ -480,8 +722,13 @@ class ModelSelectorDialog(Adw.Dialog):
     def _load_models_async(self) -> None:
         """Dispara busca assíncrona dos modelos no Ollama e LM Studio."""
         if os.environ.get("ZORIN_TEST_MODE") == "1":
+            # Sem busca real a linha de carregamento sai de cena — e quem decide
+            # se o grupo do Ollama fica de pé é o `_apply_filter`, que roda no
+            # fim do `_build_ui` e não vê esta mudança. Sem reaplicá-lo o grupo
+            # ficaria aberto e vazio: um cabeçalho de seção sem nada embaixo.
             self.ollama_loading_row.set_visible(False)
             self.ollama_spinner.set_spinning(False)
+            self._apply_filter()
             return
 
         self.ollama_loading_row.set_visible(True)
@@ -524,6 +771,12 @@ class ModelSelectorDialog(Adw.Dialog):
         self.ollama_loading_row.set_visible(False)
         self.ollama_spinner.set_spinning(False)
 
+        # Sondado uma vez para todas as linhas: `detect_gpu` já tem cache, mas
+        # `detect_ram_bytes` relê /proc/meminfo — não faz sentido pagar isso por
+        # modelo.
+        gpu = detect_gpu()
+        ram_bytes = detect_ram_bytes()
+
         # Remove linhas dinâmicas antigas de Ollama (se houver)
         if hasattr(self, "_dynamic_ollama_rows"):
             for row in self._dynamic_ollama_rows:
@@ -538,6 +791,7 @@ class ModelSelectorDialog(Adw.Dialog):
             err_row.add_prefix(icon)
             self.ollama_group.add(err_row)
             self._dynamic_ollama_rows.append(err_row)
+            self._always_visible_rows.add(err_row)
         else:
             for item in ollama_models:
                 name = item.get("name", "")
@@ -554,7 +808,10 @@ class ModelSelectorDialog(Adw.Dialog):
                 row.set_title(name)
                 row.set_activatable(True)
 
-                # Subtítulo explicativo
+                verdict = describe_fit(size_bytes, gpu=gpu, ram_bytes=ram_bytes)
+
+                # Números com números: o requisito de memória entra na mesma
+                # linha das outras grandezas, em vez de virar prosa repetida.
                 sub_parts = []
                 if param_size:
                     sub_parts.append(param_size)
@@ -562,36 +819,46 @@ class ModelSelectorDialog(Adw.Dialog):
                     sub_parts.append(quant)
                 if size_str:
                     sub_parts.append(size_str)
-                row.set_subtitle(" • ".join(sub_parts) if sub_parts else "Modelo local Ollama")
+                if verdict.required_bytes:
+                    sub_parts.append(f"~{format_gb(verdict.required_bytes)} GB em uso")
+                specs = " • ".join(sub_parts) if sub_parts else "Modelo local Ollama"
 
-                # Ícone
-                icon_name = "computer-symbolic"
-                is_uncensored = "dolphin" in name.lower() or "uncensored" in name.lower()
-                is_vision = any(v in name.lower() for v in ("vl", "vision", "minicpm", "llava"))
-                if is_uncensored:
-                    icon_name = "security-low-symbolic"
-                elif is_vision:
+                # A pergunta que o usuário realmente tem — "roda na minha GPU?" —
+                # ganha linha própria, com espaço para ser lida.
+                row.set_subtitle(f"{specs}\n{verdict.line}")
+                row.set_subtitle_lines(2)
+
+                # Ícone: o diferenciador primário (§0.3). `security-low-symbolic`
+                # ficou de fora de propósito — lê-se como "inseguro", que é um
+                # juízo, não uma categoria.
+                is_uncensored = _is_uncensored(name)
+                is_vision = "Visão" in _use_case_tags(name, param_size)
+                if is_vision:
                     icon_name = "camera-photo-symbolic"
+                elif is_uncensored:
+                    icon_name = "system-run-symbolic"
+                else:
+                    icon_name = "computer-symbolic"
 
                 icon = Gtk.Image.new_from_icon_name(icon_name)
                 icon.set_pixel_size(20)
                 row.add_prefix(icon)
 
-                # Badges no sufixo
+                # Badges no sufixo — caso de uso primeiro, característica depois.
                 box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
                 box.set_valign(Gtk.Align.CENTER)
 
-                if is_uncensored:
-                    u_tag = Gtk.Label(label="Uncensored")
-                    u_tag.add_css_class("caption")
-                    u_tag.add_css_class("pill")
-                    box.append(u_tag)
+                for tag_text in _use_case_tags(name, param_size):
+                    tag = Gtk.Label(label=tag_text)
+                    tag.add_css_class("caption")
+                    tag.add_css_class("pill")
+                    box.append(tag)
 
-                if is_vision:
-                    v_tag = Gtk.Label(label="Visão")
-                    v_tag.add_css_class("caption")
-                    v_tag.add_css_class("pill")
-                    box.append(v_tag)
+                if is_uncensored:
+                    u_tag = Gtk.Label(label="Sem filtro")
+                    u_tag.add_css_class("caption")
+                    u_tag.add_css_class("dim-label")
+                    box.append(u_tag)
 
                 is_active = (
                     self.config.provider == "ollama"
@@ -617,23 +884,35 @@ class ModelSelectorDialog(Adw.Dialog):
                 self._dynamic_ollama_rows.append(row)
 
         # LM Studio
+        #
+        # A visibilidade do grupo **não** é decidida aqui: quem decide é o
+        # `_apply_filter()` no fim deste método, a partir das linhas que
+        # existirem de fato. Marcar o grupo como visível antes de acrescentar as
+        # linhas era uma segunda fonte de verdade — e quando nenhum item trazia
+        # `id` a marcação sobrevivia e deixava um cabeçalho de seção sozinho na
+        # tela, com o filtro já tendo dito que o grupo estava vazio.
         if hasattr(self, "_dynamic_lm_rows"):
             for row in self._dynamic_lm_rows:
                 self.lmstudio_group.remove(row)
         self._dynamic_lm_rows = []
 
         if lmstudio_models:
-            self.lmstudio_group.set_visible(True)
             for item in lmstudio_models:
                 m_id = item.get("id", "")
                 if not m_id:
                     continue
                 row = Adw.ActionRow()
                 row.set_title(m_id)
+
+                # O servidor OpenAI-compatível não informa o tamanho do modelo,
+                # então não há veredito de adequação a dar aqui. Dizer "roda na
+                # GPU" sem dado seria inventar — fica só a origem.
                 row.set_subtitle("Servidor local LM Studio (API OpenAI compatível)")
                 row.set_activatable(True)
 
-                icon = Gtk.Image.new_from_icon_name("computer-symbolic")
+                is_uncensored = "uncensored" in m_id.lower()
+                icon_name = "system-run-symbolic" if is_uncensored else "computer-symbolic"
+                icon = Gtk.Image.new_from_icon_name(icon_name)
                 icon.set_pixel_size(20)
                 row.add_prefix(icon)
 
@@ -644,10 +923,10 @@ class ModelSelectorDialog(Adw.Dialog):
                 tag.add_css_class("pill")
                 box.append(tag)
 
-                if "uncensored" in m_id.lower():
-                    u_tag = Gtk.Label(label="Uncensored")
+                if is_uncensored:
+                    u_tag = Gtk.Label(label="Sem filtro")
                     u_tag.add_css_class("caption")
-                    u_tag.add_css_class("pill")
+                    u_tag.add_css_class("dim-label")
                     box.append(u_tag)
 
                 is_active = (
@@ -672,8 +951,10 @@ class ModelSelectorDialog(Adw.Dialog):
                 )
                 self.lmstudio_group.add(row)
                 self._dynamic_lm_rows.append(row)
-        else:
-            self.lmstudio_group.set_visible(False)
+
+        # Reaplica o filtro: as linhas foram recriadas agora, e sem isto uma
+        # busca já digitada seria ignorada pelas linhas novas.
+        self._apply_filter()
 
         return GLib.SOURCE_REMOVE
 

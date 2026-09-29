@@ -21,7 +21,7 @@ Adw.init()
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-from unittest.mock import patch  # noqa: E402
+from unittest.mock import MagicMock, patch  # noqa: E402
 
 from zorin_copilot.ai.actions import ActionPlan, ActionType, DesktopAction  # noqa: E402
 from zorin_copilot.core.session import ChatTurn, TopicSession  # noqa: E402
@@ -143,16 +143,27 @@ class WindowCompositionTest(unittest.TestCase):
         self.assertGreaterEqual(len(children), 2)
 
     def test_escape_closes_popover_before_hiding_window(self):
-        """Regressão: Esc deve fechar popovers antes de esconder a janela."""
+        """Regressão: Esc deve fechar popovers antes de esconder a janela.
+
+        Não use `Gtk.Popover.popup()` aqui. Sem laço principal rodando, ele espera
+        um round-trip do compositor que nunca chega e a chamada **bloqueia
+        indefinidamente** — medido: 4 de 4 execuções travadas, inclusive com a
+        janela já mapeada (`get_mapped()` devolvia `True`) e com o `GMainContext`
+        drenado antes. Era o único ponto onde o runner de guarda estourava o teto
+        de 180 s. O que a regressão guarda é a **ordem**: o popover fecha antes de
+        a janela esconder. Isso se verifica com um popover falso, sem compositor.
+        """
         self.win.set_visible(True)
-        popover = self.win.vision_btn.get_popover()
-        popover.popup()
-        self.assertTrue(popover.get_visible())
+        popover = MagicMock()
+        popover.get_visible.return_value = True
 
-        self.win._handle_escape()
+        with patch.object(Gtk.MenuButton, "get_popover", return_value=popover):
+            self.win._handle_escape()
 
-        self.assertFalse(popover.get_visible())
-        self.assertTrue(self.win.get_visible())
+        popover.popdown.assert_called()
+        self.assertTrue(
+            self.win.get_visible(), "Esc escondeu a janela mesmo com popover aberto"
+        )
 
     def test_escape_hides_window_when_nothing_open(self):
         self.win.set_visible(True)
@@ -284,7 +295,12 @@ class StatusBarTest(unittest.TestCase):
         )
 
     def test_token_counter_updates_after_usage(self):
-        """Após uso de tokens, o badge e a barra de status refletem o consumo."""
+        """Após uso de tokens, a barra de status reflete o consumo.
+
+        Decisão de design: o consumo vive só na barra de status. O badge do topo
+        identifica o *cérebro* (clicável para trocar) — acumular tokens ali
+        alongava o badge e espremia o título até truncá-lo.
+        """
         from zorin_copilot.core.usage import TokenUsage
 
         self.win.engine.usage_tracker.record(
@@ -297,7 +313,8 @@ class StatusBarTest(unittest.TestCase):
         self.assertIn("150 tokens", self.win.status_bar.tokens_lbl.get_text())
 
         self.win.header.refresh_token_usage()
-        self.assertIn("tokens", self.win.header.status_badge.get_text())
+        self.assertNotIn("tokens", self.win.header.status_badge.get_text())
+        self.assertTrue(self.win.header.status_badge.get_text())
 
     def test_status_bar_refreshes_model_and_rag(self):
         """A barra deve exibir modelo ativo e contagem do indexador RAG sem quebrar."""

@@ -66,6 +66,17 @@ def _is_subsequence(needle: str, haystack: str) -> bool:
     it = iter(haystack)
     return all(char in it for char in needle)
 
+
+def _escape_markup(text: str) -> str:
+    """Escapa texto para uso em propriedades que o GTK lê como markup.
+
+    `Adw.ActionRow` monta os rótulos com `gtk_label_set_markup`. Passar texto
+    cru funciona para 99% dos casos e falha em silêncio nos 1% que têm `&`:
+    o rótulo sai vazio, sem exceção em Python. Escapar é a correção — não
+    "limpar" o texto, que perderia o caractere que o usuário quer ver.
+    """
+    return GLib.markup_escape_text(text or "")
+
 class CommandPalette(Gtk.Overlay):
     """Overlay de busca sobre os comandos disponíveis na janela."""
 
@@ -179,7 +190,7 @@ class CommandPalette(Gtk.Overlay):
             self._visible_rows.append(row)
 
         if not self._visible_rows:
-            empty = Adw.ActionRow(title="Nenhum comando encontrado")
+            empty = Adw.ActionRow(title=_escape_markup("Nenhum comando encontrado"))
             empty.set_selectable(False)
             self.listbox.append(empty)
             self._visible_rows.append(empty)
@@ -188,7 +199,16 @@ class CommandPalette(Gtk.Overlay):
         self.listbox.select_row(self._visible_rows[0])
 
     def _make_row(self, command: PaletteCommand) -> Adw.ActionRow:
-        row = Adw.ActionRow(title=command.title, subtitle=command.subtitle)
+        # `Adw.ActionRow.title`/`subtitle` são interpretados como **markup** por
+        # dentro (`gtk_label_set_markup`). Um `&`, `<` ou `>` cru faz o parsing
+        # falhar: o GTK emite um warning, o `get_title()` continua devolvendo o
+        # texto original e o rótulo fica **vazio** — a linha aparece em branco e
+        # nenhum teste que olhe só para `get_title()` percebe. Como os títulos de
+        # prompt MCP vêm de servidores externos, escapar aqui é obrigatório.
+        row = Adw.ActionRow(
+            title=_escape_markup(command.title),
+            subtitle=_escape_markup(command.subtitle),
+        )
         row.set_subtitle_lines(1)
 
         icon = Gtk.Image.new_from_icon_name(command.icon)
@@ -196,10 +216,11 @@ class CommandPalette(Gtk.Overlay):
         row.add_prefix(icon)
 
         if command.accelerator:
-            accel = Gtk.Label(label=_pretty_accelerator(command.accelerator))
-            accel.add_css_class("caption")
-            accel.add_css_class("dim-label")
-            row.add_suffix(accel)
+            # O atalho é renderizado como teclas de verdade (estilo Superhuman):
+            # sem ele, o painel exibe um texto cinza que não comunica "aperte
+            # isto". Com os badges, a lista vira uma referência de teclado
+            # navegável de relance.
+            row.add_suffix(_accelerator_badge(command.accelerator))
 
         return row
 
@@ -248,13 +269,62 @@ class CommandPalette(Gtk.Overlay):
         self.ctx.run_palette_command(command)
         self.ctx.palette_closed()
 
+def _accelerator_parts(accelerator: str) -> list[str]:
+    """``<Control><Shift>k`` -> ``['Ctrl', 'Shift', 'K']``.
+
+    O formato do GTK é uma sequência de modificadores entre ``<>`` seguida pela
+    tecla (``<Control>q``) — não ``<Control><q>``. A versão anterior removia
+    todos os ``>`` e depois separava por ``<``, o que transformava ``<Control>q``
+    em ``['Controlq']`` e ``<Control><Shift>m`` em ``['Ctrl', 'Shiftm']``: o
+    rótulo do atalho saía errado no painel de comandos.
+    """
+    raw = accelerator.strip()
+    if not raw:
+        return []
+
+    labels = {"Control": "Ctrl", "Ctrl": "Ctrl", "Shift": "Shift",
+              "Alt": "Alt", "Super": "Super", "Meta": "Meta"}
+
+    mods: list[str] = []
+    rest = raw
+    while rest.startswith("<"):
+        end = rest.find(">")
+        if end == -1:
+            break
+        mods.append(labels.get(rest[1:end], rest[1:end]))
+        rest = rest[end + 1:]
+
+    if not rest:
+        # Só modificadores: devolve o que houver, sem inventar uma tecla.
+        return mods or [raw]
+
+    key = rest.upper() if len(rest) == 1 else rest
+    return [*mods, key]
+
 def _pretty_accelerator(accelerator: str) -> str:
     """``<Control><Shift>k`` -> ``Ctrl+Shift+K``."""
-    parts = [p for p in accelerator.replace(">", "").split("<") if p]
-    if not parts:
-        return accelerator
-    *mods, key = parts
-    labels = {"Control": "Ctrl", "Shift": "Shift", "Alt": "Alt", "Super": "Super"}
-    out = [labels.get(m, m) for m in mods]
-    out.append(key.upper() if len(key) == 1 else key)
-    return "+".join(out)
+    return "+".join(_accelerator_parts(accelerator))
+
+def _accelerator_badge(accelerator: str) -> Gtk.Widget:
+    """Renderiza o atalho como teclas separadas — ``Ctrl`` ``K``.
+
+    Cada tecla é um `<kbd>` próprio, o que dá o alinhamento tabular e a leitura
+    de "aperte isto" típicos do Superhuman. Um `+` fino separa os pares sem
+    competir com o texto.
+    """
+    box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=3)
+    box.set_valign(Gtk.Align.CENTER)
+    box.add_css_class("shortcut-chord")
+
+    for index, part in enumerate(_accelerator_parts(accelerator)):
+        if index:
+            sep = Gtk.Label(label="+")
+            sep.add_css_class("sep")
+            sep.set_valign(Gtk.Align.CENTER)
+            box.append(sep)
+        key = Gtk.Label(label=part)
+        key.add_css_class("kbd")
+        key.set_valign(Gtk.Align.CENTER)
+        box.append(key)
+
+    return box

@@ -1,6 +1,8 @@
 """Testes para o módulo de estilos Glassmorphism e tema da UI."""
 
 import unittest
+from pathlib import Path
+
 import gi
 
 from zorin_copilot.ui.gi_versions import require_gtk4  # noqa: E402
@@ -8,6 +10,52 @@ require_gtk4()
 from gi.repository import Adw, Gdk, Gtk  # noqa: E402
 
 from zorin_copilot.ui.style import GLASS_CSS, apply_glass_theme, setup_glass_window
+
+
+def strip_css_comments(css: str) -> list[str]:
+    """Linhas do CSS com o conteúdo de comentários removido, mantendo a numeração.
+
+    Os guardas anti-LED abaixo varrem o CSS como **texto**, e um comentário não é
+    regra: um `box-shadow` citado numa explicação não pinta nada na tela. Sem
+    isto, o próprio comentário que documenta "evitei o halo X" reintroduzia o
+    halo aos olhos do teste — um falso positivo que não ensina nada e convida a
+    apagar a explicação. Removemos o texto comentado preservando as linhas para
+    que a mensagem de erro continue apontando o lugar certo.
+    """
+    lines: list[str] = []
+    inside_block = False
+
+    for line in css.splitlines():
+        kept = ""
+        index = 0
+        while index < len(line):
+            if inside_block:
+                end = line.find("*/", index)
+                if end == -1:
+                    index = len(line)
+                else:
+                    inside_block = False
+                    index = end + 2
+            else:
+                start = line.find("/*", index)
+                if start == -1:
+                    kept += line[index:]
+                    break
+                kept += line[index:start]
+                inside_block = True
+                index = start + 2
+        lines.append(kept)
+
+    return lines
+
+
+# A folha sem comentários, preservando a numeração das linhas. Guardas que
+# varrem o CSS por regex **precisam** usar esta versão: um comentário não é
+# regra, e um seletor citado numa explicação fazia o guarda acusar um bloco que
+# não existe. O caso real: documentar "ancorei em `.pill-muted`, não em
+# `.voice-pill-container.pill-muted`" criava um match espúrio que atravessava
+# do comentário até a chave da regra seguinte.
+GLASS_CSS_NC = "\n".join(strip_css_comments(GLASS_CSS))
 
 
 class GlassmorphismStyleTest(unittest.TestCase):
@@ -58,7 +106,7 @@ class AccentVariableTest(unittest.TestCase):
 
     def test_accent_literal_only_in_definition(self):
         """Fora das duas declarações, o hex não pode aparecer em nenhuma regra."""
-        for lineno, line in enumerate(GLASS_CSS.splitlines(), start=1):
+        for lineno, line in enumerate(strip_css_comments(GLASS_CSS), start=1):
             if self.ACCENT in line:
                 self.assertTrue(
                     line.strip().startswith("@define-color"),
@@ -109,8 +157,10 @@ class NoLedEffectsTest(unittest.TestCase):
 
     def test_no_focus_halo(self):
         """Focus rings não podem ter box-shadow 0 0 0 Npx (halo de blur)."""
-        for lineno, line in enumerate(GLASS_CSS.splitlines(), start=1):
+        for lineno, line in enumerate(strip_css_comments(GLASS_CSS), start=1):
             stripped = line.strip()
+            if not stripped:
+                continue
             # aceita "0 0 0 0px" (sem halo), recusa qualquer blur > 0
             self.assertNotRegex(
                 stripped,
@@ -127,7 +177,7 @@ class NoLedEffectsTest(unittest.TestCase):
             r"|\.voice-pill-avatar\.pill-privacy-on[^{]*\{[^}]*\})",
             re.DOTALL,
         )
-        for m in block_re.finditer(GLASS_CSS):
+        for m in block_re.finditer(GLASS_CSS_NC):
             block = m.group(0)
             for lineno, line in enumerate(block.splitlines(), start=1):
                 stripped = line.strip()
@@ -146,7 +196,7 @@ class NoLedEffectsTest(unittest.TestCase):
                 rf"(\.voice-pill-container\.{cls}[^{{]*\{{[^}}]*\}})",
                 re.DOTALL,
             )
-            matches = block_re.findall(GLASS_CSS)
+            matches = block_re.findall(GLASS_CSS_NC)
             self.assertGreater(
                 len(matches), 0, f"sem regra encontrada para .{cls}"
             )
@@ -166,6 +216,56 @@ class NoLedEffectsTest(unittest.TestCase):
         # monocromática: variantes light/dark presentes
         self.assertIn("window.light-glass .status-dot", GLASS_CSS)
         self.assertIn("window.dark-glass .status-dot", GLASS_CSS)
+
+    def test_pill_connecting_uses_tint_not_border(self):
+        """O estado de conexão também é tint de fundo, nunca borda colorida."""
+        import re
+        block_re = re.compile(
+            r"(\.voice-pill-container\.pill-connecting[^{]*\{[^}]*\})", re.DOTALL
+        )
+        matches = block_re.findall(GLASS_CSS_NC)
+        self.assertGreater(len(matches), 0, "sem regra para .pill-connecting")
+        for block in matches:
+            self.assertIn("background-image", block)
+            self.assertNotIn("border-color", block)
+
+    def test_pill_connecting_declared_before_muted(self):
+        """Empate de especificidade: mute (sinal mais forte) tem de vencer conexão.
+
+        As duas regras têm a mesma especificidade, então a ordem no arquivo decide.
+        Se a conexão vier depois, mutar durante o CONNECTING deixaria de pintar o
+        estado de mudo — e o usuário não saberia que o mic está fechado.
+        """
+        self.assertLess(
+            GLASS_CSS_NC.index(".voice-pill-container.pill-connecting"),
+            GLASS_CSS_NC.index(".voice-pill-container.pill-muted"),
+            "pill-connecting deve vir ANTES de pill-muted no arquivo",
+        )
+
+    def test_pill_mic_dot_rule_exists(self):
+        """O dot de captação tem regra real e usa `color` (cor é conteúdo)."""
+        self.assertRegex(GLASS_CSS, r"\.pill-mic-dot\s*\{")
+
+    def test_privacy_avatar_rule_is_wired(self):
+        """Regra de CSS que existe precisa ter quem a aplique.
+
+        `.voice-pill-avatar.pill-privacy-on` foi escrita no "Dynamic Island v2"
+        e ficou **morta** por várias versões: nada no Python adicionava a classe.
+        O efeito era silencioso — a pílula não quebrava, só perdia o sinal visual,
+        e "privacidade ativa" ficava a um tint âmbar de distância de "ouvindo".
+        Um teste de forma não pega isso; este guarda pega.
+        """
+        self.assertRegex(GLASS_CSS_NC, r"\.voice-pill-avatar\.pill-privacy-on\s*\{")
+
+        source = (Path(__file__).resolve().parent.parent
+                  / "src" / "zorin_copilot" / "ui" / "voice_pill.py").read_text(
+                      encoding="utf-8"
+                  )
+        self.assertIn(
+            "pill-privacy-on", source,
+            "a regra .voice-pill-avatar.pill-privacy-on existe no CSS mas nada "
+            "aplica a classe — a regra está morta",
+        )
 
 
 class NeutralPaletteTest(unittest.TestCase):
@@ -218,7 +318,7 @@ class NeutralPaletteTest(unittest.TestCase):
     def test_no_saturated_color_as_chrome(self):
         """Cor é conteúdo, nunca chrome: bordas usam cinza, não cor semântica."""
         for name in ("@zc_error", "@zc_success", "@zc_warn", "@zc_speak"):
-            for lineno, line in enumerate(GLASS_CSS.splitlines(), start=1):
+            for lineno, line in enumerate(strip_css_comments(GLASS_CSS), start=1):
                 stripped = line.strip()
                 if "border" in stripped and name in stripped:
                     self.fail(

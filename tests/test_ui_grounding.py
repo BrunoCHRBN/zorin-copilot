@@ -82,12 +82,21 @@ class UIGroundingServiceSearchTest(unittest.TestCase):
     """Testa a busca de elementos visuais na tela."""
 
     def test_find_elements_ranking(self):
+        # Cerca explícita e vazia. Sem ela, find_elements constrói um
+        # ScreenFenceManager real, que consulta o ambiente via hyprctl: com a
+        # janela do próprio app mapeada na área de trabalho, as coordenadas
+        # abaixo (100..300, 100..300) caem dentro dela e todos os elementos são
+        # descartados, fazendo o teste falhar conforme o desktop — não conforme
+        # o código. A exclusão da própria janela tem teste dedicado em
+        # test_find_elements_excludes_copilot_window.
+        fence = mock.MagicMock()
+        fence.get_all_excluded_rects.return_value = []
         elements = [
             VisualElement(text="Salvar Como...", x=100, y=100, bbox=(80, 90, 40, 20), confidence=90.0),
             VisualElement(text="Salvar", x=200, y=200, bbox=(180, 190, 40, 20), confidence=95.0),
             VisualElement(text="Cancelar", x=300, y=300, bbox=(280, 290, 40, 20), confidence=92.0),
         ]
-        results = UIGroundingService.find_elements("Salvar", elements=elements)
+        results = UIGroundingService.find_elements("Salvar", elements=elements, fence=fence)
         self.assertEqual(len(results), 2)
         # O casamento exato "Salvar" deve ser o primeiro
         self.assertEqual(results[0][0].text, "Salvar")

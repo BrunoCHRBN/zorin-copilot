@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 from ..gi_versions import require_gtk4  # noqa: E402
 require_gtk4()
-from gi.repository import Gio, GLib, Gtk, Pango  # noqa: E402
+from gi.repository import Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
 from ...ai.actions import ActionType
 from ...core.apps import AppManager
@@ -218,25 +218,53 @@ class PromptBar:
         self.container.append(self.app_preview_revealer)
 
     def _build_prompt_bar(self) -> None:
+        """Ordem dos controles — a hierarquia é a mensagem (§1.4).
+
+        `[câmera] [clipboard] [Agente] [campo …] [microfone] [enviar]`
+
+        Os dois primeiros são **ações de entrada**: mudam o que o modelo
+        recebe. A câmera vem primeiro porque a leitura de tela é a capacidade
+        mais distintiva do app. O terceiro é um **modo**, não uma ação — e por
+        isso não usa a mesma forma dos outros dois (ver `_build_agent_button`).
+        """
         ctx = self.ctx
         self.prompt_bar_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         self.prompt_bar_box.add_css_class("prompt-bar-card")
         self.prompt_bar_box.add_css_class("glass-floating")
 
+        # Ação de entrada 1 — visão de tela (a mais distintiva do app).
         self.vision_btn = self._build_vision_button()
         self.prompt_bar_box.append(self.vision_btn)
 
+        # Ação de entrada 2 — clipboard inteligente.
         self.clipboard_btn = self._build_clipboard_button()
         self.prompt_bar_box.append(self.clipboard_btn)
 
+        # Modo — chip rotulado, forma própria (não é a terceira ação).
         self.agent_btn = self._build_agent_button()
         self.prompt_bar_box.append(self.agent_btn)
+
+        # Sub-modo do Agente — Visão: percepção fusionada + validação + anti-loop.
+        # Nasce insensível; só faz sentido junto com o Modo Agente (ver toggled).
+        self.vision_agent_btn = self._build_vision_agent_button()
+        self.prompt_bar_box.append(self.vision_agent_btn)
 
         self.entry = Gtk.Entry()
         self.entry.set_placeholder_text("Peça ao Zorin Copilot ou digite um comando...")
         self.entry.set_hexpand(True)
         self.entry.connect("activate", self.submit)
         self.entry.connect("changed", self._on_entry_changed)
+        # Ctrl+Enter também envia. O campo é de linha única, então o atalho é
+        # redundante aqui — e é justamente por isso que existe: quem chega de
+        # outros aplicativos de conversa tenta Ctrl+Enter por hábito, e o
+        # tooltip do botão só pode citá-lo se ele funcionar de verdade.
+        # Fase CAPTURE (e não a padrão) para o controlador rodar ANTES do
+        # tratamento interno do `Gtk.Entry` e poder consumir o evento: assim é
+        # impossível o mesmo Return virar dois envios.
+        key_ctrl = Gtk.EventControllerKey()
+        key_ctrl.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        key_ctrl.connect("key-pressed", self._on_entry_key_pressed)
+        self.entry.add_controller(key_ctrl)
         self.prompt_bar_box.append(self.entry)
         ctx.entry = self.entry
 
@@ -255,7 +283,8 @@ class PromptBar:
         self.submit_btn.add_css_class("suggested-action")
         self.submit_btn.add_css_class("circular")
         self.submit_btn.add_css_class("glass-submit-btn")
-        self.submit_btn.set_tooltip_text("Enviar (Enter)")
+        # Cita os dois atalhos que realmente enviam — nada de atalho decorativo.
+        self.submit_btn.set_tooltip_text("Enviar — Enter ou Ctrl+Enter")
         submit_icon = Gtk.Image.new_from_icon_name("pan-end-symbolic")
         submit_icon.set_pixel_size(16)
         self.submit_btn.set_child(submit_icon)
@@ -263,6 +292,17 @@ class PromptBar:
         self.prompt_bar_box.append(self.submit_btn)
 
         self.container.append(self.prompt_bar_box)
+
+    def _on_entry_key_pressed(
+        self, _controller: Gtk.EventControllerKey, keyval: int, _keycode: int, state: Gdk.ModifierType
+    ) -> bool:
+        """Ctrl+Enter envia, igual a Enter. Devolve True quando consome a tecla."""
+        if keyval not in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+            return False
+        if not (state & Gdk.ModifierType.CONTROL_MASK):
+            return False
+        self.submit(self.entry)
+        return True
 
     def _build_vision_button(self) -> Gtk.MenuButton:
         vision_btn = Gtk.MenuButton(valign=Gtk.Align.CENTER)
@@ -335,23 +375,73 @@ class PromptBar:
         return clipboard_btn
 
     def _build_agent_button(self) -> Gtk.ToggleButton:
+        """Chip de **modo**, não a terceira ação (§1.4).
+
+        O problema visto na captura: câmera, clipboard e este controle eram
+        três botões-fantasma circulares idênticos. Dois deles são ações de
+        entrada; este é um modo que muda o significado do Enter. Renderizar os
+        três com a mesma forma é o que apagava a hierarquia (§0.1: comando e
+        estado não podem dividir a mesma silhueta).
+
+        Decisão: o modo ganha **rótulo**. O texto "Agente" diz o que o controle
+        é; um terceiro glifo indistinguível não dizia. Sem ícone, de propósito —
+        o rótulo já carrega o significado, e o ícone era exatamente o que fazia
+        os três se confundirem.
+
+        O controle **não** foi removido: ele também está no `Ctrl+K`, mas o
+        `Ctrl+K` não mostra o estado atual nem fica ao lado do campo que ele
+        afeta.
+        """
         agent_btn = Gtk.ToggleButton(valign=Gtk.Align.CENTER)
-        agent_btn.set_icon_name("system-run-symbolic")
-        agent_btn.set_tooltip_text("Modo Agente: Executar tarefas autônomas no desktop")
+        agent_btn.set_label("Agente")
         agent_btn.add_css_class("flat")
-        agent_btn.add_css_class("circular")
-        agent_btn.add_css_class("glass-icon-btn")
+        agent_btn.add_css_class("mode-chip")
+        agent_btn.set_tooltip_text(
+            "Modo Agente: o que você enviar vira uma tarefa autônoma executada no "
+            "desktop, passo a passo. Também em Ctrl+K → Alternar Modo Agente."
+        )
         agent_btn.connect("toggled", self._on_agent_mode_toggled)
         return agent_btn
 
+    def _build_vision_agent_button(self) -> Gtk.ToggleButton:
+        """Sub-modo do Agente que liga a percepção fusionada (AT-SPI + screenshot + VLM),
+        validação pré/pós-ação e anti-loop.
+
+        É um **modificador** do Modo Agente, não um modo independente: nasce
+        insensível (`_on_agent_mode_toggled` o habilita) justamente porque não faz
+        sentido "Visão" sem o Agente executando no desktop. Usa a mesma silhueta de
+        chip de modo (`mode-chip`) para sinalizar que é um estado, não uma ação.
+        """
+        btn = Gtk.ToggleButton(valign=Gtk.Align.CENTER)
+        btn.set_label("Visão")
+        btn.add_css_class("flat")
+        btn.add_css_class("mode-chip")
+        btn.set_sensitive(False)  # aguarda o Modo Agente ativo
+        btn.set_tooltip_text(
+            "Agente com Visão: além do Modo Agente, valida o estado da tela ANTES e "
+            "DEPOIS de cada ação (fusão AT-SPI + captura + VLM) e evita repetir erros "
+            "anteriores. Requer o Modo Agente ativo."
+        )
+        return btn
+
     def _on_agent_mode_toggled(self, btn: Gtk.ToggleButton) -> None:
+        """Reflete o modo no próprio chip e no campo que ele afeta.
+
+        A troca de placeholder é o feedback no lugar onde o modo age: o usuário
+        vê o convite mudar de "peça ao Copilot" para "descreva o objetivo".
+        """
         active = btn.get_active()
         self.ctx.agent_mode_active = active
+        # O sub-modo Visão só existe junto com o Agente: habilita/desabilita e
+        # reseta o chip para não deixar estado "ligado" órfão.
+        self.vision_agent_btn.set_sensitive(active)
+        if not active:
+            self.vision_agent_btn.set_active(False)
         if active:
-            btn.add_css_class("suggested-action")
+            btn.add_css_class("mode-chip-active")
             self.entry.set_placeholder_text("Descreva o objetivo para o Agente (ex: abrir Firefox e pesquisar...)")
         else:
-            btn.remove_css_class("suggested-action")
+            btn.remove_css_class("mode-chip-active")
             self.entry.set_placeholder_text("Peça ao Zorin Copilot ou digite um comando...")
 
     @staticmethod
@@ -490,6 +580,8 @@ class PromptBar:
         if not text and not active_img and not attachments:
             return
         if ctx._is_busy:
+            # Defeito 4 / Frente C: feedback honesto em vez de engolir o Enter.
+            self.ctx.show_toast("Aguarde a operação atual terminar (Esc interrompe).")
             return
 
         if not text and active_img:
@@ -520,6 +612,7 @@ class PromptBar:
         self.vision_btn.set_sensitive(False)
         self.clipboard_btn.set_sensitive(False)
         self.agent_btn.set_sensitive(False)
+        self.vision_agent_btn.set_sensitive(False)
         self.bottom_voice_btn.set_sensitive(False)
         ctx.chat_stream.welcome_box.set_visible(False)
 
@@ -535,9 +628,21 @@ class PromptBar:
                 is_agent = True
                 break
 
+        # Sub-modo Visão (só faz sentido junto com o Agente). Vem do chip ligado
+        # OU de prefixos dedicados (/visao, /vision, /agentevisao, @visao, @vision).
+        vision = bool(self.vision_agent_btn.get_active())
+        for pfx in ("/visao ", "/vision ", "@visao ", "@vision ", "/agentevisao "):
+            if text.lower().startswith(pfx):
+                text = text[len(pfx):].strip()
+                is_agent = True
+                vision = True
+                break
+
         if is_agent and text:
             agent_full_prompt = compose_prompt(text, attachments) if attachments else text
-            ctx.start_agent_execution(text, active_img, full_prompt=agent_full_prompt)
+            ctx.start_agent_execution(
+                text, active_img, full_prompt=agent_full_prompt, vision=vision
+            )
             return
 
         temp_turn = ChatTurn(prompt=text, answer="")
@@ -577,6 +682,8 @@ class PromptBar:
         self.vision_btn.set_sensitive(not busy)
         self.clipboard_btn.set_sensitive(not busy)
         self.agent_btn.set_sensitive(not busy)
+        # Visão só fica habilitada se o Agente estiver ativo (e a UI não ocupada).
+        self.vision_agent_btn.set_sensitive(busy is False and self.agent_btn.get_active())
         self.bottom_voice_btn.set_sensitive(not busy)
 
     @property

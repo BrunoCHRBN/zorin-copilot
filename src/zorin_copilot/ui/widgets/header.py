@@ -13,7 +13,6 @@ require_gtk4()
 from gi.repository import Adw, Gtk  # noqa: E402
 
 from ...core.fence import NO_MONITOR_LABEL, FenceMode  # noqa: E402
-from ...core.usage import format_tokens  # noqa: E402
 
 if TYPE_CHECKING:  # pragma: no cover - apenas para type checking
     from ..app import CopilotWindow
@@ -76,7 +75,15 @@ class HeaderBarWidget:
         self.header.pack_start(self.palette_btn)
 
     def _build_end_buttons(self) -> None:
-        """Botões do lado direito: preferências, voz, cerca espacial e badge de modelo."""
+        """Botões do lado direito: preferências, voz e badge de modelo.
+
+        Decisão de design: o badge da cerca espacial (monitor/janela ativa) saiu
+        daqui. Ele é **estado** do ambiente, não **comando** do assistente — e,
+        empilhado com o badge de modelo, microfone e engrenagem, espremia o
+        título até truncá-lo. Passa a ser hospedado pela barra de status inferior,
+        ao lado das outras leituras de ambiente (carga, RAM, rede), deixando o
+        topo com três comandos de mesma natureza.
+        """
         settings_btn = Gtk.Button.new_from_icon_name("preferences-system-symbolic")
         settings_btn.set_tooltip_text("Configurações do Assistente e Chaves de IA")
         settings_btn.add_css_class("flat")
@@ -103,29 +110,34 @@ class HeaderBarWidget:
         self.status_badge.add_css_class("tabular-nums")
         self.status_badge_btn.set_child(self.status_badge)
 
-        self.fence_menu_btn = Gtk.MenuButton()
-        self.fence_menu_btn.add_css_class("flat")
-        self.fence_menu_btn.add_css_class("pill")
-        self.fence_menu_btn.add_css_class("glass-pill")
-        self.fence_menu_btn.set_tooltip_text("Cerca Espacial: Monitor ativo para automações")
-
-        fence_btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        fence_icon = Gtk.Image.new_from_icon_name("video-display-symbolic")
-        fence_icon.set_pixel_size(14)
-        active_mon = self.ctx.fence.get_active_monitor()
-        mon_name_init = active_mon.name if active_mon else NO_MONITOR_LABEL
-        self.fence_lbl = Gtk.Label(label=mon_name_init)
-        self.fence_lbl.add_css_class("caption")
-        fence_btn_box.append(fence_icon)
-        fence_btn_box.append(self.fence_lbl)
-        self.fence_menu_btn.set_child(fence_btn_box)
-
+        # Construído aqui (a lógica de cerca e o popover moram neste módulo), mas
+        # NÃO empacotado no header — quem o hospeda é a StatusBarWidget.
+        self.fence_menu_btn = self._build_fence_button()
         self.build_fence_popover()
 
         self.header.pack_end(settings_btn)
         self.header.pack_end(self.voice_call_btn)
-        self.header.pack_end(self.fence_menu_btn)
         self.header.pack_end(self.status_badge_btn)
+
+    def _build_fence_button(self) -> Gtk.MenuButton:
+        """Monta o botão da cerca espacial (monitor/janela ativa) para a barra de status."""
+        btn = Gtk.MenuButton()
+        btn.add_css_class("flat")
+        btn.add_css_class("status-fence-btn")
+        btn.set_tooltip_text("Cerca Espacial: janela ou monitor onde as automações agem")
+
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.fence_icon = Gtk.Image.new_from_icon_name("video-display-symbolic")
+        self.fence_icon.set_pixel_size(14)
+        self.fence_icon.add_css_class("status-icon")
+        active_mon = self.ctx.fence.get_active_monitor()
+        mon_name_init = active_mon.name if active_mon else NO_MONITOR_LABEL
+        self.fence_lbl = Gtk.Label(label=mon_name_init)
+        self.fence_lbl.add_css_class("status-text")
+        box.append(self.fence_icon)
+        box.append(self.fence_lbl)
+        btn.set_child(box)
+        return btn
 
     def build_fence_popover(self) -> None:
         """Constrói o menu suspenso de seleção de telas, janelas abertas e Kill Switch."""
@@ -161,7 +173,7 @@ class HeaderBarWidget:
         active_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         active_icon = Gtk.Image.new_from_icon_name("starred-symbolic")
         active_box.append(active_icon)
-        active_box.append(Gtk.Label(label="⚡ Janela Ativa (Dinâmica / Auto)"))
+        active_box.append(Gtk.Label(label="Janela Ativa (Dinâmica / Auto)"))
         active_btn.set_child(active_box)
         active_btn.connect("clicked", lambda _, pop=popover: self.on_select_active_window_mode(pop))
         vbox.append(active_btn)
@@ -245,32 +257,35 @@ class HeaderBarWidget:
         self.ctx.toggle_sidebar()
 
     def update_provider_badge(self) -> None:
-        """Reflete no badge o provedor/modelo e o consumo de tokens (item #2)."""
+        """Reflete no badge o provedor/modelo ativo.
+
+        Decisão de design: o badge do topo identifica o **cérebro** (clicável
+        para trocar). O consumo de tokens saiu daqui — é telemetria e passou a
+        viver na barra de status inferior, ao lado das outras leituras. Isso
+        também encurta o badge e devolve largura ao título, que truncava.
+        """
         config = self.ctx.config
-        # Indicador de tokens consumidos na sessão (estilo Raycast) — aparece
-        # sempre que houver uso acumulado, independente de estar configurado agora.
-        tracker = self.ctx.engine.usage_tracker
-        token_txt = ""
-        if tracker is not None and tracker.session.total_tokens:
-            token_txt = f" · {format_tokens(tracker.session.total_tokens)} tokens"
         if config.is_configured():
             if config.provider == "ollama":
                 model_lbl = config.ollama_model or "ollama"
-                if "dolphin" in model_lbl.lower():
-                    prov_name = f"🐬 Dolphin ({model_lbl.split(':')[0]})"
-                else:
-                    prov_name = f"Ollama ({model_lbl})"
+                prov_name = model_lbl.split(":")[0] if "dolphin" in model_lbl.lower() else model_lbl
             elif config.provider == "gemini":
-                prov_name = f"Gemini ({config.gemini_model})"
+                prov_name = config.gemini_model or "Gemini"
             elif config.provider == "workbuddy":
-                prov_name = f"WorkBuddy ({getattr(config, 'workbuddy_model', 'hy4')})"
+                prov_name = getattr(config, "workbuddy_model", "WorkBuddy") or "WorkBuddy"
             elif config.provider == "openai":
-                prov_name = f"API ({config.openai_model})"
+                prov_name = config.openai_model or "API"
             else:
-                prov_name = "IA Ativa"
-            self.status_badge.set_text(f"● {prov_name}{token_txt}")
+                prov_name = "IA ativa"
+            self.status_badge.set_text(f"● {prov_name}")
+            self.status_badge_btn.set_tooltip_text(
+                f"Modelo ativo: {prov_name} — clique para trocar (Ctrl+Shift+M)"
+            )
         else:
-            self.status_badge.set_text(f"○ IA não configurada{token_txt}")
+            self.status_badge.set_text("○ IA não configurada")
+            self.status_badge_btn.set_tooltip_text(
+                "Nenhum provedor configurado — clique para escolher (Ctrl+Shift+M)"
+            )
 
     def refresh_token_usage(self) -> None:
         """Atualiza apenas o contador de tokens do badge (chamado após cada resposta)."""
@@ -279,30 +294,39 @@ class HeaderBarWidget:
     def refresh_fence_label(self) -> None:
         """Resincroniza o rótulo do monitor/janela com o estado da cerca espacial."""
         if self.ctx.fence.is_emergency_stopped:
-            self.fence_lbl.set_text("BLOQUEADO")
+            self._set_fence_text("BLOQUEADO", "process-stop-symbolic")
             return
         mode = self.ctx.fence.mode
         if mode == FenceMode.ACTIVE_WINDOW:
-            self.fence_lbl.set_text("⚡ Janela Ativa")
+            self._set_fence_text("Janela Ativa", "focus-windows-symbolic")
             return
         if mode == FenceMode.CHOSEN_WINDOW:
             win = self.ctx.fence.get_target_window()
             if win:
                 app_name = win.app.capitalize() if win.app else "Janela"
-                self.fence_lbl.set_text(f"🪟 {app_name}")
+                self._set_fence_text(app_name, "focus-windows-symbolic")
                 return
-            self.fence_lbl.set_text("🪟 Janela")
+            self._set_fence_text("Janela", "focus-windows-symbolic")
             return
         if mode == FenceMode.ALL_MONITORS:
-            self.fence_lbl.set_text("Todas as Telas")
+            self._set_fence_text("Todas as Telas", "network-wired-symbolic")
             return
         mon = self.ctx.fence.get_active_monitor()
-        self.fence_lbl.set_text(mon.name if mon else NO_MONITOR_LABEL)
+        self._set_fence_text(mon.name if mon else NO_MONITOR_LABEL, "video-display-symbolic")
+
+    def _set_fence_text(self, text: str, icon_name: str) -> None:
+        """Atualiza rótulo e ícone da cerca em um só lugar (evita divergência).
+
+        O ícone carrega o estado; o texto é curto de propósito para caber na
+        barra de status sem truncar.
+        """
+        self.fence_lbl.set_text(text)
+        self.fence_icon.set_from_icon_name(icon_name)
 
     def on_select_active_window_mode(self, popover: Gtk.Popover) -> None:
         popover.popdown()
         self.ctx.fence.set_active_window_mode()
-        self.fence_lbl.set_text("⚡ Janela Ativa")
+        self._set_fence_text("Janela Ativa", "focus-windows-symbolic")
         self._sync_live_client_fence()
         self.ctx.show_toast("Foco definido para Janela Ativa dinâmica.")
 
@@ -317,7 +341,7 @@ class HeaderBarWidget:
         except Exception:
             pass
         app_name = getattr(win, "app", "Janela").capitalize()
-        self.fence_lbl.set_text(f"🪟 {app_name}")
+        self._set_fence_text(app_name, "focus-windows-symbolic")
         self._sync_live_client_fence()
         display = win.display_name(30) if hasattr(win, "display_name") else str(win)
         self.ctx.show_toast(f"Foco fixado em: {display}")
@@ -335,14 +359,14 @@ class HeaderBarWidget:
         if ok:
             mon = self.ctx.fence.get_active_monitor()
             name = mon.name if mon else f"Monitor {monitor_idx}"
-            self.fence_lbl.set_text(name)
+            self._set_fence_text(name, "video-display-symbolic")
             self._sync_live_client_fence()
             self.ctx.show_toast(f"Cerca espacial fixada em: {name}")
 
     def on_select_all_monitors(self, popover: Gtk.Popover) -> None:
         popover.popdown()
         self.ctx.fence.set_all_monitors()
-        self.fence_lbl.set_text("Todas as Telas")
+        self._set_fence_text("Todas as Telas", "network-wired-symbolic")
         self._sync_live_client_fence()
         self.ctx.show_toast("Cerca espacial expandida para todas as telas.")
 
@@ -354,9 +378,11 @@ class HeaderBarWidget:
         if fence.is_emergency_stopped:
             fence.reset_emergency_stop()
             mon = fence.get_active_monitor()
-            self.fence_lbl.set_text(mon.name if mon else NO_MONITOR_LABEL)
+            self._set_fence_text(
+                mon.name if mon else NO_MONITOR_LABEL, "video-display-symbolic"
+            )
             self.ctx.show_toast("Parada de emergência desativada.")
         else:
             fence.trigger_emergency_stop()
-            self.fence_lbl.set_text("BLOQUEADO")
+            self._set_fence_text("BLOQUEADO", "process-stop-symbolic")
             self.ctx.show_toast("Kill Switch ativado: automações suspensas.")

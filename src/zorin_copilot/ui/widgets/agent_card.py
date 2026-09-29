@@ -28,6 +28,7 @@ from ...ai.agent import (
     AgentResult,
     Step,
 )
+from ...ai.subagents import PHASE_START, stage_label, stage_severity
 from ..markdown import format_markdown_to_markup
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -187,6 +188,18 @@ def _format_observation(obs: Any, max_chars: int = 1500) -> str:
     if len(text) > max_chars:
         text = text[:max_chars] + f"\n… [truncado, {len(text)} caracteres no total]"
     return text
+
+
+#: Ícone por especialista de subagente. Todos simbólicos do Adwaita e conferidos
+#: com `Gtk.IconTheme.has_icon` — um nome inventado não dá erro, só some o ícone.
+SUBAGENT_ICONS: dict[str, str] = {
+    "researcher": "system-search-symbolic",
+    "refactorer": "applications-engineering-symbolic",
+    "a11y_auditor": "preferences-desktop-accessibility-symbolic",
+}
+
+#: Ícone de um especialista que não está no mapa (catálogo novo, UI antiga).
+DEFAULT_SUBAGENT_ICON = "system-run-symbolic"
 
 
 class AgentExecutionWidget(Gtk.Box):
@@ -521,6 +534,17 @@ class AgentExecutionWidget(Gtk.Box):
         lbl.set_hexpand(True)
         row.append(lbl)
 
+        # Passo AUTO: executou sem perguntar (ação reversível). O ícone informativo é
+        # o "aviso posterior" — não há clique a pedir, porque já aconteceu.
+        if step.notify_after:
+            auto_ic = Gtk.Image.new_from_icon_name("dialog-information-symbolic")
+            auto_ic.set_pixel_size(12)
+            auto_ic.add_css_class("dim-label")
+            auto_ic.set_tooltip_text(
+                "Executado automaticamente (ação reversível) — avisado após o fato."
+            )
+            row.append(auto_ic)
+
         # Tempo decorrido
         if step.elapsed:
             time_lbl = Gtk.Label(label=f"<span size='small' alpha='60%'>{step.elapsed:.1f}s</span>", use_markup=True)
@@ -615,6 +639,67 @@ class AgentExecutionWidget(Gtk.Box):
             self.steps_box.append(row)
 
         self.status_lbl.set_text(f"● Passo {step.index + 1}: {tool_friendly} concluído")
+        if hasattr(self.ctx, "chat_stream") and hasattr(self.ctx.chat_stream, "scroll_to_bottom"):
+            self.ctx.chat_stream.scroll_to_bottom()
+
+    def add_subagent_stage(self, state: Any) -> None:
+        """Mostra a transição de um estágio de subagente na lista de etapas.
+
+        A linha entra em `steps_box`, na ordem em que chega, e **não** leva número
+        de passo: ela não é um passo do agente principal, é o trabalho interno do
+        passo `run_subagent`. Numerá-la faria a contagem de etapas mentir.
+
+        Roda no thread da UI — quem chama do thread do agente tem de passar por
+        `GLib.idle_add`, como faz o `add_step`. Mexer na lista do GTK de outro
+        thread não dá erro: corrompe estado em silêncio.
+        """
+        nome = str(getattr(state, "name", "") or "")
+        titulo = str(getattr(state, "title", "") or nome or "subagente")
+        posicao = str(getattr(state, "position", "") or "")
+        iniciando = getattr(state, "phase", "") == PHASE_START
+
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        row.add_css_class("agent-step-row")
+        row.add_css_class("agent-subagent-row")
+
+        run = getattr(state, "run", None)
+        # "working" e não "accent": a paleta do app não tem cor de destaque, e
+        # inventar uma aqui quebraria a regra de não introduzir cor nova.
+        # Concluído, a cor vem de `stage_severity` — que olha o `stop_reason` e
+        # não só o `ok`, senão um estágio parado por orçamento sairia verde.
+        ic = Gtk.Image.new_from_icon_name(SUBAGENT_ICONS.get(nome, DEFAULT_SUBAGENT_ICON))
+        ic.set_pixel_size(14)
+        ic.add_css_class("working" if iniciando else stage_severity(run))
+        row.append(ic)
+
+        if posicao:
+            pos_lbl = Gtk.Label(
+                label=f"<span size='small' alpha='70%'>{html.escape(posicao)}</span>",
+                use_markup=True,
+                xalign=0,
+            )
+            pos_lbl.add_css_class("tabular-nums")
+            row.append(pos_lbl)
+
+        if iniciando:
+            detalhe = "trabalhando…"
+        else:
+            detalhe = stage_label(run)
+            if run is not None:
+                passos = f"{run.step_count} passo" + ("s" if run.step_count != 1 else "")
+                detalhe += f" · {passos} · {run.elapsed:.1f}s"
+
+        texto = f"<b>{html.escape(titulo)}</b> <span alpha='70%'>— {html.escape(detalhe)}</span>"
+        lbl = Gtk.Label(label=texto, use_markup=True, xalign=0)
+        lbl.set_wrap(True)
+        lbl.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        lbl.set_hexpand(True)
+        row.append(lbl)
+
+        self.steps_box.append(row)
+
+        if iniciando:
+            self.status_lbl.set_text(f"● Subagente {titulo} ({posicao}) trabalhando…")
         if hasattr(self.ctx, "chat_stream") and hasattr(self.ctx.chat_stream, "scroll_to_bottom"):
             self.ctx.chat_stream.scroll_to_bottom()
 
@@ -740,6 +825,7 @@ class AgentExecutionWidget(Gtk.Box):
                     rationale=s_data.get("rationale", ""),
                     risk=s_data.get("risk", "safe"),
                     requires_approval=s_data.get("requires_approval", False),
+                    notify_after=s_data.get("notify_after", False),
                     approved=s_data.get("approved"),
                     ok=s_data.get("ok"),
                     observation=s_data.get("observation"),

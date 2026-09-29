@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="pt-BR" data-page-node-id="Kou3rowjBnE5Li9sWhK4PH">
+<head data-page-node-id="eZismuwBo7G1Tb5EuKRlhL">
+<meta charset="utf-8" data-page-node-id="xhAWIQlj7hZQqGhWOCOnCc">
+<title>Zorin Copilot — Janela principal (proposta)</title>
+<style>
+  /* Mockup estático da proposta (docs/PROPOSTA_REFORMULACAO_GUI.md §1).
+     Segue o design system do app: cinza neutro, acento grafite, raio 18/12px,
+     borda 1px, tabular-nums em métricas, ícones simbólicos (sem emoji),
+     sem gradientes. Tema claro, como o app em modo light-glass. */
+  :root{
+    --g50:#f7f8f9; --g100:#eceef0; --g200:#dde0e4; --g300:#c4c9cf;
+    --g400:#9aa1aa; --g500:#6b7280; --g600:#525b66; --g700:#3d454e; --g800:#282e35;
+    --accent:#6b7280;
+    --ok:#3d8b63; --err:#c0392b;
+    --tnum:"SFMono-Regular",ui-monospace,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0;min-height:100vh;font-family:"Inter","Segoe UI",system-ui,sans-serif;
+    background:#e9ebee;color:var(--g800);
+    display:flex;align-items:center;justify-content:center;padding:28px;
+  }
+  .window{
+    width:1060px;height:690px;border-radius:18px;overflow:hidden;
+    background:var(--g50);border:1px solid var(--g200);
+    box-shadow:0 20px 48px rgba(0,0,0,.14);
+    display:flex;flex-direction:column;
+  }
+  .ico{width:16px;height:16px;flex:0 0 16px;stroke:currentColor;fill:none;
+    stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+  header{display:flex;align-items:center;gap:8px;padding:8px 12px;
+    border-bottom:1px solid var(--g200);background:var(--g100)}
+  .iconbtn{width:32px;height:30px;border:0;border-radius:8px;background:transparent;
+    color:var(--g600);display:flex;align-items:center;justify-content:center;cursor:pointer}
+  .iconbtn:hover{background:var(--g200);color:var(--g800)}
+  .titleblock{flex:1;min-width:0;display:flex;flex-direction:column;line-height:1.2;padding:0 4px}
+  .titleblock b{font-size:13.5px;font-weight:600;white-space:nowrap}
+  .titleblock small{font-size:11.5px;color:var(--g500);white-space:nowrap;
+    overflow:hidden;text-overflow:ellipsis}
+  .brain{display:flex;align-items:center;gap:7px;border:1px solid var(--g300);
+    background:var(--g50);border-radius:999px;padding:5px 12px;font-size:12.5px;
+    color:var(--g700);cursor:pointer}
+  .brain .dot{width:7px;height:7px;border-radius:50%;background:var(--ok)}
+  .brain:hover{border-color:var(--accent)}
+  .body{flex:1;display:flex;min-height:0}
+  aside{width:270px;border-right:1px solid var(--g200);background:var(--g100);
+    display:flex;flex-direction:column;padding:10px 10px 0}
+  .sbhead{display:flex;align-items:center;justify-content:space-between;padding:2px 2px 8px}
+  .sbhead span{font-size:12px;font-weight:600;color:var(--g600)}
+  .sbhead .acts{display:flex;gap:2px}
+  .newconv{display:flex;align-items:center;gap:8px;border:1px solid var(--g300);
+    background:var(--g50);border-radius:999px;padding:7px 12px;font-size:12.5px;
+    font-weight:600;color:var(--g700);cursor:pointer;margin-bottom:8px}
+  .newconv:hover{border-color:var(--accent)}
+  .search{display:flex;align-items:center;gap:8px;border:1px solid var(--g300);
+    background:var(--g50);border-radius:9px;padding:6px 9px;margin-bottom:6px;color:var(--g500)}
+  .search input{flex:1;border:0;background:transparent;outline:none;font-size:12.5px;color:var(--g800)}
+  .list{flex:1;overflow:hidden}
+  .glabel{font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
+    color:var(--g400);padding:10px 6px 4px}
+  .row{display:flex;align-items:center;gap:9px;padding:7px 9px;border-radius:10px;
+    cursor:pointer;position:relative}
+  .row:hover{background:var(--g200)}
+  .row.active{background:rgba(107,114,128,.12);box-shadow:inset 3px 0 0 var(--accent)}
+  .row .ic{color:var(--g500)}
+  .row .meta{flex:1;min-width:0}
+  .row .meta b{display:block;font-size:12.5px;font-weight:500;color:var(--g800);
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .row .meta small{font-size:10.5px;color:var(--g500);font-family:var(--tnum)}
+  .row .del{position:absolute;right:8px;top:50%;transform:translateY(-50%);
+    width:24px;height:24px;border:0;border-radius:6px;background:transparent;
+    color:var(--err);display:flex;align-items:center;justify-content:center;
+    cursor:pointer;opacity:0}
+  .row:hover .del{opacity:1}
+  .row:hover .meta{margin-right:26px}
+  main{flex:1;display:flex;flex-direction:column;min-width:0;background:var(--g50)}
+  .welcome{flex:1;display:flex;flex-direction:column;align-items:center;
+    justify-content:center;text-align:center;padding:24px}
+  .stat{font-size:11.5px;color:var(--g500);font-family:var(--tnum);margin-bottom:8px}
+  .welcome h1{font-size:23px;font-weight:600;margin:0 0 24px;color:var(--g800)}
+  /* §1.3 — dois grupos porque são dois eixos distintos: o que a tela oferece
+     (derivado da janela em foco e da área de transferência) e COMO interagir
+     (modos globais, sempre disponíveis). Antes os quatro chips dividiam um
+     grupo só, e esse grupo só existia com contexto — então "Recortar Área da
+     Tela", que nunca depende de contexto, desaparecia numa área de trabalho
+     limpa. O grupo dos modos é o piso da tela vazia. */
+  .groups{display:flex;gap:36px;justify-content:center;align-items:flex-start}
+  .group h3{font-size:10.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;
+    color:var(--g400);margin:0 0 10px;text-align:left}
+  /* Sem largura fixa: no app o chip é um `Gtk.Label` sem restrição, então ele
+     mede o próprio texto. Com 220px fixos, "Pesquisar mais sobre o tema"
+     quebrava em duas linhas e desalinhava as duas colunas — defeito do mockup,
+     não do app. */
+  .qa{display:flex;align-items:center;gap:9px;border:1px solid var(--g300);
+    background:var(--g100);border-radius:11px;padding:9px 14px;margin-bottom:8px;
+    font-size:12.5px;color:var(--g700);cursor:pointer;white-space:nowrap}
+  .qa:hover{border-color:var(--accent);background:var(--g50)}
+  /* §1.3 — "Retomar" usa a MESMA classe de linha da barra lateral (`.row`),
+     e uma largura fixa para as três linhas serem varridas como coluna.
+     380px: mais largo que os 260px da barra lateral porque aqui sobra espaço,
+     e o mesmo conteúdo não deve encolher só por estar em outra tela. */
+  .resume{margin-top:24px;width:380px;display:flex;flex-direction:column;
+    gap:6px;text-align:left}
+  .resumehead{font-size:11.5px;color:var(--g500)}
+  .resumelist{display:flex;flex-direction:column;gap:2px}
+  /* Aqui não há lixeira, então o deslocamento do hover que existe na barra
+     lateral (para o texto não ficar sob o botão) não tem razão de acontecer. */
+  .resumelist .row:hover .meta{margin-right:0}
+  .promptwrap{padding:10px 14px 12px;border-top:1px solid var(--g200);background:var(--g100)}
+  .ctx{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--g300);
+    background:var(--g50);border-radius:999px;padding:3px 10px;font-size:11px;
+    color:var(--g600);margin-bottom:8px}
+  .ctx .x{color:var(--g400);cursor:pointer;font-weight:600}
+  .prompt{display:flex;align-items:center;gap:6px;border:1px solid var(--g300);
+    background:var(--g50);border-radius:13px;padding:7px 9px}
+  .prompt input{flex:1;border:0;background:transparent;outline:none;font-size:13.5px;color:var(--g800)}
+  /* §1.4 — o Modo Agente é um MODO, não a terceira ação.
+     Câmera e clipboard são botões-fantasma circulares (ações de entrada); o
+     modo tem rótulo e forma própria, senão os três viram a mesma silhueta.
+     O contorno existe no estado DESLIGADO: sem ele o rótulo flutuava parecendo
+     texto solto. O que muda entre ligado e desligado é o PREENCHIMENTO. */
+  .modechip{background:transparent;border-radius:10px;padding:4px 11px;
+    font-size:11.5px;font-weight:500;color:var(--g600);cursor:pointer;
+    font-family:inherit;white-space:nowrap;
+    border:1px solid rgba(107,114,128,.30)}
+  .modechip:hover{color:var(--g800);border-color:rgba(107,114,128,.55)}
+  .modechip.on{background:rgba(107,114,128,.22);
+    border-color:rgba(107,114,128,.55);color:var(--g800)}
+  .send{border:0;border-radius:10px;background:var(--accent);color:#fff;font-weight:600;
+    font-size:12.5px;padding:8px 15px;cursor:pointer;display:flex;align-items:center;gap:6px}
+  /* O envio é só o glifo, como no app (`pan-end-symbolic`). O atalho vive no
+     tooltip — o mockup não pode prometer um botão rotulado que não existe. */
+  .send.icon{padding:8px;border-radius:9px}
+  .status{display:flex;align-items:center;gap:10px;padding:6px 12px;
+    border-top:1px solid var(--g200);background:var(--g100);
+    font-size:11.5px;color:var(--g600);font-family:var(--tnum)}
+  .region{display:flex;align-items:center;gap:9px}
+  .sep{width:1px;height:14px;background:var(--g300)}
+  .item{display:flex;align-items:center;gap:6px;padding:0 4px}
+  .item .ico{opacity:.7;color:var(--g500)}
+  .spacer{flex:1}
+  .net{cursor:pointer}
+  .net:hover{color:var(--g800)}
+  .note{max-width:1060px;margin:14px auto 0;font-size:11.5px;color:#6b7280;text-align:center}
+  .states{max-width:1060px;margin:18px auto 0;display:flex;flex-direction:column;gap:14px}
+  .statecard{border:1px solid var(--g200);border-radius:12px;background:var(--g50);padding:12px 14px}
+  .statelbl{font-size:11.5px;color:var(--g500);margin-bottom:9px}
+</style>
+</head>
+<body data-page-node-id="MmHGZu9UhZL1s36nEJarUR">
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" data-page-node-id="wR1Kqe4vGN2vtBgKlTcGLg">
+  <defs data-page-node-id="lu3XFUE16G1dwzx3Nl7Wuk">
+    <symbol id="i-menu" viewBox="0 0 16 16" data-page-node-id="mBPWL8qYH7FQxePnRTJ8m1"><path d="M2 4h12M2 8h12M2 12h12" data-page-node-id="wB7wH37GebUOafbNq6SxAg"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 16 16" data-page-node-id="beQIoPJIdo8fdibaWS7TJ5"><path d="M8 3v10M3 8h10" data-page-node-id="iFJl85YFfZWrQxloUy6EHC"/></symbol>
+    <symbol id="i-search" viewBox="0 0 16 16" data-page-node-id="3rUgkLJ8psmHVyrNNDc9LF"><circle cx="7" cy="7" r="4.2" data-page-node-id="wlvcAtZo26L2ko4g6GqbrP"/><path d="M10.2 10.2 14 14" data-page-node-id="px5fcrvH1RhlPdxh6k73wI"/></symbol>
+    <symbol id="i-mic" viewBox="0 0 16 16" data-page-node-id="0oVWoOki6D3HUXQIOYTwq4"><rect x="6" y="2" width="4" height="7" rx="2" data-page-node-id="FD9vywWCBvXX9GgsnCXHhN"/><path d="M4 7.5a4 4 0 0 0 8 0M8 11.5V14" data-page-node-id="oU9bIHFCMwoD4DR93HnjJv"/></symbol>
+    <symbol id="i-gear" viewBox="0 0 16 16" data-page-node-id="DwExNzjZUqb60AhAvRgcnb"><circle cx="8" cy="8" r="2.2" data-page-node-id="2lSpoySW4l8jS3hjd945yz"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M12.6 3.4l-1.4 1.4M4.8 11.2l-1.4 1.4" data-page-node-id="BwI9ae8GklnJPZUEI7OIxe"/></symbol>
+    <symbol id="i-chat" viewBox="0 0 16 16" data-page-node-id="45FGh36queTm0yqNTuuAxn"><path d="M2.5 3.5h11v7h-6l-3 2.5v-2.5h-2z" data-page-node-id="jUwLNVuXJ7upoiABfG4WOc"/></symbol>
+    <symbol id="i-wave" viewBox="0 0 16 16" data-page-node-id="omw8QCrSlWcWmRBjdwBGNC"><path d="M2 8h1.5M5 5v6M8 3v10M11 5.5v5M14 7.5h-1" data-page-node-id="sUr9oyKverbPk118MsnMhO"/></symbol>
+    <symbol id="i-monitor" viewBox="0 0 16 16" data-page-node-id="8zqHKx9KO4UQl0BFz5OyBf"><rect x="2" y="3" width="12" height="8" rx="1" data-page-node-id="hL7Y4aDuhE1QxtZ9SD3a9Y"/><path d="M6 13h4M8 11v2" data-page-node-id="81nE46Zj71ZzHoGFMDfQdF"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 16 16" data-page-node-id="6BbUU7Sue9YwFVZNQNEXT7"><path d="M3 4.5h10M6 4.5V3h4v1.5M4.5 4.5l.7 8h5.6l.7-8M6.8 6.8v4M9.2 6.8v4" data-page-node-id="YJsWUFGuC8JjWBamY24Eef"/></symbol>
+    <symbol id="i-doc" viewBox="0 0 16 16" data-page-node-id="MTfbXArafTxLkcZbZjd4Bu"><path d="M4 2h5l3 3v9H4z" data-page-node-id="zkFMIBEFdgg0K2jorYUU7p"/><path d="M9 2v3h3" data-page-node-id="v5X6BQkaLf0XUQajnzEOEM"/></symbol>
+    <symbol id="i-crop" viewBox="0 0 16 16" data-page-node-id="HUBog2vC7QW8JT4PFcBZMR"><path d="M4.5 1.5v10h10M1.5 4.5h10v10" data-page-node-id="ouXJhAYe9BrzV5RaYfEXH5"/></symbol>
+    <symbol id="i-globe" viewBox="0 0 16 16" data-page-node-id="CgD7l4CNnjh0YtAFK5ymoG"><circle cx="8" cy="8" r="6" data-page-node-id="Gca6BCLxZiJwETIIQkYbYS"/><path d="M2 8h12M8 2c2 2.2 2 9.8 0 12M8 2c-2 2.2-2 9.8 0 12" data-page-node-id="JcbKsoVgMm202hrZxk2hNZ"/></symbol>
+    <symbol id="i-chev" viewBox="0 0 16 16" data-page-node-id="F2Z1PDDYWLdNvmAu6G4E1z"><path d="M4 6l4 4 4-4" data-page-node-id="LmPiHz1UxMZuLSkXMn6bq0"/></symbol>
+    <symbol id="i-enter" viewBox="0 0 16 16" data-page-node-id="9U3MHo7QOLE0vYapWivbjc"><path d="M13 4v4H3M6 5.5 3.5 8 6 10.5" data-page-node-id="EbQWWUUhWdok4C9ESGNBKM"/></symbol>
+    <symbol id="i-close" viewBox="0 0 16 16" data-page-node-id="n4fGMIGEovQqv9XxCxarEa"><path d="M4 4l8 8M12 4l-8 8" data-page-node-id="uhSGTCVp3EVVE5CFNpxXXo"/></symbol>
+  </defs>
+</svg>
+
+<div data-page-node-id="KU164FgiJZv33DlEuVfdoy">
+<div class="window" data-page-node-id="iX1y2qGmdi3GfCBQhR1QbT">
+  <header data-page-node-id="ZjD2OBnOXfrgutvyaXVDqC">
+    <button class="iconbtn" title="Menu" data-page-node-id="CHfvouQTq405Sa3dHjwnOF"><svg class="ico" data-page-node-id="35E8WRWqswllULliRFAeUi"><use href="#i-menu" data-page-node-id="vij9rspUyChNryPIG7EX3O"/></svg></button>
+    <button class="iconbtn" title="Nova conversa (Ctrl+N)" data-page-node-id="tTuxz1GaJDQ90VuYU4cOKz"><svg class="ico" data-page-node-id="0v99DhGZfh4F9lBNFGQqWf"><use href="#i-plus" data-page-node-id="WS9AJ1FbQ2JHzqmk8HyOYM"/></svg></button>
+    <button class="iconbtn" title="Painel de comandos (Ctrl+K)" data-page-node-id="GiVbtvU9o0v5QUfcMfN3FY"><svg class="ico" data-page-node-id="37u0r1BWkpGhLx6DsZRKZq"><use href="#i-search" data-page-node-id="tqVDFugLtq7dgyf9Tt3BML"/></svg></button>
+    <div class="titleblock" data-page-node-id="kKL3tfnEHOccaAUevcN5Ne">
+      <b data-page-node-id="fPYP9lE8UpHbeKHfpHy4gr">Zorin Copilot</b>
+      <small data-page-node-id="x4PZVIOtFXZKagSXYEAoua">Por que meu PC esquenta tanto?</small>
+    </div>
+    <button class="brain" data-page-node-id="6NzWqj2EHZsx5XTLzjux0H"><span class="dot" data-page-node-id="f8hmTLHUX3xVLoRfOu2hEC"></span> gemini-3.6-flash <svg class="ico" style="width:13px;height:13px" data-page-node-id="pwdiE5xlpCNJpRzb1N3AjI"><use href="#i-chev" data-page-node-id="iK7Typ9TxrzgvzfjS0FPWe"/></svg></button>
+    <button class="iconbtn" title="Voz ao vivo (Ctrl+M)" data-page-node-id="ukF1ELG97qPGpI4pr3WzDf"><svg class="ico" data-page-node-id="LHEKk47OChrO5EOdmAxBxV"><use href="#i-mic" data-page-node-id="UZPW9ayu8SjdqzM94ksAiO"/></svg></button>
+    <button class="iconbtn" title="Preferências" data-page-node-id="pCuyAwuXOnGOJRwqbEDw2V"><svg class="ico" data-page-node-id="9G0xQtO6vpEjhgQsCuymZr"><use href="#i-gear" data-page-node-id="FCAHG0hQhG7iqizZZVmq7e"/></svg></button>
+  </header>
+
+  <div class="body" data-page-node-id="6DevaWm3V9wHxCBPAJeExf">
+    <aside data-page-node-id="0kpo0qtFPq2C8PihYFgfjQ">
+      <div class="sbhead" data-page-node-id="oKARZ5Lg5UBzkVYNsx2fMx">
+        <span data-page-node-id="jYoF5zUcXKp5BEbdZJ5nJv">Conversas</span>
+        <div class="acts" data-page-node-id="4CW9RMT2kqjj09btOwI8J4">
+          <button class="iconbtn" title="Ações do histórico" style="width:26px;height:24px" data-page-node-id="D7T51e9lfJX4Hy6wEpC5qO"><svg class="ico" style="width:14px;height:14px" data-page-node-id="vKZpxqdWEi1ooPNtMXnVYY"><use href="#i-menu" data-page-node-id="DwQjfUwgxbLlwPWtNFG8nE"/></svg></button>
+          <button class="iconbtn" title="Recolher (Ctrl+H)" style="width:26px;height:24px" data-page-node-id="S6r818SqVXLuKQg0sHwU4Z"><svg class="ico" style="width:14px;height:14px" data-page-node-id="9Lbedt8VbR6iiDwy9XA664"><use href="#i-chev" data-page-node-id="QgSy8vHGzSRDwiI0oe0gGb"/></svg></button>
+        </div>
+      </div>
+      <div class="newconv" data-page-node-id="q1FIfJsqJVQNv2fP7Ynpbe"><svg class="ico" data-page-node-id="tV1L6uoGmYBmpHOOhacJ1W"><use href="#i-plus" data-page-node-id="Owe0oYD9V6YJBUFUjP2lNN"/></svg> Nova conversa</div>
+      <div class="search" data-page-node-id="CQQyb5FgYHkfwx2wpgmcKA"><svg class="ico" data-page-node-id="Z8HDX4t42feqM5tbgQgQf9"><use href="#i-search" data-page-node-id="Efq3hCDDlyqiWBJ3DVjzNf"/></svg><input placeholder="Pesquisar conversas…" data-page-node-id="yfdYnEZeWzmPL7caeL16iV"></div>
+
+      <div class="list" data-page-node-id="Z8fYMdIO7cKeQ6I6uP0REi">
+        <div class="glabel" data-page-node-id="Xf3n7ooBlnCaw2MnNswgsN">Hoje</div>
+        <div class="row active" data-page-node-id="wWxiuyH0lMOTBpEAKAcbDw">
+          <svg class="ico ic" data-page-node-id="gBa77WzAeeSKHzEYEs6WOR"><use href="#i-chat" data-page-node-id="b0By9MAGYboJfOJwrkRDfB"/></svg>
+          <div class="meta" data-page-node-id="dupDH6Xl6fVH0DsU5PEcJV"><b data-page-node-id="i8w6jGE7XArWGxyKUTHFaM">Por que meu PC esquenta tanto?</b><small data-page-node-id="0FvmFdOtsacWegd6vEEBFL">22:03 · 4 msgs</small></div>
+          <button class="del" title="Excluir conversa" data-page-node-id="iWETp5M3WHeMIJmWIIkfgu"><svg class="ico" style="width:14px;height:14px" data-page-node-id="H2Is98rItOLUuqwfAE15mB"><use href="#i-trash" data-page-node-id="W6P3GamS4hcbCLZUUUFS8l"/></svg></button>
+        </div>
+        <div class="row" data-page-node-id="Pt2XG6BRyMt8jdkyEltnqe">
+          <svg class="ico ic" data-page-node-id="aRUjnQEvUdqGxuv57cMPBw"><use href="#i-wave" data-page-node-id="DhdC1Safp9eVwpIXZ7HoHv"/></svg>
+          <div class="meta" data-page-node-id="YwMgFJgABkrKFjXIOq0idN"><b data-page-node-id="BQDlJpErvJc2QtZGWBHrWh">Chamada de Voz e Tela ao Vivo</b><small data-page-node-id="F4R82rMJnNCtr7KEbgky1l">21:47 · 6 msgs</small></div>
+          <button class="del" title="Excluir conversa" data-page-node-id="0S2kZctkBzImGGvXsNQm0D"><svg class="ico" style="width:14px;height:14px" data-page-node-id="pD7JhjhhgwGHj4JWO8I8ck"><use href="#i-trash" data-page-node-id="KgdwyBHf8jgJ4xKiEOHBhJ"/></svg></button>
+        </div>
+        <div class="row" data-page-node-id="Ho7mCt2XLOF6r3sTSFjKDB">
+          <svg class="ico ic" data-page-node-id="VDZgkLJNFzaDrKrAa7iFAq"><use href="#i-wave" data-page-node-id="LOTWG9TcawXQC3FsEND9eu"/></svg>
+          <div class="meta" data-page-node-id="oEkqRqAywboDp1I1SDS4wT"><b data-page-node-id="RDjxJd3QRH0FLD6beCwzC1">Conversa de Voz ao Vivo</b><small data-page-node-id="avOEOpvyU1sIt8RFdM0BL4">18:12 · 3 msgs</small></div>
+          <button class="del" title="Excluir conversa" data-page-node-id="HI0R2yWb0ccwinCGDH0t66"><svg class="ico" style="width:14px;height:14px" data-page-node-id="JhY8Hse2o3Mwu2hleu99aS"><use href="#i-trash" data-page-node-id="pAczsMYv6ao0ijuvODOx8o"/></svg></button>
+        </div>
+
+        <div class="glabel" data-page-node-id="DMlTXjDWZdgHloDmYtin52">Ontem</div>
+        <div class="row" data-page-node-id="VMNLgOPf5geU3xXjFchpoj">
+          <svg class="ico ic" data-page-node-id="BUJq8H7WVAHOY8F9Yp1zhM"><use href="#i-chat" data-page-node-id="rlBvWuriKC54YxLwYN74au"/></svg>
+          <div class="meta" data-page-node-id="XObmrh6hgZ0HDCOmJ3oEQI"><b data-page-node-id="H7BRvMeqNRUBbWoABqg1O9">Resumo do artigo sobre Wayland</b><small data-page-node-id="3AZPme5z7DDUHW8t9KD91K">16:40 · 8 msgs</small></div>
+          <button class="del" title="Excluir conversa" data-page-node-id="pz3tp3PrTX0RPovC2bDkOx"><svg class="ico" style="width:14px;height:14px" data-page-node-id="JoctpKOHM77bTKYurG9AHx"><use href="#i-trash" data-page-node-id="dGyGARAHWMoMntEnulJsS6"/></svg></button>
+        </div>
+        <div class="row" data-page-node-id="3fjvFJWxc8KpZgmXJyBAnX">
+          <svg class="ico ic" data-page-node-id="uoLcM77ffGcQKAR5QkGJ9P"><use href="#i-chat" data-page-node-id="p5L3kdReX4DLA7YHFwWQTA"/></svg>
+          <div class="meta" data-page-node-id="mzGhwEZZSVRIHD2SivhwOI"><b data-page-node-id="YEUEohS18YfhbNbZFh1tKo">Como listar arquivos grandes?</b><small data-page-node-id="pZTmyNcNACrRGJdlhMUo1S">09:15 · 2 msgs</small></div>
+          <button class="del" title="Excluir conversa" data-page-node-id="HPTOgA3o4yUAhGdGgA0mLk"><svg class="ico" style="width:14px;height:14px" data-page-node-id="ojv3qr1HQoL4E3PCvdwgBe"><use href="#i-trash" data-page-node-id="qArE5J3qyk2cmGLz1B5S9s"/></svg></button>
+        </div>
+
+        <div class="glabel" data-page-node-id="vUmqDe9zV57bSAe1KjFDuF">Esta semana</div>
+        <div class="row" data-page-node-id="qfXgBnnHizW05VFTOP9nb6">
+          <svg class="ico ic" data-page-node-id="TOa0ZcwDscDYH5PhDSDE3J"><use href="#i-chat" data-page-node-id="xBsK5edGhuHthonRjgZuYq"/></svg>
+          <div class="meta" data-page-node-id="BQWSp9K1OZtQIA0u924VFl"><b data-page-node-id="KEr2ArmacVGPSoVGiWnuXo">Organizar a pasta de downloads</b><small data-page-node-id="vrVYH1MLlN7qHHB4dMJLPK">Seg · 5 msgs</small></div>
+          <button class="del" title="Excluir conversa" data-page-node-id="473Keq1cck802B6IRoPj6J"><svg class="ico" style="width:14px;height:14px" data-page-node-id="A5vhIHJeb44cH8AGeRvzqt"><use href="#i-trash" data-page-node-id="ovQNxx5IHMJNuarMNnlqOd"/></svg></button>
+        </div>
+      </div>
+    </aside>
+
+    <main data-page-node-id="oY5HAyDvVFbZTgTEp29M6G">
+      <div class="welcome" data-page-node-id="JDabQCGnP8t0tRG6105niB">
+        <div class="stat" data-page-node-id="yBYBrQDpzVD9tsz4yAy18U">Conversa nova · EndeavourOS · Hyprland</div>
+        <h1 data-page-node-id="Gpcryg0jylGfsSUo9oxXO9">Como posso ajudar hoje?</h1>
+        <div class="groups" data-page-node-id="AuDB63mYuQgO1eCZbByGsT">
+          <div class="group" data-page-node-id="bmcvty7mGxAhgvIjzQirBI">
+            <h3 data-page-node-id="ACHmFhKkqCM35EPmON9Awx">Sobre o que está na tela</h3>
+            <div class="qa" data-page-node-id="ynY9AR4IDxGCIRPxlYXoH4"><svg class="ico" data-page-node-id="4mtyU5O9KawLFJVxpX3Eru"><use href="#i-doc" data-page-node-id="tkosJq6grCAsCW8XkrJumS"/></svg> Resumir esta página</div>
+            <div class="qa" data-page-node-id="NKSqe6Lc08YRlUfsKXY4jh"><svg class="ico" data-page-node-id="7ke7DfB0k2GFExGlYdF4Dr"><use href="#i-globe" data-page-node-id="Txkc7QpBQOBke2qntdsywd"/></svg> Pesquisar mais sobre o tema</div>
+          </div>
+          <div class="group" data-page-node-id="27Nmyh3izA1XokkxCgDQdz">
+            <h3 data-page-node-id="9nHAaO2Z0SJ2DCGCncGCt7">Como interagir</h3>
+            <div class="qa" data-page-node-id="tuXCmkGKlgsqpp4PSOVwRC"><svg class="ico" data-page-node-id="SSDKzC6scH3IN5DYGAAajM"><use href="#i-mic" data-page-node-id="FILPa7EKwoZYBO89CGcqva"/></svg> Voz ao vivo</div>
+            <div class="qa" data-page-node-id="tTLVA2kLQawFhTAMqrffXV"><svg class="ico" data-page-node-id="6dzSDm3rWTuuRETmwvoGIJ"><use href="#i-crop" data-page-node-id="Ye6eHyCKpyFmOLLJ4eoCTg"/></svg> Recortar área da tela</div>
+          </div>
+        </div>
+        <!-- §1.3 — "Retomar" reusa a identidade E a classe de linha da barra
+             lateral (`sidebar-chat-row`), então não há um segundo padrão de
+             "linha de conversa" para manter. No máximo três, e sem lixeira:
+             excluir é destrutivo e mora onde já existe confirmação — a barra
+             lateral. Uma tela de partida só inicia; não apaga. -->
+        <div class="resume" data-page-node-id="Ky5upZT9WBI5jV4qtzaeNo">
+          <div class="resumehead" data-page-node-id="yTk4aCFYb0nJqXvOSA1vBs">Retomar</div>
+          <div class="resumelist" data-page-node-id="oMLU7jqUQzK0tIYr8dJQgp">
+            <div class="row" data-page-node-id="wQ0AZfN2GFbQ2YIofKZ0XQ">
+              <svg class="ico ic" data-page-node-id="Et2sOTFYS2qNRnBEmQZ3pf"><use href="#i-chat" data-page-node-id="AwXbE7ctQlbmN8U1YjO2M6"/></svg>
+              <div class="meta" data-page-node-id="kYt1vBjPzVl6IYSsXAqzTN"><b data-page-node-id="RQW3M0jVYz6q5zqANApYtI">Por que meu PC esquenta?</b><small data-page-node-id="pBQ0nRjFvS1vjXoYSfAaNL">14:02 · 5 msgs</small></div>
+            </div>
+            <div class="row" data-page-node-id="Gk4lOAQxP1QNAbcsYfZ2Sj">
+              <svg class="ico ic" data-page-node-id="VG6uEQpUZbo7ROyqjOVZcJ"><use href="#i-chat" data-page-node-id="Tivm6xTM1rGu8tC6nWYQoN"/></svg>
+              <div class="meta" data-page-node-id="uZ6mO0IY1PUXl4tPEdLcVB"><b data-page-node-id="FYQN5n6XwWm8G7vqJO1RCF">Resumo do artigo sobre Wayland</b><small data-page-node-id="vYq6ON0bxLwsdPJI7j4UvL">16:40 · 8 msgs</small></div>
+            </div>
+            <div class="row" data-page-node-id="sO9l5TUc0h5MPm3PcKcCMn">
+              <svg class="ico ic" data-page-node-id="Nh2TSLMJbBQGT5lvZzCL5v"><use href="#i-chat" data-page-node-id="Pr5GqBmpgUJx3s4HXzXCEX"/></svg>
+              <div class="meta" data-page-node-id="RhVKPvNa3qO8QITAKQ5xMD"><b data-page-node-id="ARqjYxGXYFzzBQNaHfRERs">Organizar a pasta de downloads</b><small data-page-node-id="i1Pz9hFmXQbXQrqNlB7xrV">Seg · 5 msgs</small></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="promptwrap" data-page-node-id="RC1veZL4CiuNmiFec2FRFk">
+        <div class="ctx" data-page-node-id="CiN0E3DLGIJqt14Va0je4S"><svg class="ico" style="width:13px;height:13px" data-page-node-id="ootClsLAEBzH2DSq7cZBos"><use href="#i-globe" data-page-node-id="Q99qvU8cxNjDptotyzFwKg"/></svg> Google Chrome · Zorin Copilot — Copiloto de IA nativo <span class="x" data-page-node-id="AbPFeF3puKFWp0QneEd9mF"><svg class="ico" style="width:11px;height:11px" data-page-node-id="qJI8BipafelKzinWKWXYby"><use href="#i-close" data-page-node-id="Z7lLWIahiCXMN083lWySVn"/></svg></span></div>
+        <div class="prompt" data-page-node-id="vXh14Tf76ChaiD9EDiR42D">
+          <button class="iconbtn" title="Visão da tela — recortar área ou capturar tudo" data-page-node-id="2MT4dkYYtUUVqQTjAExZjC"><svg class="ico" data-page-node-id="Xk5nxDeyxmCVGBh4PjbPMS"><use href="#i-crop" data-page-node-id="9VykoBKC1gQmR54Cq4t2vx"/></svg></button>
+          <button class="iconbtn" title="Área de transferência inteligente" data-page-node-id="yImafcsZORjoy8B7PTdmCc"><svg class="ico" data-page-node-id="WNqT6HyqY94g0OeuojlOLa"><use href="#i-doc" data-page-node-id="BEpAlK7KYkUYcRZZyVEtIV"/></svg></button>
+          <button class="modechip" title="Modo Agente: o que você enviar vira uma tarefa autônoma no desktop. Também em Ctrl+K" data-page-node-id="3GsEWNZJUhSJe1bgprCx09">Agente</button>
+          <input placeholder="Converse ou peça uma ação no desktop…" data-page-node-id="qNTCOffGe7Km1CGrVotddR">
+          <button class="iconbtn" title="Voz ao vivo (Ctrl+M)" data-page-node-id="YIcH4gffFkB22EE4qIodPd"><svg class="ico" data-page-node-id="IGtTTl8OygqiqSpSrBTVid"><use href="#i-mic" data-page-node-id="DCnio9kZQRX5BDezryOHVP"/></svg></button>
+          <button class="send icon" title="Enviar — Enter ou Ctrl+Enter" data-page-node-id="Z9iQdNxe9Hwg6cXYg3GwsK"><svg class="ico" style="width:14px;height:14px" data-page-node-id="s6DPUipC1Eif0gfz1q5KR0"><use href="#i-enter" data-page-node-id="nsIHHPiAnyetYEYpTnLaH2"/></svg></button>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <div class="status" data-page-node-id="OAH20I9ACj9KrKjGKyvcMI">
+    <div class="region" data-page-node-id="VCrewrL6WeB6d5NHFZx9wV"><span class="item" data-page-node-id="BGWs9L62j4jN6vZyCaLAnN"><span style="color:var(--ok)" data-page-node-id="ChCnSoZwGB7eXimZvv4JyD">●</span> gemini-3.6-flash</span></div>
+    <div class="sep" data-page-node-id="DG7oJQHnp9pSMQRedmA4mW"></div>
+    <div class="region" data-page-node-id="mx659lhxK8a1XE6QhzbtEQ"><span class="item" data-page-node-id="z8dlXUSpHAkYVKPxpGttJB">98 docs</span></div>
+    <div class="spacer" data-page-node-id="32giszG6CPTT8YEazI5ssQ"></div>
+    <div class="region" data-page-node-id="fG2WcCOQgTLbFlM4TNRpaz">
+      <span class="item" data-page-node-id="woAYQuqkvS0UNjZxvn0aaE"><svg class="ico" data-page-node-id="G3Z0A0LSPhG8vm3n3w27qP"><use href="#i-monitor" data-page-node-id="Y7aPT6DWBUZ3oEoO2g4Rf9"/></svg> AOC 27"</span>
+      <span class="item" data-page-node-id="M1BMCTuKKPKn2PbqDuCi9r">Carga 0.87</span>
+      <span class="item" data-page-node-id="4gTdZcWS4CewGxkUXSd2xI">RAM 9,1/15,6 GB</span>
+      <span class="item net" title="Abrir diagnóstico de rede" data-page-node-id="UCxXWyscurIyJiFl4rFYcr"><svg class="ico" data-page-node-id="BfP13MgQBCNJBXdBm475j2"><use href="#i-globe" data-page-node-id="FB3KaU1vIn0C6a30UJ7oiH"/></svg> Rede 12 ms</span>
+    </div>
+  </div>
+</div>
+<div class="note" data-page-node-id="tDAvyF3WTDYmUgfrMcOnxh">Proposta estática — ícones simbólicos, cinza neutro e acento grafite do design system do app. Sem emojis nem gradientes.</div>
+<div class="note" data-page-node-id="Lx3QmTvRc9WbYz2HnKdA4e">Quadro principal <b>composto</b>: o painel central está no estado de lançamento (conversa vazia — o único em que a tela de boas-vindas existe, porque <code>rebuild()</code> só a mostra quando a sessão não tem turnos); a barra lateral e o cabeçalho mostram uma conversa aberta, para exibir o realce da linha ativa (§1.2) e o subtítulo de tópico (§1.1). Nesse estado o app real não destaca nenhuma linha e o subtítulo é "Assistente Inteligente".</div>
+
+<!-- §1.4 — os dois estados do chip de modo, isolados para comparação.
+     Antes: três botões-fantasma circulares idênticos (câmera, clipboard e
+     modo agente). Agora: duas ações de entrada com a mesma forma, e um modo
+     com forma própria — rotulado e com estado visível. -->
+<div class="states" data-page-node-id="meUlqBQMmVoThhCLaPPvES">
+  <div class="statecard" data-page-node-id="EdmIHp6RMThGfgvVMp76tY">
+    <div class="statelbl" data-page-node-id="tjeGHewLAGgG1OwKeWwQEU">Modo Agente desligado — o campo convida a conversar</div>
+    <div class="prompt" data-page-node-id="FNeBkxioKL3JE0q8r1MdPC">
+      <button class="iconbtn" title="Visão da tela" data-page-node-id="geSn9XKXkrZNa6vFNv3o8p"><svg class="ico" data-page-node-id="ajqYl00RvAwGoFTxjMutFN"><use href="#i-crop" data-page-node-id="DeoDWg3orA0ETdq3rf1vJe"/></svg></button>
+      <button class="iconbtn" title="Área de transferência" data-page-node-id="w3FfWCcXHOeBpJ2S6sQPUQ"><svg class="ico" data-page-node-id="gmwaSesM2wdCZnLgJaTEDx"><use href="#i-doc" data-page-node-id="PlHhaH7QfOJ8UaSQrnf1XH"/></svg></button>
+      <button class="modechip" title="Modo Agente" data-page-node-id="16iHJGy9PmdPrLjyMAMCBL">Agente</button>
+      <input placeholder="Peça ao Zorin Copilot ou digite um comando..." data-page-node-id="FD1eMhLLHZouUPL5nxtvmN">
+      <button class="iconbtn" title="Voz ao vivo (Ctrl+M)" data-page-node-id="tX1uYZmuAc82s2X3UXATqO"><svg class="ico" data-page-node-id="F1KBHMg0Pm0x2M1eG8mr3D"><use href="#i-mic" data-page-node-id="3osS0yM73HZ78CNt0wT1LV"/></svg></button>
+      <button class="send" title="Enviar — Enter ou Ctrl+Enter" data-page-node-id="aLWzUeWYff2BtNV9k5supY"><svg class="ico" style="width:13px;height:13px" data-page-node-id="C6iPKWD06xGu3tI0ocYPMq"><use href="#i-enter" data-page-node-id="17v8mtXjmBcV7JeWFZwdKf"/></svg></button>
+    </div>
+  </div>
+  <div class="statecard" data-page-node-id="CCh4hGXDP5OqgPwOnkGoWw">
+    <div class="statelbl" data-page-node-id="JpEg8UTcx221S3eKCsCcin">Modo Agente ligado — o chip acende e o campo muda de convite</div>
+    <div class="prompt" data-page-node-id="HZBC6Xv9zGgGgqcHtmQ770">
+      <button class="iconbtn" title="Visão da tela" data-page-node-id="yR0gQAAEOjCw8vRYovTzby"><svg class="ico" data-page-node-id="V8PwwBOukcSKfY221RvOVR"><use href="#i-crop" data-page-node-id="0Ayz0zJ5MDi7Qtf14vt7Ba"/></svg></button>
+      <button class="iconbtn" title="Área de transferência" data-page-node-id="lyMWtrBG9hxgGG8tgZMSp9"><svg class="ico" data-page-node-id="vFlkVtE9uZPbYqn0d8QwDv"><use href="#i-doc" data-page-node-id="XrqU2vie6Xk8DYlqdjPcYj"/></svg></button>
+      <button class="modechip on" title="Modo Agente ligado" data-page-node-id="DBYhV9v1c7bzcWLuykUJ0H">Agente</button>
+      <input placeholder="Descreva o objetivo para o Agente (ex: abrir Firefox e pesquisar...)" data-page-node-id="0Op20FPro7Yea8DHqmbVNE">
+      <button class="iconbtn" title="Voz ao vivo (Ctrl+M)" data-page-node-id="M5kWrqyb4fTtGePenaZbIo"><svg class="ico" data-page-node-id="MSAx5XlxnK1UDrMjr79AQe"><use href="#i-mic" data-page-node-id="GYl7XIqeEYGhQbBVIFkkaG"/></svg></button>
+      <button class="send" title="Enviar — Enter ou Ctrl+Enter" data-page-node-id="qmxdsosWVydiBvLVHJB9vT"><svg class="ico" style="width:13px;height:13px" data-page-node-id="zBJ8L6f8CnKl2gAeSxvFGY"><use href="#i-enter" data-page-node-id="5DcoDTPA7UeqWqMgjnsdvy"/></svg></button>
+    </div>
+  </div>
+</div>
+</div>
+</body>
+</html>

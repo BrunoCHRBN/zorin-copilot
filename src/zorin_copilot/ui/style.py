@@ -123,6 +123,40 @@ def apply_glass_theme(display: Gdk.Display | None = None) -> None:
 
     _provider_installed = True
 
+def apply_motion_preference(window: Gtk.Widget, reduced: bool) -> None:
+    """Liga/desliga as microinterações da janela (estilo Superhuman).
+
+    Com ``reduced=True`` o CSS zera todas as durações de transição/animação via
+    a classe ``reduced-motion`` — uma interface estática para quem prefere (ou
+    precisa de) ausência total de movimento, sem perder nenhum recurso.
+    """
+    if reduced:
+        window.add_css_class("reduced-motion")
+    else:
+        window.remove_css_class("reduced-motion")
+
+
+def reduced_motion_enabled() -> bool:
+    """Lê a preferência de movimento reduzido da configuração do usuário.
+
+    Pública de propósito: não é só o CSS que precisa saber disso. Animações que
+    o GTK4 CSS não consegue expressar — como a piscada de um indicador, que
+    exigiria `@keyframes` e não existe no GTK4 — são feitas em Python e têm de
+    consultar a mesma fonte, senão a preferência vale para metade do app.
+
+    O GTK4 não expõe `prefers-reduced-motion`; então o app oferece a chave
+    ``reduced_motion`` na configuração e honra a variável de ambiente
+    ``ZORIN_COPILOT_REDUCED_MOTION`` para sessões pontuais.
+    """
+    if os.environ.get("ZORIN_COPILOT_REDUCED_MOTION", "").strip().lower() in ("1", "true", "yes"):
+        return True
+    try:
+        from ..core.config import CopilotConfig
+        return bool(getattr(CopilotConfig.load(), "reduced_motion", False))
+    except Exception:  # pragma: no cover - config ausente não pode derrubar a UI
+        return False
+
+
 def _add_compositor_class(window: Gtk.Widget) -> None:
     """Marca a janela conforme a capacidade de blur do compositor.
 
@@ -143,6 +177,7 @@ def setup_glass_window(window: Adw.ApplicationWindow) -> None:
     apply_glass_theme(window.get_display())
     window.add_css_class("glass-window")
     _add_compositor_class(window)
+    apply_motion_preference(window, reduced_motion_enabled())
 
     style_manager = Adw.StyleManager.get_default()
 
@@ -162,6 +197,7 @@ def setup_glass_pill_window(window: Gtk.Window) -> None:
     apply_glass_theme(window.get_display())
     window.add_css_class("voice-pill-window")
     _add_compositor_class(window)
+    apply_motion_preference(window, reduced_motion_enabled())
 
     style_manager = Adw.StyleManager.get_default()
 

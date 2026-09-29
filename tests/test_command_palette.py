@@ -19,8 +19,71 @@ from zorin_copilot.ui.app import CopilotWindow  # noqa: E402
 from zorin_copilot.ui.widgets.command_palette import (  # noqa: E402
     MAX_RESULTS,
     PaletteCommand,
+    _accelerator_badge,
+    _accelerator_parts,
+    _pretty_accelerator,
     score_command,
 )
+
+
+class AcceleratorRenderingTest(unittest.TestCase):
+    """O atalho aparece como teclas (estilo Superhuman), não como texto cinza.
+
+    O parser anterior removia todos os ``>`` e separava por ``<``, o que
+    quebrava o formato do GTK (``<Control>q`` virava ``Controlq``) e colava a
+    tecla no último modificador (``<Control><Shift>m`` -> ``Ctrl+Shiftm``).
+    """
+
+    def test_single_modifier(self):
+        self.assertEqual(_accelerator_parts("<Control>q"), ["Ctrl", "Q"])
+
+    def test_multiple_modifiers(self):
+        self.assertEqual(
+            _accelerator_parts("<Control><Shift>m"), ["Ctrl", "Shift", "M"]
+        )
+
+    def test_super_modifier_is_preserved(self):
+        self.assertEqual(
+            _accelerator_parts("<Super><Shift>d"), ["Super", "Shift", "D"]
+        )
+
+    def test_named_key_is_not_uppercased(self):
+        self.assertEqual(_accelerator_parts("<Control>space"), ["Ctrl", "space"])
+
+    def test_bare_key_passes_through(self):
+        self.assertEqual(_accelerator_parts("F5"), ["F5"])
+
+    def test_empty_input(self):
+        self.assertEqual(_accelerator_parts(""), [])
+
+    def test_pretty_joins_with_plus(self):
+        self.assertEqual(_pretty_accelerator("<Control><Shift>k"), "Ctrl+Shift+K")
+
+    def test_badge_renders_one_kbd_per_key(self):
+        badge = _accelerator_badge("<Control>k")
+        labels = _collect_labels(badge)
+        self.assertIn("Ctrl", labels)
+        self.assertIn("K", labels)
+
+    def test_badge_marks_chord_for_tabular_numbers(self):
+        badge = _accelerator_badge("<Control>k")
+        self.assertIn("shortcut-chord", badge.get_css_classes())
+
+
+def _collect_labels(widget) -> list[str]:
+    """Coleta o texto de todos os Gtk.Label dentro de um widget."""
+    from gi.repository import Gtk
+
+    found: list[str] = []
+    child = widget.get_first_child() if isinstance(widget, Gtk.Widget) else None
+    if isinstance(widget, Gtk.Label):
+        text = widget.get_text()
+        if text:
+            found.append(text)
+    while child is not None:
+        found.extend(_collect_labels(child))
+        child = child.get_next_sibling()
+    return found
 
 
 def _command(
@@ -135,6 +198,29 @@ class CommandPaletteWidgetTest(unittest.TestCase):
         self.palette.entry.set_text("abc")
         self.palette.close()
         self.assertEqual(self.palette.entry.get_text(), "")
+
+    def test_title_with_ampersand_renders_instead_of_blanking(self):
+        """`Adw.ActionRow` lê `title`/`subtitle` como MARKUP, não como texto.
+
+        Com um `&` cru o parsing falha: o GTK emite um warning, o `get_title()`
+        continua devolvendo o texto original e o rótulo sai **vazio** — a linha
+        aparece em branco no painel. Asserção sobre `get_title()` passaria feliz;
+        só olhando o `Gtk.Label` interno o defeito aparece. Importa porque os
+        títulos de prompt MCP vêm de servidores externos.
+        """
+        row = self.palette._make_row(
+            _command("Rock & Roll", subtitle="tom & voz", keywords=("a & b",))
+        )
+
+        rendered = _collect_labels(row)
+        self.assertIn("Rock & Roll", rendered)
+        self.assertIn("tom & voz", rendered)
+
+    def test_titles_without_special_chars_are_untouched(self):
+        """Escapar não pode alterar o caso comum (sem `&`, `<` ou `>`)."""
+        row = self.palette._make_row(_command("Nova conversa", subtitle="Começar limpo"))
+        self.assertEqual(row.get_title(), "Nova conversa")
+        self.assertEqual(row.get_subtitle(), "Começar limpo")
         self.assertFalse(self.palette.is_open)
 
 
@@ -161,8 +247,19 @@ class CommandPaletteIntegrationTest(unittest.TestCase):
         self.assertIn("<Control>k", triggers)
 
     def test_every_command_has_a_handler(self):
-        """Comando sem handler viraria uma entrada morta no painel."""
-        names = {c.name for c in self.win.palette_commands()}
+        """Comando sem handler viraria uma entrada morta no painel.
+
+        Exceção deliberada: comandos com prefixo `mcp-prompt::` são roteados por
+        prefixo em `run_palette_command`, não pelo dicionário estático — os nomes
+        deles vêm dos servidores MCP conectados e mudam em tempo de execução.
+        Sem este filtro o teste passaria hoje (o sandbox não tem prompts) e
+        quebraria assim que houvesse um, apontando defeito onde não há.
+        """
+        from zorin_copilot.mcp.prompts import is_prompt_command
+
+        names = {
+            c.name for c in self.win.palette_commands() if not is_prompt_command(c.name)
+        }
         handlers = set(self.win._palette_handlers())
         self.assertEqual(names - handlers, set())
 
@@ -236,6 +333,21 @@ class CommandPaletteIntegrationTest(unittest.TestCase):
         self.assertIn("app.network-audit", handlers)
         self.assertIn("app.network-throughput", handlers)
         self.assertIn("app.network-diagnose", handlers)
+
+    def test_shortcut_cheatsheet_is_discoverable(self):
+        """A referência de atalhos tem comando no painel E handler ligado."""
+        commands = self.win.palette_commands()
+        names = [c.name for c in commands]
+        self.assertIn("app.shortcut-cheatsheet", names)
+        self.assertIn("app.shortcut-cheatsheet", self.win._palette_handlers())
+
+    def test_shortcut_cheatsheet_lists_app_shortcuts(self):
+        """O diálogo só monta se cada atalho declarado tiver uma linha."""
+        # Não abre janela: valida apenas que os atalhos usados existem.
+        self.assertGreater(len(APP_SHORTCUTS), 0)
+        for shortcut in APP_SHORTCUTS:
+            self.assertTrue(shortcut.accelerator, f"{shortcut.name} sem acelerador")
+            self.assertTrue(shortcut.description, f"{shortcut.name} sem descrição")
 
 
 if __name__ == "__main__":

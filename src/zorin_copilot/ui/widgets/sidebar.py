@@ -1,22 +1,38 @@
 # Decisão de design: barra lateral estilo Gemini com recolhimento animado. A busca é
 # protegida por debounce porque cada tecla disparava uma reconstrução completa da lista,
 # o que degrada a resposta quando o histórico cresce.
+#
+# Três decisões moldam a listagem (ver docs/PROPOSTA_REFORMULACAO_GUI.md §1.2):
+#   1. Agrupamento por data — "Hoje / Ontem / Esta semana / Anterior". Numa lista
+#      longa, a data é o primeiro diferenciador que o olho procura.
+#   2. Lixeira só no hover — antes, um ícone de exclusão permanente em cada linha
+#      transformava um clique errado em perda de conversa. Fica num slot de largura
+#      fixa (sem deslocar o texto ao aparecer) e só se revela quando o ponteiro
+#      entra na linha. Teclado alcança a mesma ação com Delete na linha focada.
+#   3. Ícone de tipo à esquerda — voz e chat são coisas diferentes; todas as
+#      chamadas de voz compartilham o mesmo título, então o ícone é o que as
+#      distingue de um chat de texto.
 
-"""Barra lateral de conversas: busca, listagem, retomada e exclusão de tópicos."""
+"""Barra lateral de conversas: busca, listagem agrupada, retomada e exclusão de tópicos."""
 
 from __future__ import annotations
 
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Iterable
 
 from ..gi_versions import require_gtk4  # noqa: E402
 require_gtk4()
-from gi.repository import GLib, Gtk, Pango  # noqa: E402
+from gi.repository import Adw, Gdk, GLib, Gtk, Pango  # noqa: E402
 
 if TYPE_CHECKING:  # pragma: no cover - apenas para type checking
     from ..app import CopilotWindow
 
 SEARCH_DEBOUNCE_MS = 80
+
+#: Títulos com que o app grava conversas de voz (`app.py`). São genéricos de
+#: propósito — toda chamada recebe o mesmo rótulo — então a linha usa o ícone de
+#: tipo e o horário para diferenciá-las, nunca o título.
+_VOICE_TITLE_PREFIXES = ("Chamada de Voz", "Conversa de Voz")
 
 def format_relative_timestamp(iso_str: str) -> str:
     """Formata timestamp ISO de forma amigável para exibição no histórico de tópicos."""
@@ -36,6 +52,105 @@ def format_relative_timestamp(iso_str: str) -> str:
             return dt.strftime("%d/%m/%Y")
     except Exception:
         return iso_str[:16].replace("T", " ")
+
+def format_clock(iso_str: str) -> str:
+    """Devolve só o horário (``HH:MM``) — dentro de um grupo de data é o que
+    distingue duas linhas de mesmo título (ex.: várias chamadas de voz)."""
+    if not iso_str:
+        return ""
+    try:
+        return datetime.fromisoformat(iso_str).strftime("%H:%M")
+    except Exception:
+        return ""
+
+def classify_topic(topic: dict) -> str:
+    """Classifica o tópico em ``"voice"`` ou ``"chat"`` para escolher o ícone."""
+    title = topic.get("title") or ""
+    return "voice" if title.startswith(_VOICE_TITLE_PREFIXES) else "chat"
+
+def group_topics_by_date(
+    topics: Iterable[dict], now: datetime | None = None
+) -> list[tuple[str, list[dict]]]:
+    """Agrupa tópicos por recência preservando a ordem de entrada.
+
+    Devolve pares ``(rótulo, tópicos)`` na ordem canônica das seções, omitindo
+    seções vazias. A ordem dentro de cada grupo é a que veio do banco (mais
+    recente primeiro), então não reordenamos aqui.
+    """
+    now = now or datetime.now()
+    buckets: dict[str, list[dict]] = {"Hoje": [], "Ontem": [], "Esta semana": [], "Anterior": []}
+    for topic in topics:
+        buckets[_bucket_for(topic.get("updated_at", ""), now)].append(topic)
+    return [(label, items) for label, items in buckets.items() if items]
+
+def _bucket_for(iso_str: str, now: datetime) -> str:
+    try:
+        dt = datetime.fromisoformat(iso_str)
+    except Exception:
+        return "Anterior"
+    delta_days = (now.date() - dt.date()).days
+    if delta_days <= 0:
+        return "Hoje"
+    if delta_days == 1:
+        return "Ontem"
+    if delta_days < 7:
+        return "Esta semana"
+    return "Anterior"
+
+
+def build_topic_identity(ctx: "CopilotWindow", topic: dict) -> Gtk.Box:
+    """Ícone + título + "horário · N mensagens": a identidade de uma conversa.
+
+    Vive fora de `SidebarPanel` porque a mesma conversa aparece em dois lugares —
+    na lista da barra lateral e na seção "Retomar" da tela de boas-vindas. Duas
+    cópias divergiriam em silêncio (uma passaria a mostrar o ícone de voz e a
+    outra não), que é o mesmo motivo pelo qual a deduplicação das frases de
+    ativação importa `normalize_text` em vez de reimplementá-lo.
+
+    Devolve só o conteúdo. A moldura — a linha em si, a lixeira, o menu — fica
+    com quem chama, porque as duas telas oferecem coisas diferentes: a barra
+    lateral gerencia (excluir), a tela de boas-vindas só inicia.
+    """
+    topic_id = topic.get("id")
+    is_active = getattr(getattr(ctx, "session", None), "id", None) == topic_id
+    is_voice = classify_topic(topic) == "voice"
+    icon_name = (
+        "audio-input-microphone-symbolic"
+        if is_voice
+        else ("starred-symbolic" if is_active else "format-justification-symbolic")
+    )
+
+    item_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+
+    chat_icon = Gtk.Image.new_from_icon_name(icon_name)
+    chat_icon.set_pixel_size(14)
+    chat_icon.set_valign(Gtk.Align.CENTER)
+    item_box.append(chat_icon)
+
+    info_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+    info_box.set_hexpand(True)
+
+    clean_title = topic.get("title") or "Conversa sem título"
+    title_lbl = Gtk.Label(label=clean_title, xalign=0)
+    title_lbl.set_ellipsize(Pango.EllipsizeMode.END)
+    title_lbl.set_hexpand(True)
+    # O título é a âncora de reconhecimento; truncado, o usuário perde a
+    # referência. O tooltip devolve o texto inteiro no hover.
+    title_lbl.set_tooltip_text(clean_title)
+    info_box.append(title_lbl)
+
+    clock = format_clock(topic.get("updated_at", ""))
+    turns_num = topic.get("turn_count", 0)
+    sub_parts = [p for p in (clock, f"{turns_num} msg{'s' if turns_num != 1 else ''}") if p]
+    sub_lbl = Gtk.Label(label=" · ".join(sub_parts), xalign=0)
+    sub_lbl.add_css_class("caption")
+    sub_lbl.add_css_class("dim-label")
+    sub_lbl.add_css_class("tabular-nums")
+    info_box.append(sub_lbl)
+
+    item_box.append(info_box)
+    return item_box
+
 
 class SidebarPanel:
     """Painel lateral de histórico de conversas com busca filtrada."""
@@ -57,7 +172,10 @@ class SidebarPanel:
 
         self.search: Gtk.SearchEntry
         self.history_listbox: Gtk.ListBox
-        self.clear_history_btn: Gtk.Button
+        # Compatibilidade: o app expõe `clear_history_btn` como propriedade. Agora
+        # é o MenuButton do cabeçalho da sidebar, de onde a ação destrutiva sai
+        # (não mais um botão de rodapé no caminho do usuário).
+        self.clear_history_btn: Gtk.MenuButton
 
         self._build_panel()
 
@@ -77,6 +195,8 @@ class SidebarPanel:
         s_title.add_css_class("heading")
         s_title.set_hexpand(True)
         s_top.append(s_title)
+
+        s_top.append(self._build_overflow_menu())
 
         s_close_btn = Gtk.Button.new_from_icon_name("pan-start-symbolic")
         s_close_btn.set_tooltip_text("Recolher barra lateral (Ctrl+H)")
@@ -100,7 +220,36 @@ class SidebarPanel:
         self.history_scrolled.set_child(self.history_listbox)
         self.panel.append(self.history_scrolled)
 
-        self.panel.append(self._build_clear_button())
+    def _build_overflow_menu(self) -> Gtk.MenuButton:
+        """Menu ⋮ do cabeçalho: abriga a ação destrutiva fora do caminho do usuário."""
+        self.clear_history_btn = Gtk.MenuButton()
+        self.clear_history_btn.set_icon_name("view-more-symbolic")
+        self.clear_history_btn.add_css_class("flat")
+        self.clear_history_btn.add_css_class("circular")
+        self.clear_history_btn.add_css_class("glass-icon-btn")
+        self.clear_history_btn.set_tooltip_text("Ações do histórico")
+
+        popover = Gtk.Popover()
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        box.set_margin_top(6)
+        box.set_margin_bottom(6)
+        box.set_margin_start(6)
+        box.set_margin_end(6)
+
+        clear_item = Gtk.Button()
+        clear_item.add_css_class("flat")
+        clear_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        clear_icon = Gtk.Image.new_from_icon_name("user-trash-symbolic")
+        clear_icon.set_pixel_size(14)
+        clear_box.append(clear_icon)
+        clear_box.append(Gtk.Label(label="Limpar histórico…", xalign=0))
+        clear_item.set_child(clear_box)
+        clear_item.connect("clicked", self._on_clear_all_history)
+        box.append(clear_item)
+
+        popover.set_child(box)
+        self.clear_history_btn.set_popover(popover)
+        return self.clear_history_btn
 
     def _build_new_conversation_button(self) -> Gtk.Button:
         sidebar_new_btn = Gtk.Button()
@@ -129,23 +278,6 @@ class SidebarPanel:
         self.search.connect("search-changed", self._on_search_changed)
         return self.search
 
-    def _build_clear_button(self) -> Gtk.Button:
-        self.clear_history_btn = Gtk.Button()
-        self.clear_history_btn.add_css_class("flat")
-        self.clear_history_btn.add_css_class("destructive-action")
-        self.clear_history_btn.set_tooltip_text("Limpar todas as conversas gravadas")
-        self.clear_history_btn.connect("clicked", self._on_clear_all_history)
-        cl_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        cl_box.set_halign(Gtk.Align.CENTER)
-        cl_icon = Gtk.Image.new_from_icon_name("user-trash-symbolic")
-        cl_icon.set_pixel_size(14)
-        cl_box.append(cl_icon)
-        cl_lbl = Gtk.Label(label="Limpar Histórico")
-        cl_lbl.add_css_class("caption")
-        cl_box.append(cl_lbl)
-        self.clear_history_btn.set_child(cl_box)
-        return self.clear_history_btn
-
     # ------------------------------------------------------------------
     # Estado e listagem
     # ------------------------------------------------------------------
@@ -161,7 +293,7 @@ class SidebarPanel:
         return self.revealer.get_reveal_child()
 
     def populate(self, filter_query: str = "") -> None:
-        """Preenche a lista lateral com os tópicos recuperados do SQLite."""
+        """Preenche a lista lateral com os tópicos recuperados do SQLite, agrupados por data."""
         while row := self.history_listbox.get_first_child():
             self.history_listbox.remove(row)
 
@@ -177,60 +309,80 @@ class SidebarPanel:
             self._render_empty_state(bool(filter_query))
             return
 
-        self.clear_history_btn.set_visible(True)
+        # Ao filtrar, o agrupamento por data perde sentido (o usuário está
+        # procurando algo específico, não navegando por recência).
+        groups = [("Resultados", topics)] if filter_query else group_topics_by_date(topics)
+        for label, items in groups:
+            self.history_listbox.append(self._build_group_header(label))
+            for topic in items:
+                self.history_listbox.append(self._build_topic_row(topic))
 
-        for topic in topics:
-            row = Gtk.ListBoxRow()
-            row.add_css_class("sidebar-chat-row")
-            is_active = self.ctx.session.id == topic["id"]
-            if is_active:
-                row.add_css_class("active")
+    def _build_group_header(self, label: str) -> Gtk.ListBoxRow:
+        """Cabeçalho de seção (Hoje/Ontem/...). Não é alvo de clique."""
+        row = Gtk.ListBoxRow()
+        row.set_selectable(False)
+        row.set_activatable(False)
+        lbl = Gtk.Label(label=label, xalign=0)
+        lbl.add_css_class("sidebar-group-label")
+        row.set_child(lbl)
+        return row
 
-            item_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-            item_box.set_margin_top(4)
-            item_box.set_margin_bottom(4)
-            item_box.set_margin_start(4)
-            item_box.set_margin_end(4)
+    def _build_topic_row(self, topic: dict) -> Gtk.ListBoxRow:
+        """Uma conversa: ícone de tipo, título completo (com tooltip) e horário.
 
-            # Indicador de conversa ativa (usa ícone de destaque, não de presença)
-            chat_icon = Gtk.Image.new_from_icon_name(
-                "starred-symbolic" if is_active else "format-justification-symbolic"
-            )
-            chat_icon.set_pixel_size(14)
-            item_box.append(chat_icon)
+        A lixeira vive num slot de largura fixa à direita: aparece no hover sem
+        empurrar o texto (o slot já reserva o espaço) e fica fora do alcance de
+        cliques acidentais quando o ponteiro não está sobre a linha.
+        """
+        row = Gtk.ListBoxRow()
+        row.add_css_class("sidebar-chat-row")
+        is_active = self.ctx.session.id == topic["id"]
+        if is_active:
+            row.add_css_class("active")
 
-            info_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-            info_box.set_hexpand(True)
+        item_box = build_topic_identity(self.ctx, topic)
+        item_box.set_margin_top(4)
+        item_box.set_margin_bottom(4)
+        item_box.set_margin_start(4)
+        item_box.set_margin_end(4)
 
-            clean_title = topic["title"] or "Conversa Sem Título"
-            title_lbl = Gtk.Label(label=clean_title, xalign=0)
-            title_lbl.set_ellipsize(Pango.EllipsizeMode.END)
-            title_lbl.set_max_width_chars(24)
-            info_box.append(title_lbl)
+        tid = topic["id"]
 
-            time_str = format_relative_timestamp(topic.get("updated_at", ""))
-            turns_num = topic.get("turn_count", 0)
-            sub_str = f"{time_str} • {turns_num} msg{'s' if turns_num != 1 else ''}"
-            sub_lbl = Gtk.Label(label=sub_str, xalign=0)
-            sub_lbl.add_css_class("caption")
-            sub_lbl.add_css_class("dim-label")
-            info_box.append(sub_lbl)
+        del_slot = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        del_slot.set_size_request(30, -1)
+        del_btn = Gtk.Button.new_from_icon_name("user-trash-symbolic")
+        del_btn.add_css_class("flat")
+        del_btn.add_css_class("circular")
+        del_btn.add_css_class("glass-icon-btn")
+        del_btn.set_tooltip_text("Excluir conversa")
+        del_btn.set_valign(Gtk.Align.CENTER)
+        del_btn.set_visible(False)
+        del_btn.connect("clicked", lambda _b, t_id=tid: self.on_delete_topic(t_id))
+        del_slot.append(del_btn)
+        item_box.append(del_slot)
 
-            item_box.append(info_box)
+        # Revela a lixeira no hover da linha. O slot fixo evita o "pulo" do texto.
+        motion = Gtk.EventControllerMotion()
+        motion.connect("enter", lambda *_: del_btn.set_visible(True))
+        motion.connect("leave", lambda *_: del_btn.set_visible(False))
+        row.add_controller(motion)
 
-            del_btn = Gtk.Button.new_from_icon_name("user-trash-symbolic")
-            del_btn.add_css_class("flat")
-            del_btn.add_css_class("circular")
-            del_btn.add_css_class("glass-icon-btn")
-            del_btn.set_tooltip_text("Excluir conversa")
-            del_btn.set_valign(Gtk.Align.CENTER)
-            tid = topic["id"]
-            del_btn.connect("clicked", lambda _b, t_id=tid: self.on_delete_topic(t_id))
-            item_box.append(del_btn)
+        # Teclado: com a linha focada, Delete exclui (a lixeira invisível não é
+        # alcançável por Tab, então o atalho cobre quem não usa ponteiro).
+        row.set_focusable(True)
+        key = Gtk.EventControllerKey()
+        key.connect("key-pressed", self._on_row_key_pressed, tid)
+        row.add_controller(key)
 
-            row.set_child(item_box)
-            row._topic_id = topic["id"]
-            self.history_listbox.append(row)
+        row.set_child(item_box)
+        row._topic_id = topic["id"]
+        return row
+
+    def _on_row_key_pressed(self, _ctrl, keyval: int, _code: int, _state: int, topic_id: str) -> bool:
+        if keyval in (Gdk.KEY_Delete, Gdk.KEY_BackSpace):
+            self.on_delete_topic(topic_id)
+            return True
+        return False
 
     def _render_empty_state(self, has_filter: bool) -> None:
         """Mostra o estado vazio quando não há conversas (ou nenhuma casa com o filtro)."""
@@ -252,7 +404,6 @@ class SidebarPanel:
         )
         empty_box.append(empty_lbl)
         self.history_listbox.append(empty_box)
-        self.clear_history_btn.set_visible(False)
 
     # ------------------------------------------------------------------
     # Callbacks
@@ -288,10 +439,44 @@ class SidebarPanel:
         self.ctx.show_toast("Conversa excluída.")
 
     def _on_clear_all_history(self, _btn: Gtk.Button) -> None:
+        self.clear_history_btn.popdown()
         self.clear_history()
 
     def clear_history(self) -> None:
-        """Limpa todas as conversas do histórico SQLite."""
+        """Limpa todas as conversas do histórico SQLite, após confirmação.
+
+        Ação irreversível sobre dados do usuário: pede confirmação com a
+        contagem real, em vez de apagar no clique (o botão antes ficava no
+        rodapé, no caminho de quem só queria rolar a lista).
+        """
+        # Frente B / Defeito 2: limpar o histórico cancela o agente em execução.
+        self.ctx.abort_active_agent()  # transicao: limpar historico cancela o agente
+        self.ctx._teardown_active_agent_ui()  # transicao: limpar historico libera a UI
+        topics = self.ctx.engine.memory.list_chat_topics(limit=9999)
+        count = len(topics)
+        if count == 0:
+            self.ctx.show_toast("Não há conversas para limpar.")
+            return
+
+        dialog = Adw.MessageDialog(
+            transient_for=self.ctx,
+            heading="Limpar todo o histórico?",
+            body=f"{count} conversa{'s' if count != 1 else ''} será{'ão' if count != 1 else ''} "
+                 "apagada(s) permanentemente. Esta ação não pode ser desfeita.",
+        )
+        dialog.add_response("cancel", "Cancelar")
+        dialog.add_response("clear", "Apagar tudo")
+        dialog.set_response_appearance("clear", Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.set_default_response("cancel")
+        dialog.set_close_response("cancel")
+        dialog.connect("response", self._on_confirm_clear)
+        dialog.present()
+
+    def _on_confirm_clear(self, _dialog, response: str) -> None:
+        if response != "clear":
+            return
+        # O `clear_history` já abortou e liberou a UI ao abrir o diálogo; aqui só
+        # resetamos o estado da conversa (Defeito 2 / Frente B).
         self.ctx.engine.memory.clear_all_chat_topics()
         self.ctx.session.reset_new()
         self.ctx.window_title.set_subtitle("Assistente Inteligente")
