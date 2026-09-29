@@ -19,6 +19,7 @@ class TestNetworkTools(unittest.TestCase):
         self.assertIn("local_services_list", specs)
         self.assertIn("network_wake_on_lan", specs)
         self.assertIn("network_release_port", specs)
+        self.assertIn("network_confirm_port", specs)
         self.assertIn("network_probe_service", specs)
         self.assertIn("network_dns_benchmark", specs)
         self.assertIn("network_reconnect", specs)
@@ -30,6 +31,7 @@ class TestNetworkTools(unittest.TestCase):
             "lan_devices_scan",
             "local_services_list",
             "network_wake_on_lan",
+            "network_confirm_port",
             "network_probe_service",
             "network_dns_benchmark",
         ]

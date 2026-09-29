@@ -10,17 +10,20 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
 import signal
 import socket
+import stat
 import struct
 import subprocess
 import time
+from pathlib import Path
 from typing import Any
 
-from .network_inspector import NetworkInspector
+from .network_inspector import DeviceInventory, NetworkInspector
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +93,47 @@ def wake_on_lan(
         return False, f"Falha ao enviar pacote Wake-on-LAN: {exc}"
 
 
+def _parse_systemd_unit_from_cgroup(cgroup_content: str) -> str | None:
+    """Extrai o nome do unit `.service` de um conteúdo de /proc/<pid>/cgroup.
+
+    Ex.: '0::/user.slice/user-1000.slice/user@1000.service/app.slice/aigis0-ui.service'
+    -> 'aigis0-ui.service'. Retorna None se não houver unit systemd.
+
+    Escolhe o `.service` mais específico (último da hierarquia) e **descarta o
+    gerenciador de sessão** `user@<uid>.service` — pará-lo derrubaria toda a
+    sessão do usuário e nunca é o alvo correto.
+    """
+    units = [
+        part.strip()
+        for part in cgroup_content.replace("\n", "/").split("/")
+        if part.strip().endswith(".service")
+    ]
+    units = [u for u in units if not u.startswith("user@")]
+    return units[-1] if units else None
+
+
+def _is_user_unit_from_cgroup(cgroup_content: str, uid: int) -> bool:
+    """Heurística: unit de usuário se o cgroup contém 'user@<uid>.service'."""
+    return f"user@{uid}.service" in cgroup_content
+
+
+def systemd_unit_for_pid(pid: int) -> tuple[str | None, bool]:
+    """Retorna (unit, is_user_unit) para um PID gerenciado por systemd.
+
+    unit=None quando o processo não é gerenciado por systemd.
+    """
+    try:
+        with open(f"/proc/{pid}/cgroup", "r", encoding="utf-8") as fh:
+            content = fh.read()
+    except OSError:
+        return (None, False)
+    if isinstance(content, (bytes, bytearray)):  # robustez a mocks/leitura binária
+        content = content.decode("utf-8", errors="replace")
+    unit = _parse_systemd_unit_from_cgroup(content)
+    is_user = _is_user_unit_from_cgroup(content, os.getuid())
+    return (unit, is_user)
+
+
 def release_local_port(
     port: int,
     target_pid: int | None = None,
@@ -99,8 +143,12 @@ def release_local_port(
 
     Executa verificações de segurança:
     1. Verifica se o PID não é de sistema ou protegido (PROTECTED_PROCESS_NAMES).
-    2. Confere se o processo pertence ao usuário corrente (os.getuid()).
-    3. Valida identidade do processo via /proc/<pid>/cmdline antes de enviar sinal.
+    2. Detecta se o processo pertence a um serviço systemd: nesse caso matar por
+       PID é ineficaz (o systemd pode reiniciá-lo conforme `Restart=`); o correto
+       é parar o unit via `systemctl`. Units de usuário são parados diretamente;
+       units de sistema exigem privilégio (orienta `sudo systemctl stop`).
+    3. Confere se o processo pertence ao usuário corrente (os.getuid()).
+    4. Valida identidade do processo via /proc/<pid>/cmdline antes de enviar sinal.
     """
     if port < 1 or port > 65535:
         return False, f"Número de porta inválido: {port}.", {}
@@ -145,6 +193,48 @@ def release_local_port(
                 f"Ação bloqueada por segurança: o processo '{effective_name}' (PID {pid}) é vital ao sistema operacional.",
                 {"pid": pid, "process": effective_name, "port": port},
             )
+
+    # 4b. Processo gerenciado por systemd? Matar por PID é ineficaz.
+    unit, is_user_unit = systemd_unit_for_pid(pid)
+    if unit:
+        if not is_user_unit:
+            return (
+                False,
+                f"O processo '{effective_name}' (PID {pid}) pertence ao serviço systemd de sistema '{unit}'. "
+                f"Encerrar por PID é ineficaz (o systemd pode reiniciá-lo). Use: 'sudo systemctl stop {unit}'.",
+                {"pid": pid, "process": effective_name, "port": port,
+                 "systemd_unit": unit, "systemd_scope": "system"},
+            )
+        try:
+            stop_proc = subprocess.run(
+                ["systemctl", "--user", "stop", unit],
+                capture_output=True, text=True, timeout=15.0,
+            )
+        except FileNotFoundError:
+            return (
+                False,
+                f"O processo pertence ao serviço '{unit}', mas 'systemctl' não está disponível. "
+                f"Execute manualmente: 'systemctl --user stop {unit}'.",
+                {"pid": pid, "process": effective_name, "port": port, "systemd_unit": unit},
+            )
+        except Exception as exc:
+            return (
+                False,
+                f"Falha ao parar o serviço systemd '{unit}': {exc}",
+                {"pid": pid, "process": effective_name, "port": port, "systemd_unit": unit},
+            )
+        if stop_proc.returncode != 0:
+            return (
+                False,
+                f"Falha ao parar o serviço '{unit}': {stop_proc.stderr.strip() or 'erro desconhecido'}",
+                {"pid": pid, "process": effective_name, "port": port, "systemd_unit": unit},
+            )
+        return (
+            True,
+            f"Serviço systemd '{unit}' parado; porta {port} liberada.",
+            {"pid": pid, "process": effective_name, "port": port,
+             "systemd_unit": unit, "alive": False},
+        )
 
     # 5. Verificação de Proprietário do Processo (UID)
     try:
@@ -667,7 +757,7 @@ def check_ssl_certificate(host: str, port: int = 443, timeout: float = 2.5) -> d
 
 
 def discover_mdns_services(timeout_sec: float = 2.0) -> list[dict[str, Any]]:
-    """Descobre passivamente serviços locais via mDNS / Avahi sem travamento de daemon."""
+    """Descubre passivamente serviços locais via mDNS / Avahi sem travamento de daemon."""
     # Salvaguarda: checagem do socket do avahi-daemon
     avahi_sockets = ("/run/avahi-daemon/socket", "/var/run/avahi-daemon/socket")
     if not any(os.path.exists(s) for s in avahi_sockets):
@@ -707,4 +797,234 @@ def discover_mdns_services(timeout_sec: float = 2.0) -> list[dict[str, Any]]:
         logger.debug("Falha na descoberta mDNS: %s", exc)
 
     return services
+
+
+class NetworkBlocker:
+    """Contenção defensiva de um dispositivo na LAN — **delegada** ao roteador/HA.
+
+    Honestidade de arquitetura (PROPOSTA_DEFESA_REDE.md, item 4): o host NÃO derruba o
+    tráfego de um terceiro localmente — isso exigiria ser o gateway/switch e seria
+    ofensivo (equivale ao "ataque" que o usuário perguntou e que recusamos). O bloqueio
+    real acontece no roteador (ACL / MAC filter / DHCP deny) ou via Home Assistant. Esta
+    classe apenas *solicita* o bloqueio através de um backend configurado pelo usuário.
+
+    Sem backend configurado **não executa nada** e devolve orientação explícita — nunca
+    finge sucesso (fail-closed). Backends:
+
+      - ``none`` (padrão): não configurado ⇒ ``ok=False`` + ``guidance``.
+      - ``script``: shell-out para um script próprio do usuário
+        ``<script> <acao> <identificador>`` (args como lista, sem shell ⇒ sem injeção).
+        O usuário faz a ponte com seu roteador/HA nesse script — é o adaptador universal;
+        roteador-API e HA são realizados por ele.
+
+    Reversível: ``action="allow"`` desbloqueia (comando de desbloqueio explícito no
+    roteador). O MAC é mascarado na resposta ao modelo; o MAC **real** (privado, local)
+    é usado apenas no comando ao roteador.
+    """
+
+    DEFAULT_CONFIG_REL = "zorin-copilot/network_block.json"
+    VALID_ACTIONS = {"block", "allow"}
+
+    def __init__(self, config_path: str | Path | None = None):
+        if config_path is None:
+            base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+            self.config_path = Path(base) / self.DEFAULT_CONFIG_REL
+        else:
+            self.config_path = Path(config_path)
+
+    def load_config(self) -> dict[str, Any]:
+        if not self.config_path or not self.config_path.exists():
+            return {}
+        try:
+            with open(self.config_path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def is_configured(self, config: dict[str, Any] | None = None) -> bool:
+        config = config if config is not None else self.load_config()
+        if not isinstance(config, dict):
+            return False
+        if config.get("backend") != "script":
+            return False
+        script = config.get("script")
+        if not script:
+            return False
+        script_path = Path(script)
+        if not script_path.exists():
+            return False
+        try:
+            mode = script_path.stat().st_mode
+            return bool(mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
+        except OSError:
+            return False
+
+    @staticmethod
+    def _normalize_action(action: str) -> str | None:
+        a = (action or "").strip().lower()
+        if a in ("block", "deny", "ban"):
+            return "block"
+        if a in ("allow", "unblock", "unban", "permit"):
+            return "allow"
+        return None
+
+    def _resolve_identifier(self, mac, ip, inventory) -> tuple[str | None, str | None, str, str]:
+        """Devolve (identificador_para_comando, mac_cru_para_log, tipo, tipo_entrada).
+
+        ``tipo`` ∈ {"mac", "ip", "invalid_mac", "missing"}; ``tipo_entrada`` ∈ {"mac", "ip"}.
+        O MAC cru só é usado localmente (comando ao roteador); nunca sai na resposta.
+        """
+        if mac:
+            try:
+                raw = _normalize_mac(mac)
+            except ValueError:
+                return None, None, "invalid_mac", "mac"
+            return raw.hex(":"), raw.hex(":"), "mac", "mac"
+        if ip:
+            # Resolve o MAC real no inventário local (privado) quando possível — o
+            # roteador precisa do MAC; o modelo só enxerga o IP.
+            if inventory is not None:
+                found = inventory.find_by_ip(ip)
+                if found and found.get("mac"):
+                    return found["mac"], found["mac"], "mac", "ip"
+            return ip.strip(), None, "ip", "ip"
+        return None, None, "missing", "missing"
+
+    def _guidance(self) -> list[str]:
+        return [
+            "Bloqueio de dispositivo exige um backend de roteador/HA configurado.",
+            "Crie ~/.config/zorin-copilot/network_block.json com:",
+            '  {"backend": "script", "script": "/caminho/para/block_device.sh"}',
+            "O script recebe: <acao> <identificador>  (acao = block | allow; "
+            "identificador = MAC ou IP).",
+            "Nele você faz a ponte com seu roteador (API MikroTik/OpenWrt/ASUS/UniFi, "
+            "shell_command no Home Assistant, ou reserva DHCP + deny no servidor DHCP).",
+            "Nunca implementamos drop local de pacote de terceiro — isso seria ofensivo.",
+        ]
+
+    def _masked_target(self, identifier: str, kind: str) -> str:
+        if kind == "mac" and identifier:
+            return NetworkInspector.mask_mac(identifier)
+        return identifier or ""
+
+    def request_block(
+        self,
+        mac: str | None = None,
+        ip: str | None = None,
+        action: str = "block",
+        dry_run: bool = False,
+        inventory: "DeviceInventory | None" = None,
+        config: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized_action = self._normalize_action(action)
+        if normalized_action is None:
+            return {
+                "ok": False,
+                "executed": False,
+                "action": action,
+                "target": "",
+                "error": f"Ação inválida: '{action}'. Use 'block' ou 'allow'.",
+                "guidance": [],
+            }
+
+        identifier, _raw_mac, kind, input_kind = self._resolve_identifier(mac, ip, inventory)
+        if kind == "invalid_mac":
+            return {
+                "ok": False,
+                "executed": False,
+                "action": normalized_action,
+                "target": "",
+                "error": f"MAC inválido: '{mac}'.",
+                "guidance": [],
+            }
+        if kind == "missing":
+            return {
+                "ok": False,
+                "executed": False,
+                "action": normalized_action,
+                "target": "",
+                "error": "Informe 'mac' (completo) ou 'ip' do dispositivo a conter.",
+                "guidance": [],
+            }
+
+        # A resposta ao modelo mostra o que o agente referenciou (IP), ou o MAC
+        # mascarado (quando o agente informou o MAC cru). O MAC cru só vai ao roteador.
+        if input_kind == "ip":
+            masked_target = (ip or "").strip()
+        else:
+            masked_target = self._masked_target(identifier, kind)
+        cfg = config if config is not None else self.load_config()
+
+        # Fail-closed: sem backend configurado, não executa e orienta.
+        if not self.is_configured(cfg):
+            return {
+                "ok": False,
+                "executed": False,
+                "action": normalized_action,
+                "target": masked_target,
+                "error": "Backend de contenção não configurado.",
+                "guidance": self._guidance(),
+            }
+
+        if dry_run:
+            return {
+                "ok": True,
+                "dry_run": True,
+                "executed": False,
+                "action": normalized_action,
+                "target": masked_target,
+                "backend": "script",
+                "error": "",
+                "guidance": [],
+            }
+
+        script = cfg.get("script")
+        try:
+            # Sem shell: args como lista ⇒ sem injeção de comando.
+            proc = subprocess.run(
+                [str(script), normalized_action, identifier],
+                capture_output=True,
+                text=True,
+                timeout=30.0,
+            )
+        except FileNotFoundError:
+            return {
+                "ok": False,
+                "executed": False,
+                "action": normalized_action,
+                "target": masked_target,
+                "error": f"Script de backend não encontrado: {script}",
+                "guidance": self._guidance(),
+            }
+        except Exception as exc:
+            logger.warning("Falha ao executar backend de contenção: %s", exc)
+            return {
+                "ok": False,
+                "executed": False,
+                "action": normalized_action,
+                "target": masked_target,
+                "error": f"Falha ao executar backend de contenção: {exc}",
+                "guidance": [],
+            }
+
+        if proc.returncode != 0:
+            return {
+                "ok": False,
+                "executed": True,
+                "action": normalized_action,
+                "target": masked_target,
+                "error": proc.stderr.strip() or "Backend de contenção retornou erro.",
+                "guidance": [],
+            }
+
+        return {
+            "ok": True,
+            "executed": True,
+            "action": normalized_action,
+            "target": masked_target,
+            "backend": "script",
+            "error": "",
+            "guidance": [],
+        }
 

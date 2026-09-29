@@ -189,7 +189,43 @@ class TestNetworkView(unittest.TestCase):
         with patch("zorin_copilot.ui.widgets.network_view.release_local_port", return_value=(True, "Porta liberada", {})) as mock_rel:
             view._do_release_port(8080, 1234)
             time.sleep(0.05)
-            mock_rel.assert_called_once_with(8080, target_pid=1234)
+            mock_rel.assert_called_once_with(8080, target_pid=1234, force=False)
+
+    def test_release_port_force_action_invoked(self):
+        """A opção 'Forçar' passa force=True (SIGKILL) ao motor do core."""
+        view = NetworkInspectorView(ctx=None)
+        with patch("zorin_copilot.ui.widgets.network_view.release_local_port", return_value=(True, "Porta liberada", {})) as mock_rel:
+            view._do_release_port(8080, 1234, "tcp", "caddy", "0.0.0.0", force=True)
+            time.sleep(0.05)
+            mock_rel.assert_called_once_with(8080, target_pid=1234, force=True)
+
+    def test_release_confirms_port_freed(self):
+        """S5: após liberar, a UI confirma a liberação via confirm_port_freed."""
+        view = NetworkInspectorView(ctx=None)
+        fake = MagicMock()
+        fake.freed = True
+        fake.summary = "Porta 8080/tcp confirmada livre."
+        with patch("zorin_copilot.ui.widgets.network_view.release_local_port", return_value=(True, "Porta liberada", {})) as mock_rel, \
+             patch("zorin_copilot.ui.widgets.network_view.confirm_port_freed", return_value=fake) as mock_conf:
+            view._do_release_port(8080, 1234, "tcp", "caddy", "0.0.0.0")
+            time.sleep(0.05)
+            mock_rel.assert_called_once_with(8080, target_pid=1234, force=False)
+            mock_conf.assert_called_once_with(
+                8080, "tcp", expected_pid=1234, expected_process="caddy", ip_binding="0.0.0.0",
+            )
+
+    def test_verify_port_action_invoked(self):
+        """S5: o botão Verificar consulta confirm_port_freed (somente leitura)."""
+        view = NetworkInspectorView(ctx=None)
+        fake = MagicMock()
+        fake.freed = False
+        fake.summary = "Porta 8080/tcp ainda ocupada (PID 4321)."
+        with patch("zorin_copilot.ui.widgets.network_view.confirm_port_freed", return_value=fake) as mock_conf:
+            view._do_verify_port(8080, "tcp", "caddy", "0.0.0.0")
+            time.sleep(0.05)
+            mock_conf.assert_called_once_with(
+                8080, "tcp", expected_process="caddy", ip_binding="0.0.0.0",
+            )
 
     def test_dns_bench_clicked_triggers_worker(self):
         """Verifica se o clique no botão de benchmark DNS dispara a medição."""

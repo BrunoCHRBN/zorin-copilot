@@ -35,6 +35,7 @@ from ...core.network_inspector import (
     NetworkHealthReport,
     NetworkInspector,
 )
+from ...core.port_termination import confirm_port_freed
 
 if TYPE_CHECKING:
     from ..app import CopilotWindow
@@ -472,7 +473,7 @@ class NetworkInspectorView(Gtk.Box):
         header.append(h_pid)
 
         h_action = Gtk.Label(label="AÇÕES")
-        h_action.set_size_request(90, -1)
+        h_action.set_size_request(150, -1)
         h_action.set_halign(Gtk.Align.END)
         header.append(h_action)
 
@@ -509,10 +510,24 @@ class NetworkInspectorView(Gtk.Box):
             pid_lbl.set_halign(Gtk.Align.START)
             row.append(pid_lbl)
 
-            # Ações: Abrir (web) e/ou Liberar (kill)
+            # Ações: Verificar (leitura), Abrir (web) e/ou Liberar (kill)
             action_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-            action_box.set_size_request(90, -1)
+            action_box.set_size_request(150, -1)
             action_box.set_halign(Gtk.Align.END)
+
+            # Verificar liberação — somente leitura, não encerra nada.
+            verify_btn = Gtk.Button()
+            verify_btn.set_icon_name("system-search-symbolic")
+            verify_btn.set_tooltip_text(f"Verificar se a porta {p.port} está livre")
+            verify_btn.add_css_class("flat")
+            verify_btn.add_css_class("network-btn-compact")
+            verify_btn.connect(
+                "clicked",
+                lambda _, po=p: self._on_verify_port_clicked(
+                    po.port, po.protocol, po.process_name, po.ip_binding,
+                ),
+            )
+            action_box.append(verify_btn)
 
             if p.port in (80, 443, 3000, 5000, 5173, 8000, 8080, 8888, 9090):
                 open_btn = Gtk.Button(label="Abrir")
@@ -531,9 +546,15 @@ class NetworkInspectorView(Gtk.Box):
                 kill_btn.add_css_class("network-btn-compact")
                 pnum = p.port
                 pid_num = p.pid
+                p_proto = p.protocol
+                p_name = p.process_name
+                p_bind = p.ip_binding
                 kill_btn.connect(
                     "clicked",
-                    lambda _, port_val=pnum, pid_val=pid_num: self._on_release_port_clicked(port_val, pid_val),
+                    lambda _, port_val=pnum, pid_val=pid_num, proto_val=p_proto,
+                    name_val=p_name, bind_val=p_bind: self._on_release_port_clicked(
+                        port_val, pid_val, proto_val, name_val, bind_val,
+                    ),
                 )
                 action_box.append(kill_btn)
 
@@ -727,35 +748,75 @@ class NetworkInspectorView(Gtk.Box):
 
         threading.Thread(target=wol_worker, daemon=True).start()
 
-    def _on_release_port_clicked(self, port: int, pid: int | None) -> None:
+    def _on_release_port_clicked(
+        self,
+        port: int,
+        pid: int | None,
+        protocol: str = "tcp",
+        process_name: str | None = None,
+        ip_binding: str | None = None,
+    ) -> None:
         parent = self.get_root()
         if isinstance(parent, Gtk.Window) and hasattr(Adw, "AlertDialog"):
             dialog = Adw.AlertDialog(
                 heading=f"Liberar Porta {port}?",
-                body=f"Deseja encerrar o processo (PID {pid or 'desconhecido'}) escutando nesta porta?",
+                body=(
+                    f"Deseja encerrar o processo (PID {pid or 'desconhecido'}) escutando nesta porta? "
+                    "Use 'Forçar' se ele ignorar o encerramento normal."
+                ),
             )
             dialog.add_response("cancel", "Cancelar")
             dialog.add_response("kill", "Encerrar")
+            dialog.add_response("force", "Forçar")
             dialog.set_response_appearance("kill", Adw.ResponseAppearance.DESTRUCTIVE)
+            dialog.set_response_appearance("force", Adw.ResponseAppearance.DESTRUCTIVE)
             dialog.set_default_response("cancel")
             dialog.set_close_response("cancel")
 
             def on_response(dlg: Adw.AlertDialog, response: str) -> None:
                 if response == "kill":
-                    self._do_release_port(port, pid)
+                    self._do_release_port(
+                        port, pid, protocol, process_name, ip_binding, force=False,
+                    )
+                elif response == "force":
+                    self._do_release_port(
+                        port, pid, protocol, process_name, ip_binding, force=True,
+                    )
 
             dialog.choose(parent, None, on_response)
         else:
-            self._do_release_port(port, pid)
+            self._do_release_port(port, pid, protocol, process_name, ip_binding)
 
-    def _do_release_port(self, port: int, pid: int | None) -> None:
+    def _do_release_port(
+        self,
+        port: int,
+        pid: int | None,
+        protocol: str = "tcp",
+        process_name: str | None = None,
+        ip_binding: str | None = None,
+        force: bool = False,
+    ) -> None:
         def release_worker() -> None:
             try:
-                ok, msg, _ = release_local_port(port, target_pid=pid)
+                ok, msg, _ = release_local_port(port, target_pid=pid, force=force)
+                # S5: confirma se a porta foi de fato liberada (somente leitura).
+                report = confirm_port_freed(
+                    port,
+                    protocol,
+                    expected_pid=pid,
+                    expected_process=process_name,
+                    ip_binding=ip_binding,
+                )
+                if ok and report.freed:
+                    toast = f"Porta {port} confirmada livre."
+                elif ok:
+                    toast = f"{msg} Atenção: {report.summary}"
+                else:
+                    toast = msg
 
                 def finish() -> bool:
                     if self.ctx and hasattr(self.ctx, "show_toast"):
-                        self.ctx.show_toast(msg)
+                        self.ctx.show_toast(toast)
                     self.refresh()
                     return GLib.SOURCE_REMOVE
 
@@ -771,6 +832,51 @@ class NetworkInspectorView(Gtk.Box):
                 GLib.idle_add(fail)
 
         threading.Thread(target=release_worker, daemon=True).start()
+
+    def _on_verify_port_clicked(
+        self,
+        port: int,
+        protocol: str = "tcp",
+        process_name: str | None = None,
+        ip_binding: str | None = None,
+    ) -> None:
+        self._do_verify_port(port, protocol, process_name, ip_binding)
+
+    def _do_verify_port(
+        self,
+        port: int,
+        protocol: str = "tcp",
+        process_name: str | None = None,
+        ip_binding: str | None = None,
+    ) -> None:
+        """Verifica (somente leitura) se a porta está livre e reporta via toast."""
+        def verify_worker() -> None:
+            try:
+                report = confirm_port_freed(
+                    port,
+                    protocol,
+                    expected_process=process_name,
+                    ip_binding=ip_binding,
+                )
+                message = report.summary
+
+                def finish() -> bool:
+                    if self.ctx and hasattr(self.ctx, "show_toast"):
+                        self.ctx.show_toast(message)
+                    return GLib.SOURCE_REMOVE
+
+                GLib.idle_add(finish)
+            except Exception as exc:
+                logger.error("Falha ao verificar porta %d: %s", port, exc)
+
+                def fail() -> bool:
+                    if self.ctx and hasattr(self.ctx, "show_toast"):
+                        self.ctx.show_toast(f"Erro ao verificar porta: {exc}")
+                    return GLib.SOURCE_REMOVE
+
+                GLib.idle_add(fail)
+
+        threading.Thread(target=verify_worker, daemon=True).start()
 
 
 class NetworkInspectorDialog(Adw.Dialog):
