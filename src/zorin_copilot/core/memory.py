@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import platform
@@ -206,7 +207,12 @@ class MemoryManager:
         category: str = "preferencia",
         source: str = "usuario",
     ) -> None:
-        """Salva ou atualiza um fato aprendido ou preferência na base."""
+        """Salva ou atualiza um fato aprendido ou preferência na base.
+
+        A unicidade é por ``key``: quem grava deve passar uma chave estável
+        derivada do conteúdo (ver :meth:`fact_key`), nunca algo que varie a cada
+        chamada. Caso contrário a mesma frase vira N linhas.
+        """
         now = datetime.now().isoformat()
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -222,6 +228,66 @@ class MemoryManager:
                 (category, key.strip().lower(), content.strip(), source, now, now),
             )
             conn.commit()
+
+    @staticmethod
+    def fact_key(content: str) -> str:
+        """Chave estável derivada do conteúdo normalizado de um fato.
+
+        Fonte única da verdade para todos os caminhos que gravam fatos (chat,
+        voz ao vivo, ferramentas do agente). Regressão que isto conserta: o
+        caminho de chat montava a chave como ``fato_<epoch>`` — a mesma frase
+        salva duas vezes gerava duas chaves diferentes, o ``ON CONFLICT`` nunca
+        disparava, e a tela de memória exibia o mesmo fato repetido N vezes.
+
+        Usa hash em vez de fatiar o texto porque fatos longos com o mesmo
+        prefixo colidiriam no truncamento — e uma colisão silenciosamente
+        sobrescreveria um fato por outro.
+        """
+        normalized = " ".join(content.strip().lower().split())
+        digest = hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:16]
+        return f"fato_{digest}"
+
+    def dedupe_facts(self) -> int:
+        """Consolida fatos com o mesmo conteúdo normalizado, mantendo o mais recente.
+
+        Conserta bases que já acumularam duplicatas antes de :meth:`fact_key`
+        existir. Devolve quantas linhas foram removidas.
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, content FROM knowledge_facts ORDER BY updated_at DESC")
+            rows = cursor.fetchall()
+
+            seen: dict[str, int] = {}
+            to_delete: list[int] = []
+            for row in rows:
+                normalized = " ".join((row["content"] or "").strip().lower().split())
+                if normalized in seen:
+                    to_delete.append(row["id"])
+                else:
+                    seen[normalized] = row["id"]
+
+            if to_delete:
+                cursor.executemany(
+                    "DELETE FROM knowledge_facts WHERE id = ?", [(i,) for i in to_delete]
+                )
+                conn.commit()
+            return len(to_delete)
+
+    def count_duplicate_facts(self) -> int:
+        """Quantos fatos seriam removidos por :meth:`dedupe_facts`."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT content FROM knowledge_facts")
+            seen: set[str] = set()
+            dupes = 0
+            for row in cursor.fetchall():
+                normalized = " ".join((row["content"] or "").strip().lower().split())
+                if normalized in seen:
+                    dupes += 1
+                else:
+                    seen.add(normalized)
+            return dupes
 
     def get_all_facts(self, category: str | None = None) -> list[dict[str, Any]]:
         """Recupera todos os fatos da base de conhecimento."""
@@ -252,6 +318,29 @@ class MemoryManager:
             cursor.execute("DELETE FROM knowledge_facts WHERE key = ?", (key.strip().lower(),))
             conn.commit()
             return cursor.rowcount > 0
+
+    def delete_facts_by_content(self, content: str) -> int:
+        """Remove todas as linhas cujo conteúdo normalizado coincide.
+
+        Necessário porque duplicatas legadas têm chaves distintas mas o mesmo
+        texto: apagar "uma" linha deixaria as outras na tela. Devolve quantas
+        foram removidas.
+        """
+        target = " ".join(content.strip().lower().split())
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, content FROM knowledge_facts")
+            ids = [
+                row["id"]
+                for row in cursor.fetchall()
+                if " ".join((row["content"] or "").strip().lower().split()) == target
+            ]
+            if ids:
+                cursor.executemany(
+                    "DELETE FROM knowledge_facts WHERE id = ?", [(i,) for i in ids]
+                )
+                conn.commit()
+            return len(ids)
 
     # =========================================================================
     # Gestão de Contatos do Usuário (Memória Semântica & Anti-Alucinação)

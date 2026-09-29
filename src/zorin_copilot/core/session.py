@@ -10,8 +10,12 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from ..ai.actions import ActionPlan
+
+if TYPE_CHECKING:  # pragma: no cover - apenas para type checking
+    from ..ai.math_solver import SolutionGraph
 
 
 @dataclass
@@ -29,6 +33,15 @@ class ChatTurn:
     plan: ActionPlan | None = field(default=None, compare=False)
     # Resultado da execução do modo agente quando aplicável.
     agent_result: dict | None = field(default=None, compare=False)
+    # Grafo de solução do modo de estudos (resposta de matemática). Vive no
+    # turno — e não no estado da janela — para o botão "Ver no Quadro Negro"
+    # sobreviver a um `rebuild()` e a reabrir o app. `compare=False` mantém a
+    # igualdade por texto usada nos testes.
+    solution: "SolutionGraph | None" = field(default=None, compare=False)
+    # Problema de matemática ainda SEM grafo: a álgebra pura não casou, mas o
+    # texto parece matemática. Guarda o enunciado para resolver sob demanda
+    # (model-backed) quando o usuário clicar em "Ver no Quadro Negro".
+    solution_problem: str = field(default="", compare=False)
 
     def to_dict(self) -> dict:
         data = {
@@ -40,6 +53,10 @@ class ChatTurn:
         }
         if self.agent_result:
             data["agent_result"] = self.agent_result
+        if self.solution is not None:
+            data["solution"] = self.solution.to_dict()
+        if self.solution_problem:
+            data["solution_problem"] = self.solution_problem
         return data
 
     @classmethod
@@ -52,6 +69,16 @@ class ChatTurn:
             except (TypeError, AttributeError, ValueError):
                 # Plano gravado por uma versão incompatível: seguir sem ele.
                 plan = None
+        solution = None
+        raw_solution = data.get("solution")
+        if isinstance(raw_solution, dict):
+            try:
+                from ..ai.math_solver import solution_graph_from_dict
+
+                solution = solution_graph_from_dict(raw_solution)
+            except (TypeError, AttributeError, ValueError, KeyError):
+                # Grafo gravado por uma versão incompatível: seguir sem ele.
+                solution = None
         return cls(
             prompt=data.get("prompt", ""),
             answer=data.get("answer", ""),
@@ -61,6 +88,8 @@ class ChatTurn:
             id=data.get("id") or uuid.uuid4().hex,
             plan=plan,
             agent_result=data.get("agent_result"),
+            solution=solution,
+            solution_problem=str(data.get("solution_problem") or ""),
         )
 
 
@@ -161,6 +190,7 @@ class TopicSession:
         answer: str,
         plan: ActionPlan | None = None,
         agent_result: dict | None = None,
+        solution: "SolutionGraph | None" = None,
     ) -> ChatTurn:
         """Registra uma interação usuário/assistente na demanda ativa.
 
@@ -168,7 +198,10 @@ class TopicSession:
         """
         clean_p = prompt.strip()
         clean_a = answer.strip()
-        turn = ChatTurn(prompt=clean_p, answer=clean_a, plan=plan, agent_result=agent_result)
+        turn = ChatTurn(
+            prompt=clean_p, answer=clean_a, plan=plan,
+            agent_result=agent_result, solution=solution,
+        )
 
         if not self.title and clean_p:
             self.title = self._derive_title(clean_p)
@@ -183,8 +216,6 @@ class TopicSession:
         else:
             # Guarda em memória temporária caso o usuário decida fixar logo em seguida
             self._last_unpinned_turn = turn
-        return turn
-
         return turn
 
     def get_history_for_llm(self) -> list[dict[str, str]]:

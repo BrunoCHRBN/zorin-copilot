@@ -28,7 +28,6 @@ def _client(config=None):
     c = GeminiLiveClient.__new__(GeminiLiveClient)
     c.risk_policy = RiskPolicy()
     c._pending_actions = {}
-    c._bypass_risk_gate = False
     c.on_end_session = None
     if config is not None:
         c.config = config
@@ -195,6 +194,11 @@ class AppEndSessionSchedulingTest(unittest.TestCase):
         self.win.wake_word_engine = None
         self.win._quit_application = mock.MagicMock()
         self.win._resume_wake_word_after_speech = mock.MagicMock()
+        # A chamada de voz recolhe a barra lateral; `_perform_end_session` a
+        # devolve. Sem a chamada, encerrar por conta própria deixaria a barra
+        # recolhida para sempre (este caminho não passa por `stop_live_voice`).
+        self.win._sidebar_revealed_before_live = None
+        self.win.sidebar = mock.MagicMock()
 
     def tearDown(self):
         self.win._cancel_pending_end_session()
@@ -255,6 +259,30 @@ class AppEndSessionSchedulingTest(unittest.TestCase):
         self.win._perform_end_session("standby")
         self.assertEqual(self.win._end_session_source_id, 0)
         self.assertIsNone(self.win._pending_end_mode)
+
+    def test_perform_devolve_a_barra_lateral(self):
+        """O encerramento autônomo também devolve a barra lateral.
+
+        Regressão: este caminho **não** passa por `stop_live_voice()` (ela termina
+        em `summon_hud()` e reabriria a janela justamente ao encerrar), então
+        restaurar a barra só lá deixaria a barra recolhida **para sempre** depois
+        de o agente encerrar a chamada por conta própria.
+        """
+        self.win._sidebar_revealed_before_live = True
+        self.win._perform_end_session("standby")
+        self.win.sidebar.revealer.set_reveal_child.assert_called_once_with(True)
+
+    def test_perform_nao_abre_a_barra_que_estava_fechada(self):
+        """Encerrar não pode abrir uma barra que o usuário tinha recolhido."""
+        self.win._sidebar_revealed_before_live = False
+        self.win._perform_end_session("standby")
+        self.win.sidebar.revealer.set_reveal_child.assert_not_called()
+
+    def test_perform_sem_chamada_nao_toca_na_barra(self):
+        """Sem chamada de voz não há estado a devolver — a barra fica como está."""
+        self.win._sidebar_revealed_before_live = None
+        self.win._perform_end_session("standby")
+        self.win.sidebar.revealer.set_reveal_child.assert_not_called()
 
 
 if __name__ == "__main__":

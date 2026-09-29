@@ -2,7 +2,21 @@
 # Detecta criação, edição e exclusão de arquivos nas pastas monitoradas (~/Documentos, ~/Downloads)
 # com debounce inteligente para esperar o fim de downloads ou salvamentos antes de indexar.
 
-"""Monitor contínuo de arquivos locais para o Zorin Copilot."""
+"""Monitor contínuo de arquivos locais para o Zorin Copilot.
+
+**Duas threads, e é preciso saber qual é qual** — o callback do consumidor roda em
+threads diferentes conforme o tipo de evento:
+
+| Evento | Thread do `on_event_callback` |
+|---|---|
+| `"delete"` | a do **laço principal** (`GMainContext`), porque `_on_file_changed` é o sinal `changed` do `Gio.FileMonitor` |
+| `"index"` | a da **thread de debounce** (`_debounce_worker`) |
+
+Consequência prática: um consumidor que mexa em GTK não pode confiar em "estou fora
+da thread da UI" — para `"delete"` ele **está** nela, e para `"index"` não. Quem
+precisa de GTK use `GLib.idle_add`, que é seguro nos dois casos. Este contrato está
+travado em `tests/test_file_watcher.py`.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +24,7 @@ import logging
 import threading
 import time
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Any, Callable, Sequence
 
 from .rag import SUPPORTED_EXTENSIONS, LocalDocumentRAG
 
@@ -78,7 +92,13 @@ class DocumentFileWatcher:
         return True
 
     def stop(self) -> None:
-        """Encerra todos os monitores e a thread de sincronização."""
+        """Encerra todos os monitores e a thread de sincronização. Idempotente.
+
+        O `join` com teto é o que faz "parou" querer dizer parou: a thread dorme
+        até 0,5 s entre ciclos, então sem esperar ela seguiria viva e poderia
+        indexar mais um arquivo **depois** do teardown. O teto evita o oposto —
+        travar o encerramento por causa de um `index_file` lento.
+        """
         self._is_running = False
         for mon in self._monitors:
             try:
@@ -86,6 +106,15 @@ class DocumentFileWatcher:
             except Exception:
                 pass
         self._monitors.clear()
+
+        thread = self._worker_thread
+        self._worker_thread = None
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
+            if thread.is_alive():
+                logger.debug("Thread de debounce não encerrou em 2s; seguirá como daemon.")
+        with self._lock:
+            self._pending_updates.clear()
 
     def _on_file_changed(self, monitor: Any, file: Any, other_file: Any, event_type: Any) -> None:
         """Callback acionado pelo barramento Gio quando um arquivo sofre mutação."""

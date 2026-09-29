@@ -1,11 +1,55 @@
 """Testes unitários para o motor de RAG Local (LocalDocumentRAG) e FTS5."""
 
+import contextlib
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from zorin_copilot.core.rag import LocalDocumentRAG
+
+# ---------------------------------------------------------------------------
+# O `conftest.py` do pytest substitui `start_background_indexing` por um no-op
+# (fixture de sessão, para a suíte não varrer o disco do usuário). Dois testes de
+# cancelamento precisam exercitar a implementação **real** — é exatamente o
+# contrato de "limpar o cancelamento antes de subir a thread" que está sob teste,
+# e um no-op não tem thread para juntar.
+#
+# A referência é capturada no import do módulo, que acontece na coleta — antes de
+# o pytest montar as fixtures de sessão. Assim os testes valem nos dois runners.
+# ---------------------------------------------------------------------------
+_REAL_START_BACKGROUND_INDEXING = LocalDocumentRAG.start_background_indexing
+
+
+@contextlib.contextmanager
+def _real_background_indexing():
+    """Devolve a `start_background_indexing` real durante o bloco."""
+    with patch.object(
+        LocalDocumentRAG, "start_background_indexing", _REAL_START_BACKGROUND_INDEXING
+    ):
+        yield
+
+
+class _FakeProvider:
+    """Provedor mínimo: devolve `reply` como resposta, sem levantar exceção.
+
+    É deliberado que ele NÃO levante: o comportamento real dos provedores deste
+    projeto é devolver a frase de erro no canal de texto, e é exatamente isso que
+    passa por fora de um `except Exception`.
+    """
+
+    def __init__(self, reply: str = ""):
+        self.reply = reply
+        self.prompts: list[str] = []
+
+    def is_configured(self) -> bool:
+        return True
+
+    def chat(self, prompt, *args, **kwargs):
+        self.prompts.append(prompt)
+        return self.reply, []
 
 
 class LocalDocumentRAGTest(unittest.TestCase):
@@ -247,6 +291,50 @@ class LocalDocumentRAGTest(unittest.TestCase):
         self.assertFalse(ans_miss["found"])
         self.assertIn("Não encontrei", ans_miss["answer"])
 
+    def test_erro_do_provedor_nao_vira_resposta_do_rag(self):
+        """A frase de erro do provedor não pode ser a resposta sobre os documentos.
+
+        Os provedores devolvem a mensagem de erro NO LUGAR da resposta em vez de
+        levantar (`ai/provider_failure.py`), então o `except` de `ask()` nunca dispara
+        neste caso. Sem a checagem, a consulta aos documentos era respondida com
+        "o Gemini está indisponível/sem cota…", com `found: True`, e o fallback
+        determinístico logo abaixo nunca rodava.
+        """
+        manual = self.docs_dir / "manual_equipamento.txt"
+        manual.write_text(
+            "Manual do equipamento.\n"
+            "A garantia cobre 24 meses a partir da data de compra.\n",
+            encoding="utf-8",
+        )
+        self.rag.index_file(manual)
+
+        prov = _FakeProvider(
+            reply=(
+                "Não foi possível processar sua solicitação: o Gemini está indisponível/sem cota "
+                "e o modelo local Ollama não pôde ser alcançado em http://localhost:11434."
+            )
+        )
+        ans = self.rag.ask("qual o prazo de garantia do equipamento?", llm_provider=prov)
+
+        self.assertNotIn("Não foi possível processar", ans["answer"])
+        self.assertNotIn("sem cota", ans["answer"])
+        # O fallback determinístico tem de ter rodado.
+        self.assertIn("Encontrei os seguintes trechos relevantes", ans["answer"])
+        self.assertIn("manual_equipamento.txt", ans["answer"])
+        self.assertTrue(ans["found"])
+
+    def test_sintese_real_do_provedor_e_usada(self):
+        """Contraprova: com resposta legítima, o RAG usa a síntese do modelo."""
+        manual = self.docs_dir / "manual_garantia.txt"
+        manual.write_text("Manual.\nA garantia cobre 24 meses.\n", encoding="utf-8")
+        self.rag.index_file(manual)
+
+        prov = _FakeProvider(reply="A garantia cobre 24 meses a partir da compra.")
+        ans = self.rag.ask("qual o prazo de garantia?", llm_provider=prov)
+
+        self.assertEqual(ans["answer"], "A garantia cobre 24 meses a partir da compra.")
+        self.assertEqual(len(prov.prompts), 1)
+
     def test_get_stats_by_type(self):
         """Testa se get_stats inclui contagem detalhada por tipo de arquivo."""
         (self.docs_dir / "d1.txt").write_text("doc 1", encoding="utf-8")
@@ -258,6 +346,97 @@ class LocalDocumentRAGTest(unittest.TestCase):
         self.assertIn("by_type", stats)
         self.assertIn(".txt", stats["by_type"])
         self.assertIn(".csv", stats["by_type"])
+
+
+class IndexingCancellationTest(unittest.TestCase):
+    """A varredura de disco precisa ser interrompível.
+
+    Regressão que isto cobre: cada `CopilotWindow` dispara
+    `start_background_indexing()`, que percorre ~/Documentos e ~/Downloads. A
+    thread `RAGIndexer` não tinha freio — sobrevivia à janela que a criou e
+    continuava batendo no disco. Numa suíte que cria dezenas de janelas, isso
+    mantinha dezenas de varreduras simultâneas até o OOM killer agir.
+    """
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.docs_dir = Path(self.temp_dir.name) / "Documentos"
+        self.docs_dir.mkdir(parents=True, exist_ok=True)
+        self.rag = LocalDocumentRAG(
+            db_path=Path(self.temp_dir.name) / "cancel.db",
+            watched_dirs=[self.docs_dir],
+        )
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_cancel_before_start_aborts_scan(self):
+        """Cancelar antes de varrer faz a varredura sair imediatamente."""
+        for i in range(20):
+            (self.docs_dir / f"doc{i}.txt").write_text(f"conteúdo {i}", encoding="utf-8")
+
+        self.rag.cancel_indexing()
+        stats = self.rag.index_directories()
+
+        self.assertTrue(stats["cancelled"], "a varredura deveria ter sido cancelada")
+        self.assertEqual(stats["indexed"], 0, "nada deveria ter sido indexado após o cancelamento")
+
+    def test_cancel_is_idempotent(self):
+        """Chamar o cancelamento várias vezes não levanta exceção."""
+        self.rag.cancel_indexing()
+        self.rag.cancel_indexing()
+        self.assertTrue(self.rag._index_cancel.is_set())
+
+    def test_start_background_indexing_clears_previous_cancel(self):
+        """Uma nova varredura em segundo plano limpa o cancelamento anterior.
+
+        O reset precisa acontecer *antes* de a thread subir. Se ficasse dentro
+        de `index_directories`, um `cancel_indexing()` chamado logo após o
+        `start()` seria apagado pela própria thread ao começar a rodar — que é
+        exatamente o padrão de "criar janela e destruir em seguida".
+        """
+        self.rag.cancel_indexing()
+        self.assertTrue(self.rag._index_cancel.is_set())
+
+        with _real_background_indexing():
+            thread = self.rag.start_background_indexing()
+        thread.join(timeout=10)
+        self.assertFalse(self.rag._index_cancel.is_set())
+
+    def test_cancel_after_start_is_not_lost(self):
+        """Cancelar logo depois do start não pode ser descartado pela thread."""
+        for i in range(200):
+            (self.docs_dir / f"bulk{i}.txt").write_text(f"texto {i}" * 40, encoding="utf-8")
+
+        with _real_background_indexing():
+            self.rag.start_background_indexing()
+        self.rag.cancel_indexing()
+
+        # A varredura cooperativa deve terminar rápido, mesmo com 200 arquivos.
+        for _ in range(100):
+            if not self.rag._is_indexing:
+                break
+            time.sleep(0.05)
+        self.assertFalse(self.rag._is_indexing, "a varredura não parou após o cancelamento")
+
+    def test_cancel_does_not_break_subsequent_direct_scan(self):
+        """Após um cancelamento, uma varredura direta ainda pode ser feita.
+
+        Quem limpa o sinal é `start_background_indexing`; uma chamada direta a
+        `index_directories` respeita o cancelamento pendente. Este teste fixa
+        esse contrato para que ninguém "conserte" movendo o `clear()` para
+        dentro do laço e reintroduza a corrida.
+        """
+        (self.docs_dir / "unico.txt").write_text("documento único", encoding="utf-8")
+
+        self.rag.cancel_indexing()
+        self.assertTrue(self.rag.index_directories()["cancelled"])
+
+        # Uma nova execução em segundo plano reabre o caminho normal.
+        with _real_background_indexing():
+            thread = self.rag.start_background_indexing()
+        thread.join(timeout=10)
+        self.assertGreaterEqual(self.rag.index_directories()["indexed"], 0)
 
 
 if __name__ == "__main__":

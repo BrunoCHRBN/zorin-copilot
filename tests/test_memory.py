@@ -63,6 +63,57 @@ class MemoryManagerTest(unittest.TestCase):
         self.assertTrue(deleted)
         self.assertEqual(len(self.mem.get_all_facts()), 1)
 
+    def test_fact_key_is_stable_and_content_derived(self):
+        """A chave de um fato depende do texto, não do relógio.
+
+        Regressão: o caminho de chat gravava `fato_<epoch>`, então a mesma frase
+        salva duas vezes virava duas linhas — e a tela de memória mostrava o
+        mesmo fato repetido N vezes.
+        """
+        a = MemoryManager.fact_key("Meu café favorito é espresso duplo")
+        b = MemoryManager.fact_key("  meu CAFÉ favorito é   espresso duplo  ")
+        self.assertEqual(a, b, "normalização (caixa/espaços) deve gerar a mesma chave")
+
+        c = MemoryManager.fact_key("Meu café favorito é cappuccino")
+        self.assertNotEqual(a, c)
+
+    def test_save_fact_twice_with_same_key_does_not_duplicate(self):
+        """Salvar o mesmo fato duas vezes atualiza a linha em vez de criar outra."""
+        content = "meu café favorito é espresso duplo"
+        key = MemoryManager.fact_key(content)
+        self.mem.save_fact(key, content)
+        self.mem.save_fact(key, content)
+
+        facts = self.mem.get_all_facts()
+        self.assertEqual(len(facts), 1)
+        self.assertEqual(facts[0]["content"], content)
+
+    def test_dedupe_facts_collapses_legacy_duplicates(self):
+        """Duplicatas legadas (chaves distintas, mesmo texto) são consolidadas."""
+        content = "meu café favorito é espresso duplo"
+        for i in range(10):  # simula o bug: chaves diferentes a cada gravação
+            self.mem.save_fact(f"fato_{1000 + i}", content)
+
+        self.assertEqual(len(self.mem.get_all_facts()), 10)
+        self.assertEqual(self.mem.count_duplicate_facts(), 9)
+
+        removed = self.mem.dedupe_facts()
+        self.assertEqual(removed, 9)
+        self.assertEqual(len(self.mem.get_all_facts()), 1)
+
+    def test_delete_facts_by_content_removes_all_matches(self):
+        """Excluir por conteúdo limpa todas as cópias, não só a primeira."""
+        content = "prefere tema escuro"
+        self.mem.save_fact("fato_1", content)
+        self.mem.save_fact("fato_2", content)
+        self.mem.save_fact("outro", "fato não relacionado")
+
+        removed = self.mem.delete_facts_by_content(content)
+        self.assertEqual(removed, 2)
+        remaining = self.mem.get_all_facts()
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(remaining[0]["content"], "fato não relacionado")
+
     def test_context_summary(self):
         self.mem.save_fact("repo", "O projeto fica em ~/Projetos/zorin")
         self.mem.log_action("abrir terminal", "launch_app", "Terminal", {}, True, "OK")

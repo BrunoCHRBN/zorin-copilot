@@ -2,6 +2,7 @@
 # do motor de intenções com o clipboard (código, tradução, formalização de e-mails, imagens).
 
 import os
+import subprocess
 import sys
 import unittest
 from unittest.mock import MagicMock, patch
@@ -75,6 +76,74 @@ class ClipboardServiceTest(unittest.TestCase):
         mock_which.side_effect = lambda cmd: "/usr/bin/" + cmd if cmd == "wl-copy" else None
         mock_run.return_value = MagicMock(returncode=0)
         self.assertTrue(ClipboardService.set_text("Texto para teste"))
+
+    @patch("shutil.which")
+    @patch("subprocess.run")
+    def test_set_text_never_lets_wl_copy_inherit_stdio(self, mock_run, mock_which):
+        """O processo dono da seleção não pode herdar stdin/stdout/stderr.
+
+        Regressão que isto cobre: no Wayland a seleção pertence a um cliente
+        vivo — `wl-copy` bifurca um processo que fica em segundo plano enquanto
+        for dono do conteúdo. Herdando os descritores do pai, ele mantém aberta
+        a ponta de escrita de qualquer pipe de captura. Quem captura a saída
+        (suíte de testes, systemd, pipe) nunca recebe EOF e **trava para
+        sempre**. Medido: um `wl-copy` órfão pendurou a suíte por mais de 20
+        minutos, sem consumir memória e sem emitir sinal.
+        """
+        mock_which.side_effect = lambda cmd: "/usr/bin/" + cmd if cmd == "wl-copy" else None
+        mock_run.return_value = MagicMock(returncode=0)
+
+        ClipboardService.set_text("Texto para teste")
+
+        kwargs = mock_run.call_args.kwargs
+        for stream in ("stdin", "stdout", "stderr"):
+            self.assertEqual(
+                kwargs.get(stream),
+                subprocess.DEVNULL,
+                f"{stream} deveria ser DEVNULL — senão o processo de seleção "
+                f"segura os descritores do pai e trava qualquer captura de saída",
+            )
+        self.assertTrue(
+            kwargs.get("start_new_session"),
+            "wl-copy deve subir em sessão própria, para não compartilhar grupo "
+            "de processos com o Copilot",
+        )
+
+    @patch("shutil.which")
+    @patch("subprocess.Popen")
+    def test_set_text_never_lets_xclip_inherit_stdio(self, mock_popen, mock_which):
+        """Mesmo contrato no fallback X11: `xclip` também bifurca e permanece."""
+        mock_which.side_effect = lambda cmd: "/usr/bin/" + cmd if cmd == "xclip" else None
+        proc = MagicMock(returncode=0)
+        mock_popen.return_value = proc
+
+        ClipboardService.set_text("Texto para teste")
+
+        kwargs = mock_popen.call_args.kwargs
+        for stream in ("stdout", "stderr"):
+            self.assertEqual(kwargs.get(stream), subprocess.DEVNULL, stream)
+        self.assertTrue(kwargs.get("start_new_session"))
+
+    def test_set_text_does_not_hang_captured_output(self):
+        """Guarda comportamental: com a saída capturada, `set_text` retorna.
+
+        Este é o teste que reproduz o sintoma original de ponta a ponta: um
+        processo filho chama `set_text` e o pai captura a saída por pipe. Sem o
+        `DEVNULL`, o `subprocess.run(..., capture_output=True)` do pai nunca vê
+        EOF e estoura o timeout — exatamente como a suíte travava.
+        """
+        child = (
+            "import sys; sys.path.insert(0, 'src'); "
+            "from zorin_copilot.core.clipboard import ClipboardService; "
+            "print('ok', ClipboardService.set_text('regressao'))"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", child],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        self.assertIn("ok", result.stdout)
 
 
 class ClipboardIntentEngineTest(unittest.TestCase):

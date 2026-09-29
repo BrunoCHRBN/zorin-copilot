@@ -120,13 +120,29 @@ class ClipboardService:
 
     @classmethod
     def set_text(cls, text: str) -> bool:
-        """Copia um texto para a área de transferência do sistema."""
+        """Copia um texto para a área de transferência do sistema.
+
+        Os descritores são deliberadamente desligados (`DEVNULL`) e o processo
+        sobe em sessão própria. Motivo: no Wayland a seleção pertence a um
+        **cliente vivo** — `wl-copy` bifurca um processo que fica em segundo
+        plano enquanto for dono do conteúdo, e `xclip` faz o mesmo no X11. Esse
+        processo herda stdin/stdout/stderr do pai. Se o Copilot estiver com a
+        saída capturada (suíte de testes, unidade systemd, pipe), quem captura
+        nunca recebe EOF e **trava para sempre**.
+
+        Medido: foi exatamente isso que pendurou a suíte de testes por mais de
+        20 minutos, com um `wl-copy` órfão segurando a ponta de escrita do pipe.
+        """
         if shutil.which("wl-copy"):
             try:
                 res = subprocess.run(
                     ["wl-copy", text],
                     check=False,
                     timeout=2.0,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
                 )
                 if res.returncode == 0:
                     return True
@@ -138,6 +154,9 @@ class ClipboardService:
                 proc = subprocess.Popen(
                     ["xclip", "-selection", "clipboard"],
                     stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
                 )
                 proc.communicate(input=text.encode("utf-8"), timeout=2.0)
                 if proc.returncode == 0:

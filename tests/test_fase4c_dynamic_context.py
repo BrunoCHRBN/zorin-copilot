@@ -27,6 +27,7 @@ from zorin_copilot.ai.live import (  # noqa: E402
     build_realtime_text_msg,
     build_realtime_video_msg,
 )
+from zorin_copilot.core.memory import MemoryManager  # noqa: E402
 from zorin_copilot.shell.risk import RiskLevel, RiskPolicy  # noqa: E402
 
 
@@ -34,7 +35,6 @@ def _bare_client(**overrides) -> GeminiLiveClient:
     c = GeminiLiveClient.__new__(GeminiLiveClient)
     c.risk_policy = RiskPolicy()
     c._pending_actions = {}
-    c._bypass_risk_gate = False
     c._queued_initial_text = ""
     c._is_running = False
     c._ws = None
@@ -67,6 +67,13 @@ class _FakeMemory:
     def __init__(self):
         self.facts: list[dict] = []
         self.contacts: list[dict] = []
+
+    # Delegado à implementação real de propósito. `fact_key` é a fonte única da
+    # chave do fato (hash do conteúdo normalizado) desde que a chave deixou de
+    # ser `fato_<timestamp>`. Se o dublê tivesse a própria cópia da
+    # normalização, ele divergiria em silêncio e o teste passaria a validar a
+    # cópia, não o comportamento real.
+    fact_key = staticmethod(MemoryManager.fact_key)
 
     def save_fact(self, key, content, category="preferencia", source="usuario"):
         self.facts.append(

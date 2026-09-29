@@ -130,6 +130,11 @@ class LocalDocumentRAG:
         )
 
         self._is_indexing = False
+        # Sinal de cancelamento da varredura em segundo plano. Sem ele, o
+        # `RAGIndexer` percorre ~/Documentos e ~/Downloads até o fim mesmo que a
+        # janela que o pediu já tenha sido destruída — em teste isso mantém
+        # threads vivas e I/O de disco competindo com o próprio runner.
+        self._index_cancel = threading.Event()
         self._init_rag_tables()
 
     def _get_connection(self) -> sqlite3.Connection:
@@ -646,16 +651,35 @@ class LocalDocumentRAG:
         return chunks
 
     def index_directories(self, max_depth: int = 3) -> dict[str, Any]:
-        """Varre e indexa todas as pastas observadas incrementalmente."""
+        """Varre e indexa todas as pastas observadas incrementalmente.
+
+        A varredura é cooperativamente cancelável: `cancel_indexing()` faz os
+        laços de `os.walk` abandonarem na próxima iteração. Isso importa porque
+        a varredura toca o disco inteiro do usuário e, sem o freio, sobrevive à
+        janela que a disparou.
+
+        O sinal **não** é limpo aqui de propósito. Quem limpa é
+        `start_background_indexing()`, antes de subir a thread: se o reset
+        ficasse neste ponto, um `cancel_indexing()` chamado logo após o
+        `thread.start()` seria apagado pela própria thread ao começar a rodar —
+        exatamente o caso do teste que cria e destrói janelas em sequência.
+        """
         self._is_indexing = True
-        stats = {"indexed": 0, "unchanged": 0, "failed": 0, "total_scanned": 0}
+        stats = {"indexed": 0, "unchanged": 0, "failed": 0, "total_scanned": 0, "cancelled": False}
 
         try:
             for directory in self.watched_dirs:
+                if self._index_cancel.is_set():
+                    stats["cancelled"] = True
+                    break
                 if not directory.exists():
                     continue
 
                 for root, dirs, files in os.walk(directory):
+                    if self._index_cancel.is_set():
+                        stats["cancelled"] = True
+                        break
+
                     # Filtra pastas excluídas no próprio os.walk
                     dirs[:] = [d for d in dirs if d not in EXCLUDED_PATTERNS and not d.startswith(".")]
 
@@ -665,6 +689,9 @@ class LocalDocumentRAG:
                         continue
 
                     for f in files:
+                        if self._index_cancel.is_set():
+                            stats["cancelled"] = True
+                            break
                         if f.startswith("."):
                             continue
                         fpath = Path(root) / f
@@ -676,12 +703,28 @@ class LocalDocumentRAG:
                             else:
                                 stats["unchanged"] += 1
 
+                if stats["cancelled"]:
+                    break
+
             return stats
         finally:
             self._is_indexing = False
 
+    def cancel_indexing(self) -> None:
+        """Pede o encerramento da varredura em segundo plano.
+
+        Idempotente e seguro a partir da thread principal: apenas levanta um
+        `Event` que os laços de indexação consultam. Não bloqueia esperando a
+        thread terminar — o objetivo é liberar a janela, não sincronizar.
+        """
+        self._index_cancel.set()
+
     def start_background_indexing(self, on_complete: Callable[[dict[str, Any]], None] | None = None) -> threading.Thread:
         """Inicia varredura e indexação em background sem travar a interface."""
+        # Limpa o cancelamento *antes* de subir a thread, para que um
+        # `cancel_indexing()` disparado logo depois ainda tenha efeito.
+        self._index_cancel.clear()
+
         def worker():
             stats = self.index_directories()
             logger.info(f"Indexação de documentos concluída: {stats}")
@@ -897,6 +940,10 @@ class LocalDocumentRAG:
 
         # Se houver provedor LLM configurado, sintetiza resposta direta
         if llm_provider and hasattr(llm_provider, "chat") and getattr(llm_provider, "is_configured", lambda: True)():
+            # Import local, como o resto deste módulo faz com `..ai`: `rag` é
+            # consumido pelo CLI headless e não deve puxar o pacote de IA no import.
+            from ..ai.provider_failure import failure_reason, is_provider_failure
+
             try:
                 prompt_rag = (
                     f"Você é o assistente Zorin Copilot analisando documentos locais do usuário.\n"
@@ -909,12 +956,20 @@ class LocalDocumentRAG:
                     f"[PERGUNTA DO USUÁRIO]:\n{question}"
                 )
                 answer, _ = llm_provider.chat(prompt_rag)
-                return {
-                    "answer": answer.strip(),
-                    "citations": citations,
-                    "results": results,
-                    "found": True,
-                }
+                if is_provider_failure(answer):
+                    # Os provedores devolvem a FRASE DE ERRO no lugar da resposta em vez
+                    # de levantar (ver `ai/provider_failure.py`), então o `except` abaixo
+                    # nunca dispara neste caso. Sem esta checagem a frase virava a
+                    # resposta da consulta aos documentos — com `found: True` — e o
+                    # fallback determinístico logo abaixo nunca rodava.
+                    logger.warning("RAG sem síntese por IA: %s", failure_reason(answer))
+                else:
+                    return {
+                        "answer": answer.strip(),
+                        "citations": citations,
+                        "results": results,
+                        "found": True,
+                    }
             except Exception as exc:
                 logger.warning(f"Erro ao sintetizar resposta RAG com LLM: {exc}")
 
