@@ -238,6 +238,56 @@ class WebSearchTest(unittest.TestCase):
         self.assertTrue(any(a.action_type == ActionType.READ_PAGE for a in plan.actions))
         self.assertIn("Artigo Sobre IA", plan.thought)
 
+    @patch("zorin_copilot.core.browser.BrowserManager.read_page")
+    def test_erro_do_provedor_nao_vira_leitura_da_pagina(self, mock_read):
+        """A leitura da página não pode ser respondida com a mensagem de erro.
+
+        Mesmo mecanismo do `deep_search`: o provedor devolve a frase de erro no canal
+        de texto, então o `except` do ramo de leitura nunca dispara. Sem a checagem, o
+        `thought` devolvido era a mensagem de cota esgotada — e o `thought`
+        determinístico logo abaixo, com o título e o conteúdo, nunca rodava.
+        """
+        mock_read.return_value = {
+            "success": True,
+            "title": "Artigo Sobre IA",
+            "url": "https://ia.org/artigo",
+            "text": "O artigo discute a evolução de assistentes locais integrados ao desktop.",
+            "description": "Resumo do artigo de IA.",
+            "length": 75,
+        }
+        cfg = CopilotConfig(provider="gemini", gemini_api_key="")
+        engine = IntentEngine(config=cfg)
+        # Substitui o provedor real por um que devolve a frase de erro (sem levantar).
+        engine.llm_provider = _FakeProvider(
+            reply="Não foi possível obter resposta do Gemini: Erro no modelo (429): RESOURCE_EXHAUSTED"
+        )
+
+        plan = engine.parse("leia a página aberta")
+
+        self.assertNotIn("RESOURCE_EXHAUSTED", plan.thought)
+        self.assertNotIn("Não foi possível obter resposta do Gemini", plan.thought)
+        # O caminho determinístico tem de ter rodado.
+        self.assertIn("Artigo Sobre IA", plan.thought)
+
+    @patch("zorin_copilot.core.browser.BrowserManager.read_page")
+    def test_sintese_real_do_provedor_e_usada_na_leitura(self, mock_read):
+        """Contraprova: com resposta legítima, a leitura usa a síntese do modelo."""
+        mock_read.return_value = {
+            "success": True,
+            "title": "Artigo Sobre IA",
+            "url": "https://ia.org/artigo",
+            "text": "Conteúdo qualquer sobre assistentes locais.",
+            "description": "Resumo.",
+            "length": 40,
+        }
+        cfg = CopilotConfig(provider="gemini", gemini_api_key="")
+        engine = IntentEngine(config=cfg)
+        engine.llm_provider = _FakeProvider(reply="O artigo trata de assistentes locais.")
+
+        plan = engine.parse("leia a página aberta")
+
+        self.assertEqual(plan.thought, "O artigo trata de assistentes locais.")
+
     @patch.object(WebSearchClient, "search")
     def test_academic_search_query_building(self, mock_search):
         mock_search.return_value = [
@@ -255,6 +305,165 @@ class WebSearchTest(unittest.TestCase):
 
     def test_academic_search_empty_query(self):
         self.assertEqual(self.client.academic_search("   "), [])
+
+
+class _FakeProvider:
+    """Provedor mínimo para a pesquisa profunda.
+
+    Existe para reproduzir o comportamento REAL dos provedores deste projeto: em vez
+    de levantar, eles devolvem a frase de erro no canal de texto. Um dublê que
+    levanta sempre esconderia exatamente o defeito que estes testes protegem.
+    """
+
+    def __init__(self, reply: str = "", raises: Exception | None = None, configured: bool = True):
+        self.reply = reply
+        self.raises = raises
+        self.configured = configured
+        self.prompts: list[str] = []
+
+    def is_configured(self) -> bool:
+        return self.configured
+
+    def chat(self, prompt, *args, **kwargs):
+        self.prompts.append(prompt)
+        if self.raises is not None:
+            raise self.raises
+        return self.reply, []
+
+
+_FONTE_A = SearchResult(title="Zorin OS 18", url="https://reviewlinux.com/zorin18", snippet="Análise do Zorin.")
+_FONTE_B = SearchResult(title="Benchmarks 2026", url="https://phoronix.com/b2026", snippet="Testes no Wayland.")
+
+_PAGINA_OK = {
+    "success": True,
+    "title": "Zorin OS 18",
+    "url": "https://reviewlinux.com/zorin18",
+    "text": "O Zorin OS 18 alcançou nota máxima em usabilidade.",
+    "length": 51,
+}
+_PAGINA_VAZIA = {"success": False, "title": "Benchmarks 2026", "url": "https://phoronix.com/b2026", "text": "", "length": 0}
+
+
+class DeepSearchHonestyTest(unittest.TestCase):
+    """A pesquisa profunda não pode apresentar erro de provedor como relatório.
+
+    Defeito que originou estes testes: `llm_provider.chat()` devolvia a frase de erro
+    (cota 429 do Gemini, Ollama inalcançável) no lugar da resposta, e `deep_search` a
+    devolvia como `report` com `success: True` e um evento "sintetizada com sucesso".
+    O usuário recebia a mensagem de erro rotulada de relatório.
+    """
+
+    def setUp(self):
+        self.client = WebSearchClient()
+
+    @patch("zorin_copilot.core.browser.WebPageReader.fetch_and_clean")
+    @patch.object(WebSearchClient, "search")
+    def test_erro_do_provedor_nao_vira_relatorio(self, mock_search, mock_fetch):
+        mock_search.return_value = [_FONTE_A, _FONTE_B]
+        mock_fetch.return_value = _PAGINA_OK
+        erro = (
+            "Não foi possível obter resposta do Gemini: Erro no modelo gemini-3.5-flash "
+            "(429): RESOURCE_EXHAUSTED"
+        )
+        eventos: list[tuple[str, str]] = []
+        from zorin_copilot.core.web_search import DeepWebResearcher
+
+        res = DeepWebResearcher(search_client=self.client).deep_search(
+            "Zorin OS 18",
+            llm_provider=_FakeProvider(reply=erro),
+            on_progress=lambda s, m: eventos.append((s, m)),
+        )
+
+        # O texto de erro NÃO pode aparecer no relatório.
+        self.assertNotIn("RESOURCE_EXHAUSTED", res["report"])
+        self.assertNotIn("Não foi possível obter resposta do Gemini", res["report"])
+        self.assertNotIn(erro, res["summary"])
+        # E a procedência tem de ser declarada.
+        self.assertEqual(res["synthesis"], "offline")
+        self.assertIn("sem síntese por IA", res["report"])
+        # Nenhum evento pode afirmar sucesso da síntese.
+        self.assertNotIn(("done", "Pesquisa aprofundada sintetizada com sucesso."), eventos)
+        self.assertIn("synthesis_failed", [e[0] for e in eventos])
+
+    @patch("zorin_copilot.core.browser.WebPageReader.fetch_and_clean")
+    @patch.object(WebSearchClient, "search")
+    def test_sintese_real_e_declarada_como_llm(self, mock_search, mock_fetch):
+        mock_search.return_value = [_FONTE_A]
+        mock_fetch.return_value = _PAGINA_OK
+        eventos: list[tuple[str, str]] = []
+        from zorin_copilot.core.web_search import DeepWebResearcher
+
+        res = DeepWebResearcher(search_client=self.client).deep_search(
+            "Zorin OS 18",
+            llm_provider=_FakeProvider(reply="📌 Resumo Executivo\n\nO Zorin OS 18 é..."),
+            on_progress=lambda s, m: eventos.append((s, m)),
+        )
+
+        self.assertEqual(res["synthesis"], "llm")
+        self.assertEqual(res["report"], "📌 Resumo Executivo\n\nO Zorin OS 18 é...")
+        self.assertIn(("done", "Pesquisa aprofundada sintetizada com sucesso."), eventos)
+        self.assertEqual(res["pages_read"], 1)
+        self.assertEqual(res["pages_total"], 1)
+
+    @patch("zorin_copilot.core.browser.WebPageReader.fetch_and_clean")
+    @patch.object(WebSearchClient, "search")
+    def test_provedor_que_levanta_tambem_cai_para_offline(self, mock_search, mock_fetch):
+        mock_search.return_value = [_FONTE_A]
+        mock_fetch.return_value = _PAGINA_OK
+        from zorin_copilot.core.web_search import DeepWebResearcher
+
+        res = DeepWebResearcher(search_client=self.client).deep_search(
+            "Zorin OS 18",
+            llm_provider=_FakeProvider(raises=RuntimeError("rede caiu")),
+        )
+        self.assertTrue(res["success"])
+        self.assertEqual(res["synthesis"], "offline")
+
+    @patch("zorin_copilot.core.browser.WebPageReader.fetch_and_clean")
+    @patch.object(WebSearchClient, "search")
+    def test_pagina_que_nao_abre_e_marcada_como_snippet(self, mock_search, mock_fetch):
+        mock_search.return_value = [_FONTE_A, _FONTE_B]
+        mock_fetch.side_effect = [_PAGINA_OK, _PAGINA_VAZIA]
+        from zorin_copilot.core.web_search import DeepWebResearcher
+
+        res = DeepWebResearcher(search_client=self.client).deep_search("Zorin OS 18")
+
+        # A segunda fonte só teve o resumo do resultado de busca — e o relatório diz isso.
+        self.assertEqual(res["pages_total"], 2)
+        self.assertEqual(res["pages_read"], 1)
+        self.assertIn("sem síntese por IA", res["report"])
+        self.assertIn("a página não abriu", res["report"])
+        self.assertIn("1 de 2", res["report"])
+
+    @patch("zorin_copilot.core.browser.WebPageReader.fetch_and_clean")
+    @patch.object(WebSearchClient, "search")
+    def test_prompt_avisa_quais_fontes_sao_so_resumo(self, mock_search, mock_fetch):
+        mock_search.return_value = [_FONTE_A, _FONTE_B]
+        mock_fetch.side_effect = [_PAGINA_OK, _PAGINA_VAZIA]
+        prov = _FakeProvider(reply="relatório sintetizado")
+        from zorin_copilot.core.web_search import DeepWebResearcher
+
+        DeepWebResearcher(search_client=self.client).deep_search("Zorin OS 18", llm_provider=prov)
+
+        self.assertEqual(len(prov.prompts), 1)
+        prompt = prov.prompts[0]
+        # O modelo tem de saber a fidelidade de cada fonte e quantas foram lidas.
+        self.assertIn('fidelity="snippet"', prompt)
+        self.assertIn('fidelity="full"', prompt)
+        self.assertIn("De 2 fontes, 1 foram lidas por inteiro", prompt)
+
+    @patch("zorin_copilot.core.browser.WebPageReader.fetch_and_clean")
+    @patch.object(WebSearchClient, "search")
+    def test_nenhuma_fonte_lida_e_falha_e_nao_relatorio_vazio(self, mock_search, mock_fetch):
+        mock_search.return_value = [_FONTE_A, _FONTE_B]
+        mock_fetch.side_effect = RuntimeError("sem rede")
+        from zorin_copilot.core.web_search import DeepWebResearcher
+
+        res = DeepWebResearcher(search_client=self.client).deep_search("Zorin OS 18")
+        self.assertFalse(res["success"])
+        self.assertEqual(res["synthesis"], "none")
+        self.assertEqual(res["report"], "")
+        self.assertTrue(res.get("error"))
 
 
 if __name__ == "__main__":

@@ -27,8 +27,9 @@ import subprocess
 import tempfile
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
+from ..core.board_outcome import message_for, outcome_from_payload
 from ..shell.risk import RiskLevel, RiskPolicy, is_blocked_app
 
 logger = logging.getLogger(__name__)
@@ -246,12 +247,26 @@ class ToolRegistry:
         mcp_manager: Any | None = None,
         default_timeout: float = DEFAULT_TOOL_TIMEOUT,
         memory: Any | None = None,
+        board_opener: Any | None = None,
+        subagent_runner: Any | None = None,
     ) -> None:
         self._inspector = inspector
         self._input_driver = input_driver
         self._undo_stack = undo_stack
         self._fence = fence
         self._memory = memory
+        # Gancho de UI para o Quadro Negro: callable `(graph, focus) -> dict`.
+        # O registro é agnóstico de GTK; a UI injeta o abridor (pode ser definido
+        # depois, via `registry.board_opener = ...`). Sem ele, a ferramenta
+        # `study_show_board` devolve uma mensagem graciosa em vez de quebrar.
+        self.board_opener = board_opener
+        # Gancho de subagentes: callable `(especialista, entrada) -> dict`.
+        # Mesmo contrato do `board_opener`: o registro não conhece planejador nem
+        # provedor, então quem sabe montar um pipeline é a camada que já tem o
+        # roteador (a UI) ou o chamador (CLI). O progresso é problema de quem
+        # monta o pipeline — o registro não sabe o que é uma janela. Sem o
+        # gancho, `run_subagent` devolve mensagem graciosa em vez de quebrar.
+        self.subagent_runner = subagent_runner
         self.policy = policy or RiskPolicy()
         self.dry_run = dry_run
         self.max_tree_chars = max_tree_chars
@@ -296,6 +311,25 @@ class ToolRegistry:
         """
         clone = copy.copy(self)
         clone.dry_run = True
+        return clone
+
+    def restricted(self, names: Iterable[str]) -> "ToolRegistry":
+        """Cópia com apenas as ferramentas de `names`. O original não é tocado.
+
+        É o que dá substância a "ferramentas restritas" num subagente: o
+        registro restrito é o único que o planejador do subagente enxerga, então
+        a restrição é do **schema** que o modelo recebe, não uma checagem depois
+        do fato que o modelo pode contornar.
+
+        `copy.copy` + troca de `_specs` (e não mutação do dicionário herdado):
+        `copy.copy` é rasa e compartilha o **mesmo** dicionário `_specs`, então
+        filtrar no lugar apagaria ferramentas do registro original.
+        """
+        keep = {str(name) for name in names}
+        clone = copy.copy(self)
+        clone._specs = {
+            name: spec for name, spec in self._specs.items() if name in keep
+        }
         return clone
 
     def _get_executor(self) -> concurrent.futures.ThreadPoolExecutor:
@@ -479,13 +513,32 @@ class ToolRegistry:
         return self.policy.classify(name, args)
 
     def requires_approval(self, name: str, args: dict[str, Any] | None = None) -> bool:
+        """True só para ``CONFIRM``. ``AUTO`` executa sem aprovação (mas avisa depois)."""
         level, _ = self.classify(name, args)
         return level == RiskLevel.CONFIRM
 
+    def notify_after(self, name: str, args: dict[str, Any] | None = None) -> bool:
+        """True para ``AUTO``: executa sem perguntar, mas o passo pede aviso posterior.
+
+        Sinal **distinto** de ``requires_approval`` de propósito: reaproveitá-lo faria
+        o cartão voltar a pedir clique para uma ação que já executou.
+        """
+        level, _ = self.classify(name, args)
+        return level == RiskLevel.AUTO
+
     # -- execução ----------------------------------------------------------- #
 
-    def call(self, name: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
+    def call(
+        self,
+        name: str,
+        args: dict[str, Any] | None = None,
+        contract: Any | None = None,
+    ) -> dict[str, Any]:
         """Executa uma ferramenta e devolve SEMPRE um dicionário serializável.
+
+        `contract` é opaco aqui (ignorado): é o gancho para registros validadores
+        por composição (ex.: ValidatingToolRegistry) conferirem pré/pós-condições
+        do passo. Mantê-lo como parâmetro mantém a assinatura compatível.
 
         Nunca levanta: falha de componente, ferramenta inexistente e argumento
         inválido voltam como `{"ok": False, "error": ...}` para o loop decidir.
@@ -1038,6 +1091,77 @@ class ToolRegistry:
             )
         )
 
+        self.register(
+            ToolSpec(
+                name="study_show_board",
+                description=(
+                    "Abre o Quadro Negro Digital com o raciocínio passo a passo de um problema de "
+                    "matemática (equação quadrática ou sistema linear 2x2) e pode destacar um nó "
+                    "específico. Use quando o usuário pedir para 'ver no quadro', 'abrir o quadro "
+                    "negro', 'mostrar o passo a passo' ou destacar algo ('mostre a fatoração', "
+                    "'destaque o passo 2'). O resultado traz `opened` (o quadro já está visível) e "
+                    "`pending` (a resolução ainda está sendo gerada). Só diga ao usuário que o "
+                    "quadro abriu quando `opened` for verdadeiro; se `ok` for falso, explique o "
+                    "motivo que vem em `error` em vez de afirmar que abriu."
+                ),
+                parameters=_param(
+                    {
+                        "problem": _str(
+                            "Problema a resolver e desenhar (ex: 'x^2 - 5x + 6 = 0' ou "
+                            "'x + y = 10; x - y = 2'). Se omitido, reusa a última solução da conversa."
+                        ),
+                        "focus": _str(
+                            "Nó a destacar: nome do método ('Bhaskara', 'Fatoração', 'Substituição'), "
+                            "'enunciado' ou 'passo N' (ex: 'passo 2'). Opcional."
+                        ),
+                    },
+                    required=[],
+                ),
+                handler=self._tool_study_show_board,
+            )
+        )
+
+        # O subagente roda com contexto próprio e registro restrito; o pai vê
+        # UM passo. `timeout=0` é deliberado: com o teto padrão de 25 s o
+        # pipeline morreria no meio do primeiro estágio. O orçamento de um
+        # subagente é dele (`SubagentSpec.max_steps`/`max_seconds`), não deste
+        # registro. `timeout=0` faz o `call` rodar em linha, sem executor.
+        #
+        # Os nomes dos especialistas aqui são texto: `agent_tools` não pode
+        # importar `subagents` no topo (é o `subagents` que importa daqui), e um
+        # import local dentro do handler só adiaria o problema. A defasagem é
+        # pega por teste (`test_descricao_da_ferramenta_cita_todo_especialista`).
+        self.register(
+            ToolSpec(
+                name="run_subagent",
+                description=(
+                    "Delega uma tarefa LONGA e de raciocínio em várias etapas a um subagente "
+                    "especializado. O subagente roda com contexto isolado (não vê esta conversa), "
+                    "ferramentas restritas ao seu domínio e orçamento próprio de passos — use-o "
+                    "quando a tarefa exigiria muitos passos aqui e poluiria o contexto principal. "
+                    "Especialistas: 'researcher' (pesquisa com fontes e verificação), "
+                    "'refactorer' (refatoração de código com leitura, edição e testes) e "
+                    "'a11y_auditor' (auditoria de acessibilidade de uma janela aberta). "
+                    "Devolve o resultado consolidado do subagente; ele não conversa com o usuário."
+                ),
+                parameters=_param(
+                    {
+                        "specialist": _str(
+                            "Nome do especialista: 'researcher', 'refactorer' ou 'a11y_auditor'."
+                        ),
+                        "input": _str(
+                            "O que o subagente deve fazer, em detalhe. É a ÚNICA coisa que ele "
+                            "recebe: inclua o alvo (tópico, caminho, janela) e o formato do "
+                            "resultado esperado."
+                        ),
+                    },
+                    required=["specialist", "input"],
+                ),
+                handler=self._tool_run_subagent,
+                timeout=0,
+            )
+        )
+
         self.mutate(
             ToolSpec(
                 name="undo_last",
@@ -1313,12 +1437,60 @@ class ToolRegistry:
                         "query": _str("Nome do aparelho ou cômodo específico a consultar (opcional)."),
                         "device_type": {
                             "type": "STRING",
-                            "enum": ["light", "climate", "switch", "all"],
+                            "enum": ["light", "climate", "switch", "scene", "script", "automation", "all"],
                             "description": "Filtro por tipo de aparelho.",
                         },
                     }
                 ),
                 handler=self._tool_smart_home_status,
+            )
+        )
+
+        self.mutate(
+            ToolSpec(
+                name="smart_home_automate",
+                description=(
+                    "Aciona cenas, scripts e automações do Home Assistant — o atalho de uma frase para "
+                    "vários aparelhos (ex.: 'boa noite' apaga tudo). Use 'trigger_scene' para cenas, "
+                    "'run_script' para scripts, 'trigger_automation' para automações e as ações 'list_*' "
+                    "para descobrir os nomes disponíveis antes de acionar."
+                ),
+                parameters=_param(
+                    {
+                        "action": {
+                            "type": "STRING",
+                            "enum": [
+                                "trigger_scene",
+                                "run_script",
+                                "trigger_automation",
+                                "list_scenes",
+                                "list_scripts",
+                                "list_automations",
+                            ],
+                            "description": "Ação a executar sobre cenas/scripts/automações.",
+                        },
+                        "name": _str("Nome ou ID da cena/script/automação (ex.: 'boa noite', 'cinema'). Opcional se houver apenas um."),
+                    },
+                    required=["action"],
+                ),
+                handler=self._tool_smart_home_automate,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="smart_home_events",
+                description=(
+                    "Lista as mudanças de estado mais recentes da casa captadas em tempo real "
+                    "(ex.: quem ligou a luz, quando o ar mudou de modo). Responde 'o que acabou de acontecer?'."
+                ),
+                parameters=_param(
+                    {
+                        "limit": _int("Quantidade de eventos a devolver (padrão 10)."),
+                        "domain": _str("Filtro opcional por domínio (ex.: 'light', 'switch', 'binary_sensor')."),
+                    }
+                ),
+                handler=self._tool_smart_home_events,
             )
         )
 
@@ -1501,25 +1673,124 @@ class ToolRegistry:
         self.register(
             ToolSpec(
                 name="calendar_event",
-                description="Gerencia compromissos e lembretes na agenda/calendário do Zorin OS (criar, listar e remover).",
+                description=(
+                    "Gerencia compromissos na agenda. Com o Google Agenda conectado, ele é a "
+                    "fonte de verdade (criar, listar, atualizar, remover, consultar horários "
+                    "livres/ocupados); sem conexão, usa o calendário local do Zorin OS."
+                ),
                 parameters=_param(
                     {
                         "action": {
                             "type": "STRING",
-                            "enum": ["create", "list", "delete"],
+                            "enum": ["create", "list", "update", "delete", "freebusy"],
                             "description": "Ação de calendário a realizar.",
                         },
-                        "title": _str("Título do compromisso (para 'create')."),
-                        "datetime_str": _str("Data e hora (ex: 'amanhã às 10h')."),
+                        "title": _str("Título do compromisso (para 'create'/'update')."),
+                        "datetime_str": _str(
+                            "Data e hora (ex: 'amanhã às 10h'). Em 'freebusy', é o início da janela."
+                        ),
+                        "datetime_end": _str("Fim da janela (só em 'freebusy'; padrão: amanhã)."),
                         "duration_minutes": _int("Duração em minutos (padrão 60)."),
                         "description": _str("Descrição do evento."),
                         "location": _str("Local ou link."),
-                        "event_id": _str("ID do evento (para 'delete')."),
+                        "event_id": _str("ID do evento (para 'update'/'delete')."),
                     },
                     required=["action"],
                 ),
                 mutating=True,
                 handler=self._tool_calendar_event,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="google_drive",
+                description=(
+                    "Gerencia arquivos no Google Drive (listar, buscar, enviar, baixar, criar "
+                    "pasta, mover, renomear, mandar para a lixeira, apagar definitivamente). "
+                    "Escopo mínimo `drive.file`: "
+                    "só os arquivos que o Copilot criou ou que você abriu com ele aparecem — o "
+                    "resto do Drive fica invisível. Exige o Drive conectado."
+                ),
+                parameters=_param(
+                    {
+                        "action": {
+                            "type": "STRING",
+                            "enum": [
+                                "list",
+                                "search",
+                                "get",
+                                "upload",
+                                "download",
+                                "mkdir",
+                                "move",
+                                "rename",
+                                "trash",
+                                "delete",
+                            ],
+                            "description": "Ação no Drive. 'trash' é recuperável; 'delete' é PERMANENTE.",
+                        },
+                        "query": _str("Termo de busca ('search') ou consulta `q` crua ('list')."),
+                        "path": _str("Caminho local (origem em 'upload', destino em 'download')."),
+                        "name": _str("Nome do arquivo no Drive ('upload') ou da pasta ('mkdir')."),
+                        "new_name": _str("Novo nome (para 'rename')."),
+                        "file_id": _str("ID do arquivo (download/get/move/rename/trash)."),
+                        "folder_id": _str("ID da pasta (destino de 'move', pai em 'upload'/'mkdir')."),
+                        "max_results": _int("Máximo de itens em 'list'/'search' (padrão 25)."),
+                    },
+                    required=["action"],
+                ),
+                mutating=True,
+                handler=self._tool_google_drive,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="google_gmail",
+                description=(
+                    "Gerencia o Gmail. Fluxo de ENVIO obrigatório: (1) 'review' para corrigir "
+                    "gramática e ortografia conforme o 'context' que o usuário fornecer; "
+                    "(2) mostre o texto revisado ao usuário e peça confirmação; (3) 'send' com "
+                    "reviewed=true. Sem reviewed=true o envio é recusado. Também lista/lê "
+                    "mensagens, cria rascunhos e marca lida/não lida. Exige o Gmail conectado."
+                ),
+                parameters=_param(
+                    {
+                        "action": {
+                            "type": "STRING",
+                            "enum": [
+                                "list",
+                                "get",
+                                "labels",
+                                "draft",
+                                "review",
+                                "send",
+                                "mark_read",
+                                "mark_unread",
+                            ],
+                            "description": "Ação no Gmail.",
+                        },
+                        "to": _str("Destinatário (para 'send'/'draft')."),
+                        "cc": _str("Cópia, opcional (para 'send'/'draft')."),
+                        "subject": _str("Assunto (para 'send'/'draft'/'review')."),
+                        "body": _str("Corpo da mensagem (para 'send'/'draft'/'review')."),
+                        "context": _str(
+                            "Contexto para a revisão: tom, destinatário e propósito "
+                            "(ex.: 'formal, para meu professor do SENAC')."
+                        ),
+                        "reviewed": _bool(
+                            "Só 'send' com reviewed=true é aceito: confirma que o rascunho "
+                            "passou por 'review' e o usuário aprovou o texto."
+                        ),
+                        "query": _str("Busca do Gmail (ex.: 'is:unread', 'from:banco')."),
+                        "message_id": _str("ID da mensagem (get/mark_read/mark_unread)."),
+                        "max_results": _int("Máximo de mensagens em 'list' (padrão 25)."),
+                    },
+                    required=["action"],
+                ),
+                mutating=True,
+                handler=self._tool_google_gmail,
             )
         )
 
@@ -1600,7 +1871,15 @@ class ToolRegistry:
         self.register(
             ToolSpec(
                 name="deep_web_search",
-                description="Realiza pesquisa aprofundada na web, navegando e consolidando múltiplos artigos com fontes.",
+                description=(
+                    "Realiza pesquisa aprofundada na web, navegando e consolidando múltiplos "
+                    "artigos com fontes. O resultado traz `synthesis`: \"llm\" quando o relatório "
+                    "foi escrito por um modelo, \"offline\" quando é uma compilação de trechos "
+                    "montada pelo próprio app. Em \"offline\" (ou quando `ok` for falso), "
+                    "apresente o relatório como compilação de fontes e diga quantas páginas "
+                    "foram lidas por inteiro (`pages_read` de `pages_total`) — não o apresente "
+                    "como análise própria nem esconda que parte das fontes só teve o resumo lido."
+                ),
                 parameters=_param(
                     {"query": _str("Tema ou pergunta a ser pesquisada profundamente.")},
                     required=["query"],
@@ -1638,6 +1917,124 @@ class ToolRegistry:
                     required=[],
                 ),
                 handler=self._tool_lan_devices_scan,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="network_discover_lan",
+                description=(
+                    "Descoberta ATIVA de aparelhos na sub-rede local (LAN) via varredura nmap "
+                    "(host discovery). Ao contrário de 'lan_devices_scan' (que só reflete a tabela "
+                    "ARP do kernel), encontra dispositivos que o computador ainda não contatou — "
+                    "útil para detectar aparelhos desconhecidos. Read-only; não abre portas."
+                ),
+                parameters=_param(
+                    {
+                        "cidr": _str(
+                            "Sub-rede a varrer no formato CIDR (ex.: '192.168.5.0/24'). "
+                            "Omitir para usar a sub-rede local do host."
+                        ),
+                    },
+                    required=[],
+                ),
+                handler=self._tool_network_discover_lan,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="network_identify_device",
+                description=(
+                    "Identifica (fingerprint) um dispositivo específico na LAN pelo IP: sistema "
+                    "operacional (nmap -O), fabricante (MAC/OUI) e serviços/portas abertas (nmap "
+                    "-sV). Read-only. Útil para saber o que é um aparelho não reconhecido."
+                ),
+                parameters=_param(
+                    {"ip": _str("Endereço IP do dispositivo a identificar (ex.: '192.168.5.12').")},
+                    required=["ip"],
+                ),
+                handler=self._tool_network_identify_device,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="network_watch_lan",
+                description=(
+                    "Monitora a LAN contra um baseline persistido de dispositivos conhecidos: varre "
+                    "a sub-rede (nmap -sn) e alerta apenas os MACs que NÃO estavam no baseline. Na "
+                    "primeira execução (baseline vazio) semeia silenciosamente os dispositivos "
+                    "atuais como conhecidos, sem disparar alerta. Read-only na rede; escreve só o "
+                    "estado local do assistente. NUNCA bloqueia nada — apenas notifica. O MAC é "
+                    "mascarado (preserva o fabricante) na resposta."
+                ),
+                parameters=_param(
+                    {
+                        "cidr": _str(
+                            "Sub-rede a monitorar no formato CIDR (ex.: '192.168.5.0/24'). "
+                            "Omitir para usar a sub-rede local do host."
+                        ),
+                    },
+                    required=[],
+                ),
+                handler=self._tool_network_watch_lan,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="network_establish_baseline",
+                description=(
+                    "Estabelece (ou reestabelece) o baseline de dispositivos conhecidos a partir de "
+                    "uma varredura atual da LAN: tudo o que está na rede agora vira 'conhecido' "
+                    "(e confiável). Use quando o usuário quiser dizer 'verifiquei minha rede, confie "
+                    "nestes'. Read-only na rede; escreve só o estado local. Não bloqueia nada."
+                ),
+                parameters=_param(
+                    {
+                        "cidr": _str(
+                            "Sub-rede a varrer no formato CIDR (ex.: '192.168.5.0/24'). "
+                            "Omitir para usar a sub-rede local do host."
+                        ),
+                    },
+                    required=[],
+                ),
+                handler=self._tool_network_establish_baseline,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="network_block_device",
+                description=(
+                    "Contenção defensiva de um dispositivo na LAN (o equivalente defensivo a 'atacar'): "
+                    "solicita BLOQUEAR ou LIBERAR um aparelho não reconhecido no roteador. Importante: "
+                    "o host NÃO derruba o tráfego localmente — o bloqueio real é delegado ao roteador "
+                    "via um backend configurado (script que fala com o roteador/Home Assistant). Sem "
+                    "backend configurado, NÃO executa nada e orienta o usuário. Requer confirmação "
+                    "(CONFIRM) antes de qualquer ação. Prefira informar o 'ip' (o MAC real é resolvido "
+                    "localmente no inventário); 'mac' completo só se você já o tiver. O MAC é mascarado "
+                    "na resposta."
+                ),
+                parameters=_param(
+                    {
+                        "ip": _str(
+                            "IP do dispositivo a conter (recomendado; o MAC real é resolvido no "
+                            "inventário local)."
+                        ),
+                        "mac": _str(
+                            "MAC completo do dispositivo (opcional; use apenas se já souber o MAC real)."
+                        ),
+                        "action": _str(
+                            "Ação desejada: 'block' (bloquear) ou 'allow' (liberar/desbloquear). "
+                            "Padrão: 'block'."
+                        ),
+                    },
+                    required=[],
+                ),
+                handler=self._tool_network_block_device,
+                mutating=True,
             )
         )
 
@@ -1691,6 +2088,26 @@ class ToolRegistry:
                 ),
                 handler=self._tool_network_release_port,
                 mutating=True,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="network_confirm_port",
+                description=(
+                    "Verifica (somente leitura) se uma porta de rede está livre ou ainda ocupada, "
+                    "confirmando se o processo que escutava nela foi de fato encerrado. "
+                    "Suporta IPv4 e IPv6."
+                ),
+                parameters=_param(
+                    {
+                        "port": _int("Número da porta a verificar (1-65535)."),
+                        "protocol": _str("Protocolo ('tcp' ou 'udp'; padrão 'tcp')."),
+                    },
+                    required=["port"],
+                ),
+                handler=self._tool_network_confirm_port,
+                mutating=False,
             )
         )
 
@@ -2707,6 +3124,127 @@ class ToolRegistry:
         except Exception as exc:
             return {"ok": False, "error": f"Falha ao exportar baralho para Anki: {exc}"}
 
+    def _tool_study_show_board(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Abre o Quadro Negro com o raciocínio estruturado de um problema.
+
+        A resolução é pura (`math_solver.try_solve`) e roda aqui; a abertura do
+        quadro é delegada ao gancho `board_opener` (a UI injeta). Sem gancho —
+        CLI headless, teste — devolve uma mensagem graciosa em vez de quebrar.
+        """
+        problem = str(args.get("problem") or "").strip()
+        focus = str(args.get("focus") or args.get("method") or "").strip()
+
+        graph = None
+        if problem:
+            try:
+                from .math_solver import try_solve
+
+                graph = try_solve(problem)
+            except Exception as exc:  # pragma: no cover - defensivo
+                return {"ok": False, "error": f"Falha ao resolver o problema: {exc}"}
+
+        opener = getattr(self, "board_opener", None)
+        if opener is None:
+            return {
+                "ok": False,
+                "error": (
+                    "O Quadro Negro não está disponível nesta interface. "
+                    "Diga ao usuário para abrir pela resposta no chat."
+                ),
+            }
+        try:
+            # Contrato do gancho: (problema, grafo, foco). O grafo pode ser None
+            # (álgebra pura não casou); a UI decide escalar para o modelo.
+            result = opener(problem, graph, focus)
+        except Exception as exc:
+            return {"ok": False, "error": f"Falha ao abrir o Quadro Negro: {exc}"}
+
+        # O desfecho vem do gancho, não de uma presunção: `ok: True` fixo aqui
+        # dizia ao modelo que o quadro tinha aberto mesmo quando nada abria (sem
+        # provedor de IA configurado, por exemplo), e ele então repetia isso ao
+        # usuário com confiança.
+        outcome = outcome_from_payload(result)
+        payload: dict[str, Any] = {
+            "ok": outcome.accepted,
+            "opened": outcome.opened,
+            "pending": outcome.pending,
+            "status": outcome.status,
+            "has_graph": graph is not None,
+            "message": outcome.message or message_for(outcome.status, focus),
+        }
+        if not outcome.accepted:
+            payload["error"] = outcome.detail or outcome.message
+        return payload
+
+    def _tool_run_subagent(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Delega a tarefa a um subagente especializado (gancho `subagent_runner`).
+
+        O registro não sabe montar um pipeline — não conhece provedor nem
+        roteador. Ele valida o pedido contra o **catálogo** (que é puro e
+        importável de qualquer lugar) e repassa ao gancho injetado pela camada
+        que tem as peças. Sem gancho — CLI headless, teste — devolve uma
+        mensagem graciosa em vez de quebrar.
+        """
+        specialist = str(args.get("specialist") or args.get("name") or "").strip().lower()
+        data = str(args.get("input") or args.get("data") or args.get("task") or "").strip()
+
+        from .subagents import CATALOG, catalog_names
+
+        if not specialist:
+            return {
+                "ok": False,
+                "error": (
+                    "Informe o especialista. Disponíveis: " + ", ".join(catalog_names()) + "."
+                ),
+            }
+        if specialist not in CATALOG:
+            return {
+                "ok": False,
+                "error": (
+                    f"Especialista desconhecido: '{specialist}'. "
+                    "Disponíveis: " + ", ".join(catalog_names()) + "."
+                ),
+            }
+        if not data:
+            return {
+                "ok": False,
+                "error": "Informe a tarefa (`input`) que o subagente deve executar.",
+            }
+
+        runner = getattr(self, "subagent_runner", None)
+        if runner is None:
+            return {
+                "ok": False,
+                "error": (
+                    "Subagentes não estão disponíveis nesta interface. "
+                    "Execute a tarefa você mesmo, passo a passo."
+                ),
+            }
+
+        try:
+            result = runner(specialist, data)
+        except Exception as exc:  # nenhum gancho pode derrubar o loop
+            logger.exception("Subagente '%s' falhou", specialist)
+            return {"ok": False, "error": f"Falha ao executar o subagente: {exc}"}
+
+        if not isinstance(result, dict):
+            # Sem relatório legível não há como afirmar sucesso — mesma regra do
+            # `board_opener`: não saber o desfecho não é o mesmo que ter dado certo.
+            return {
+                "ok": False,
+                "error": "O subagente não devolveu um relatório legível.",
+            }
+        # O subagente devolve um relatório; o loop precisa dele como observação
+        # legível, não como um dict aninhado que o modelo teria de decifrar.
+        if "ok" not in result:
+            # Gancho que não informa o desfecho não é promovido a sucesso. O
+            # `PipelineResult` real sempre traz `ok`, então isto só vale para um
+            # gancho de outra implementação — e presumir ali é como o defeito nasce.
+            result["ok"] = False
+            result.setdefault("error", "O subagente não informou se concluiu a tarefa.")
+        result.setdefault("specialist", specialist)
+        return result
+
     def _tool_academic_search(self, args: dict[str, Any]) -> dict[str, Any]:
         query = str(args.get("query") or "").strip()
         if not query:
@@ -3306,6 +3844,104 @@ class ToolRegistry:
             logger.exception("Falha ao consultar estado da casa inteligente: %s", exc)
             return {"ok": False, "error": f"Falha ao consultar Home Assistant: {exc}"}
 
+    def _tool_smart_home_automate(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Aciona cenas/scripts/automações ou lista os disponíveis."""
+        action = str(args.get("action") or "").strip().lower()
+        name = str(args.get("name") or "").strip()
+        try:
+            from ..core.home_assistant import HomeAssistantManager
+
+            ha = HomeAssistantManager.get_default()
+            bloqueio = ha.unavailable()
+            if bloqueio:
+                bloqueio["ok"] = False
+                return bloqueio
+
+            if action == "list_scenes":
+                items = ha.list_scenes()
+                return self._format_automation_list(items, "cena", "cenas")
+            if action == "list_scripts":
+                items = ha.list_scripts()
+                return self._format_automation_list(items, "script", "scripts")
+            if action == "list_automations":
+                items = ha.list_automations()
+                return self._format_automation_list(items, "automação", "automações")
+
+            if action == "trigger_scene":
+                res = ha.trigger_scene(scene=name)
+            elif action == "run_script":
+                res = ha.run_script(script=name)
+            elif action == "trigger_automation":
+                res = ha.trigger_automation(automation=name)
+            else:
+                return {
+                    "ok": False,
+                    "error": (
+                        f"Ação '{action}' inválida. Use trigger_scene, run_script, trigger_automation "
+                        "ou list_scenes/list_scripts/list_automations."
+                    ),
+                }
+            res["ok"] = bool(res.get("success", False))
+            return res
+        except Exception as exc:
+            logger.exception("Falha ao acionar cena/script/automação: %s", exc)
+            return {"ok": False, "error": f"Falha ao acionar automação no Home Assistant: {exc}"}
+
+    @staticmethod
+    def _format_automation_list(items: list[dict[str, Any]], singular: str, plural: str) -> dict[str, Any]:
+        if not items:
+            return {"ok": True, "success": True, "count": 0, "items": [], "message": f"Nenhuma {singular} configurada no Home Assistant."}
+        names = [f"{it.get('friendly_name')} ({it.get('entity_id')})" for it in items]
+        return {
+            "ok": True,
+            "success": True,
+            "count": len(items),
+            "items": items,
+            "message": f"{len(items)} {plural} disponíveis: " + "; ".join(names) + ".",
+        }
+
+    def _tool_smart_home_events(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Lista as mudanças de estado recentes captadas em tempo real."""
+        try:
+            from ..core.home_assistant import HomeAssistantManager
+
+            ha = HomeAssistantManager.get_default()
+            bloqueio = ha.unavailable()
+            if bloqueio:
+                bloqueio["ok"] = False
+                return bloqueio
+
+            limit = int(args.get("limit") or 10)
+            domain = str(args.get("domain") or "").strip() or None
+            events = ha.recent_events(limit=limit)
+            if domain:
+                events = [e for e in events if e.get("domain") == domain]
+
+            if not events:
+                status = ha.realtime_status()
+                hint = (
+                    " O canal de eventos em tempo real não está ativo — habilite-o para começar a captar mudanças."
+                    if not status.get("running")
+                    else " Nenhuma mudança de estado registrada ainda."
+                )
+                return {"ok": True, "success": True, "count": 0, "events": [], "message": hint.strip()}
+
+            lines = []
+            for e in events:
+                lines.append(
+                    f"{e.get('friendly_name')}: {e.get('old_state')} → {e.get('state')}"
+                )
+            return {
+                "ok": True,
+                "success": True,
+                "count": len(events),
+                "events": events,
+                "message": "Últimas mudanças de estado:\n• " + "\n• ".join(lines),
+            }
+        except Exception as exc:
+            logger.exception("Falha ao listar eventos da casa inteligente: %s", exc)
+            return {"ok": False, "error": f"Falha ao consultar eventos do Home Assistant: {exc}"}
+
     def _tool_system_control(self, args: dict[str, Any]) -> dict[str, Any]:
         action = str(args.get("action") or "").strip().lower()
         value = str(args.get("value") or "").strip()
@@ -3582,7 +4218,7 @@ class ToolRegistry:
         category = str(args.get("category") or "").strip() or "preferencia"
         if not self.memory:
             return {"ok": False, "success": False, "error": "Gerenciador de memória indisponível."}
-        key = " ".join(fact.lower().split())[:48]
+        key = self.memory.fact_key(fact)
         self.memory.save_fact(key, fact, category=category, source="tool_registry")
         return {
             "ok": True,
@@ -3600,31 +4236,482 @@ class ToolRegistry:
         ok, msg, data = mgr.compose(recip, subject=subj, body=body, client=client)
         return {"ok": ok, "success": ok, "message": msg, "details": data}
 
+    def _google_service_active(self, service: str) -> bool:
+        """O serviço Google está habilitado E conectado?
+
+        A regra de "habilitado" é **importada** de `google_auth.service_enabled` —
+        a mesma que a tela de preferências usa. Uma cópia aqui divergiria em
+        silêncio e o agente recusaria um serviço que a UI mostra como ligado.
+
+        Conservador de propósito: qualquer falha devolve `False`. Para a agenda
+        isso significa cair no calendário local (que funciona sempre) em vez de
+        estourar no meio de um comando de voz.
+        """
+        try:
+            from ..core import google_auth
+            from ..core.config import CopilotConfig
+
+            cfg = CopilotConfig.load()
+            if not google_auth.service_enabled(
+                service,
+                bool(getattr(cfg, "google_enabled", False)),
+                getattr(cfg, "google_enabled_services", None),
+            ):
+                return False
+            return google_auth.is_connected(service)
+        except Exception as exc:
+            logger.debug("Checagem do Google (%s) falhou: %s", service, exc)
+            return False
+
+    def _google_calendar_active(self) -> bool:
+        """Atalho para a agenda (legibilidade e os testes existentes)."""
+        return self._google_service_active("calendar")
+
+    def _mirror_calendar(self, events: list[dict[str, Any]]) -> None:
+        """Espelha no cache local. Falha do cache NUNCA derruba a operação real."""
+        try:
+            from ..core.calendar import CalendarManager
+
+            CalendarManager(memory=self.memory).mirror_events(events)
+        except Exception as exc:
+            logger.debug("Falha ao espelhar eventos no cache local: %s", exc)
+
     def _tool_calendar_event(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Gerencia a agenda. Com o Google conectado, ele é a **fonte de verdade**."""
+        act = str(args.get("action") or "create").strip().lower()
+        if self._google_calendar_active():
+            return self._calendar_event_google(act, args)
+        return self._calendar_event_local(act, args)
+
+    def _calendar_event_google(self, act: str, args: dict[str, Any]) -> dict[str, Any]:
+        from ..core import google_auth
+        from ..core import google_calendar as gcal
+
+        def _int_or(value: Any, default: int) -> int:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
+        try:
+            if act == "create":
+                event = gcal.create_event(
+                    title=str(args.get("title") or "").strip(),
+                    start=str(args.get("datetime_str") or "amanhã às 10h").strip(),
+                    duration_minutes=_int_or(args.get("duration_minutes"), 60),
+                    description=str(args.get("description") or "").strip(),
+                    location=str(args.get("location") or "").strip(),
+                )
+                self._mirror_calendar([event])
+                return {
+                    "ok": True,
+                    "success": True,
+                    "source": "google",
+                    "message": f"Compromisso '{event['title']}' criado na Google Agenda.",
+                    "event": event,
+                }
+            if act == "list":
+                events = gcal.list_events(str(args.get("datetime_str") or "today").strip())
+                self._mirror_calendar(events)
+                return {
+                    "ok": True,
+                    "success": True,
+                    "source": "google",
+                    "events": events,
+                    "count": len(events),
+                    "message": f"{len(events)} compromisso(s) na Google Agenda.",
+                }
+            if act == "update":
+                kwargs: dict[str, Any] = {}
+                if args.get("title") is not None:
+                    kwargs["title"] = str(args.get("title"))
+                if args.get("datetime_str") is not None:
+                    kwargs["start"] = str(args.get("datetime_str"))
+                    kwargs["duration_minutes"] = _int_or(args.get("duration_minutes"), 60)
+                if args.get("description") is not None:
+                    kwargs["description"] = str(args.get("description"))
+                if args.get("location") is not None:
+                    kwargs["location"] = str(args.get("location"))
+                event = gcal.update_event(str(args.get("event_id") or "").strip(), **kwargs)
+                self._mirror_calendar([event])
+                return {
+                    "ok": True,
+                    "success": True,
+                    "source": "google",
+                    "event": event,
+                    "message": f"Compromisso '{event['title']}' atualizado na Google Agenda.",
+                }
+            if act == "delete":
+                event_id = str(args.get("event_id") or "").strip()
+                gcal.delete_event(event_id)
+                try:
+                    from ..core.calendar import CalendarManager
+
+                    CalendarManager(memory=self.memory).delete_event(event_id)
+                except Exception as exc:
+                    logger.debug("Falha ao remover do cache local: %s", exc)
+                return {
+                    "ok": True,
+                    "success": True,
+                    "source": "google",
+                    "message": f"Compromisso {event_id} removido da Google Agenda.",
+                }
+            if act == "freebusy":
+                busy = gcal.freebusy(
+                    str(args.get("datetime_str") or "hoje").strip(),
+                    str(args.get("datetime_end") or "amanhã").strip(),
+                )
+                return {
+                    "ok": True,
+                    "success": True,
+                    "source": "google",
+                    "busy": busy,
+                    "count": len(busy),
+                    "message": f"{len(busy)} intervalo(s) ocupado(s) na Google Agenda.",
+                }
+            return {"ok": False, "success": False, "error": f"Ação de calendário desconhecida: '{act}'"}
+        except google_auth.GoogleAuthError as exc:
+            return {"ok": False, "success": False, "error": str(exc)}
+
+    def _calendar_event_local(self, act: str, args: dict[str, Any]) -> dict[str, Any]:
         from ..core.calendar import CalendarManager
-        act = str(args.get("action") or "create").strip()
+
         mgr = CalendarManager(memory=self.memory)
         if act == "create":
-            t = str(args.get("title") or "").strip()
+            title = str(args.get("title") or "").strip()
             dt_str = str(args.get("datetime_str") or "amanhã às 10h").strip()
             try:
-                dur = int(args.get("duration_minutes") or 60)
+                duration = int(args.get("duration_minutes") or 60)
             except (ValueError, TypeError):
-                dur = 60
-            desc = str(args.get("description") or "").strip()
-            loc = str(args.get("location") or "").strip()
-            ok, msg, data = mgr.create_event(t, dt_str, duration_minutes=dur, description=desc, location=loc)
-            return {"ok": ok, "success": ok, "message": msg, "event": data}
-        elif act == "list":
+                duration = 60
+            description = str(args.get("description") or "").strip()
+            location = str(args.get("location") or "").strip()
+            ok, msg, data = mgr.create_event(
+                title, dt_str, duration_minutes=duration, description=description, location=location
+            )
+            return {"ok": ok, "success": ok, "source": "local", "message": msg, "event": data}
+        if act == "list":
             day = str(args.get("datetime_str") or "today").strip()
             events = mgr.list_events(day)
-            return {"ok": True, "success": True, "events": events, "count": len(events), "message": f"{len(events)} compromisso(s) encontrado(s)."}
-        elif act == "delete":
-            eid = str(args.get("event_id") or "").strip()
-            ok = mgr.delete_event(eid)
-            msg = f"Compromisso {eid} removido." if ok else "Evento não encontrado."
-            return {"ok": ok, "success": ok, "message": msg}
+            return {
+                "ok": True,
+                "success": True,
+                "source": "local",
+                "events": events,
+                "count": len(events),
+                "message": f"{len(events)} compromisso(s) encontrado(s).",
+            }
+        if act == "delete":
+            event_id = str(args.get("event_id") or "").strip()
+            ok = mgr.delete_event(event_id)
+            msg = f"Compromisso {event_id} removido." if ok else "Evento não encontrado."
+            return {"ok": ok, "success": ok, "source": "local", "message": msg}
+        if act in ("update", "freebusy"):
+            # Honestidade: o calendário local não tem esses dados. Melhor dizer
+            # por que não dá do que devolver uma lista vazia que parece sucesso.
+            return {
+                "ok": False,
+                "success": False,
+                "source": "local",
+                "error": (
+                    f"'{act}' exige o Google Agenda conectado (o calendário local não "
+                    "guarda eventos da nuvem). Conecte com: "
+                    "zorin-copilot-cli google connect calendar"
+                ),
+            }
         return {"ok": False, "success": False, "error": f"Ação de calendário desconhecida: '{act}'"}
+
+    def _tool_google_drive(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Gerencia arquivos no Google Drive. Exige o serviço conectado.
+
+        Não há fallback local: o Drive é uma nuvem, e fingir um caminho local
+        seria mentir para o modelo. Sem conexão, o erro é explícito e acionável.
+        """
+        from ..core import google_auth
+        from ..core import google_drive as gdrive
+
+        act = str(args.get("action") or "list").strip().lower()
+
+        if not google_auth.google_libs_available():
+            return {
+                "ok": False,
+                "success": False,
+                "error": (
+                    "As bibliotecas do Google não estão instaladas. "
+                    "Instale com: pip install 'zorin-copilot[google]'"
+                ),
+            }
+        if not self._google_service_active("drive"):
+            return {
+                "ok": False,
+                "success": False,
+                "error": (
+                    "O Google Drive não está conectado. "
+                    "Conecte com: zorin-copilot-cli google connect drive"
+                ),
+            }
+
+        def _limit() -> int:
+            try:
+                return max(1, int(args.get("max_results") or 25))
+            except (TypeError, ValueError):
+                return 25
+
+        try:
+            if act in ("list", "search"):
+                if act == "search":
+                    files = gdrive.search(str(args.get("query") or ""), max_results=_limit())
+                else:
+                    files = gdrive.list_files(
+                        query=(args.get("query") or None), max_results=_limit()
+                    )
+                return {
+                    "ok": True,
+                    "success": True,
+                    "source": "google",
+                    "files": files,
+                    "count": len(files),
+                    "message": f"{len(files)} arquivo(s) no Google Drive.",
+                }
+            if act == "get":
+                info = gdrive.get_file(str(args.get("file_id") or ""))
+                return {
+                    "ok": True,
+                    "success": True,
+                    "source": "google",
+                    "file": info,
+                    "message": f"Arquivo '{info['name']}'.",
+                }
+            if act == "upload":
+                info = gdrive.upload(
+                    str(args.get("path") or ""),
+                    name=(args.get("name") or None),
+                    folder_id=(args.get("folder_id") or None),
+                )
+                return {
+                    "ok": True,
+                    "success": True,
+                    "source": "google",
+                    "file": info,
+                    "message": f"Arquivo '{info['name']}' enviado ao Drive.",
+                }
+            if act == "download":
+                dest = gdrive.download(
+                    str(args.get("file_id") or ""), str(args.get("path") or "")
+                )
+                return {
+                    "ok": True,
+                    "success": True,
+                    "source": "google",
+                    "path": dest,
+                    "message": f"Arquivo baixado para {dest}.",
+                }
+            if act == "mkdir":
+                info = gdrive.create_folder(
+                    str(args.get("name") or ""), parent_id=(args.get("folder_id") or None)
+                )
+                return {
+                    "ok": True,
+                    "success": True,
+                    "source": "google",
+                    "file": info,
+                    "message": f"Pasta '{info['name']}' criada no Drive.",
+                }
+            if act == "move":
+                info = gdrive.move(
+                    str(args.get("file_id") or ""), str(args.get("folder_id") or "")
+                )
+                return {
+                    "ok": True,
+                    "success": True,
+                    "source": "google",
+                    "file": info,
+                    "message": f"'{info['name']}' movido no Drive.",
+                }
+            if act == "rename":
+                info = gdrive.rename(
+                    str(args.get("file_id") or ""), str(args.get("new_name") or "")
+                )
+                return {
+                    "ok": True,
+                    "success": True,
+                    "source": "google",
+                    "file": info,
+                    "message": f"Arquivo renomeado para '{info['name']}'.",
+                }
+            if act == "trash":
+                file_id = str(args.get("file_id") or "").strip()
+                gdrive.trash(file_id)
+                return {
+                    "ok": True,
+                    "success": True,
+                    "source": "google",
+                    "message": f"Arquivo {file_id} movido para a lixeira do Drive.",
+                }
+            if act == "delete":
+                file_id = str(args.get("file_id") or "").strip()
+                gdrive.delete_permanently(file_id)
+                return {
+                    "ok": True,
+                    "success": True,
+                    "source": "google",
+                    "message": f"Arquivo {file_id} apagado DEFINITIVAMENTE do Drive.",
+                }
+            return {"ok": False, "success": False, "error": f"Ação de Drive desconhecida: '{act}'"}
+        except google_auth.GoogleAuthError as exc:
+            return {"ok": False, "success": False, "error": str(exc)}
+
+    def _tool_google_gmail(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Gerencia o Gmail. Envio exige revisão prévia e confirmação do usuário.
+
+        A ordem exigida é: `review` → mostrar ao usuário → ele confirma → `send`
+        com `reviewed=true`. O `reviewed=true` é **exigido em código**, não só
+        pedido no texto da ferramenta: sem ele, o envio é recusado.
+        """
+        from ..core import email_review
+        from ..core import google_auth
+        from ..core import google_gmail as gmail
+
+        act = str(args.get("action") or "list").strip().lower()
+
+        # `review` não fala com o Gmail — só com o provedor de IA. Por isso vem
+        # ANTES da checagem de conexão: revisar não depende do Gmail conectado.
+        if act == "review":
+            result = email_review.review_draft(
+                str(args.get("subject") or ""),
+                str(args.get("body") or ""),
+                context=str(args.get("context") or ""),
+            )
+            return {
+                "ok": True,
+                "success": True,
+                "reviewed": result.reviewed,
+                "subject": result.subject,
+                "body": result.body,
+                "changes": result.changes,
+                "issues": result.issues,
+                "note": result.note,
+                "message": (
+                    f"Revisão concluída: {len(result.changes)} correção(ões) sugerida(s)."
+                    if result.reviewed
+                    else result.note
+                ),
+            }
+
+        if not google_auth.google_libs_available():
+            return {
+                "ok": False,
+                "success": False,
+                "error": (
+                    "As bibliotecas do Google não estão instaladas. "
+                    "Instale com: pip install 'zorin-copilot[google]'"
+                ),
+            }
+        if not self._google_service_active("gmail"):
+            return {
+                "ok": False,
+                "success": False,
+                "error": (
+                    "O Gmail não está conectado. "
+                    "Conecte com: zorin-copilot-cli google connect gmail"
+                ),
+            }
+
+        def _limit() -> int:
+            try:
+                return max(1, int(args.get("max_results") or 25))
+            except (TypeError, ValueError):
+                return 25
+
+        try:
+            if act == "list":
+                messages = gmail.list_messages(
+                    query=(args.get("query") or None), max_results=_limit()
+                )
+                return {
+                    "ok": True,
+                    "success": True,
+                    "source": "google",
+                    "messages": messages,
+                    "count": len(messages),
+                    "message": f"{len(messages)} mensagem(ns) encontrada(s).",
+                }
+            if act == "get":
+                info = gmail.get_message(str(args.get("message_id") or ""))
+                return {
+                    "ok": True,
+                    "success": True,
+                    "source": "google",
+                    "message_info": info,
+                    "message": f"Assunto: '{info['subject']}' — de {info['from']}.",
+                }
+            if act == "labels":
+                labels = gmail.list_labels()
+                return {
+                    "ok": True,
+                    "success": True,
+                    "source": "google",
+                    "labels": labels,
+                    "count": len(labels),
+                    "message": f"{len(labels)} rótulo(s).",
+                }
+            if act == "draft":
+                draft = gmail.create_draft(
+                    str(args.get("to") or ""),
+                    str(args.get("subject") or ""),
+                    str(args.get("body") or ""),
+                    cc=(args.get("cc") or None),
+                )
+                return {
+                    "ok": True,
+                    "success": True,
+                    "source": "google",
+                    "draft": draft,
+                    "message": "Rascunho criado no Gmail (não enviado).",
+                }
+            if act == "send":
+                # Etapa de revisão exigida em CÓDIGO, não só no texto da ferramenta.
+                if not args.get("reviewed"):
+                    return {
+                        "ok": False,
+                        "success": False,
+                        "error": (
+                            "Envio bloqueado: revise o rascunho primeiro "
+                            "(action='review' com o 'context'), mostre o texto ao usuário, "
+                            "e só depois de ele confirmar chame 'send' com reviewed=true."
+                        ),
+                    }
+                sent = gmail.send_message(
+                    str(args.get("to") or ""),
+                    str(args.get("subject") or ""),
+                    str(args.get("body") or ""),
+                    cc=(args.get("cc") or None),
+                )
+                return {
+                    "ok": True,
+                    "success": True,
+                    "source": "google",
+                    "sent": sent,
+                    "message": f"E-mail enviado para {args.get('to')}.",
+                }
+            if act in ("mark_read", "mark_unread"):
+                message_id = str(args.get("message_id") or "").strip()
+                if act == "mark_read":
+                    result = gmail.mark_read(message_id)
+                    text = "marcada como lida"
+                else:
+                    result = gmail.mark_unread(message_id)
+                    text = "marcada como não lida"
+                return {
+                    "ok": True,
+                    "success": True,
+                    "source": "google",
+                    "labels": result.get("labels", []),
+                    "message": f"Mensagem {message_id} {text}.",
+                }
+            return {"ok": False, "success": False, "error": f"Ação de Gmail desconhecida: '{act}'"}
+        except google_auth.GoogleAuthError as exc:
+            return {"ok": False, "success": False, "error": str(exc)}
 
     def _tool_browser_search(self, args: dict[str, Any]) -> dict[str, Any]:
         from ..core.browser import BrowserManager
@@ -3717,15 +4804,37 @@ class ToolRegistry:
         researcher = DeepWebResearcher(WebSearchClient())
         res = researcher.deep_search(q)
         is_ok = bool(res.get("success"))
-        return {
+        # `synthesis` diz de onde veio o relatório: "llm" (escrito pelo modelo) ou
+        # "offline" (compilação de trechos feita pelo app). Sem este campo o modelo
+        # apresentava a compilação como se fosse análise própria. Esta rota não passa
+        # provedor, então hoje é sempre "offline" — mas o campo não pode depender disso.
+        synthesis = str(res.get("synthesis") or "")
+        pages_read = int(res.get("pages_read") or 0)
+        pages_total = int(res.get("pages_total") or 0)
+        payload: dict[str, Any] = {
             "ok": is_ok,
             "success": is_ok,
             "query": q,
             "summary": res.get("summary", ""),
             "sources": res.get("sources", []),
             "report": res.get("report", ""),
-            "message": f"Pesquisa profunda sobre '{q}' concluída." if is_ok else res.get("summary", "Falha na pesquisa profunda."),
+            "synthesis": synthesis,
+            "pages_read": pages_read,
+            "pages_total": pages_total,
         }
+        if not is_ok:
+            payload["message"] = res.get("summary", "Falha na pesquisa profunda.")
+            payload["error"] = res.get("error") or res.get("summary") or "Falha na pesquisa profunda."
+            return payload
+        if synthesis == "offline":
+            payload["message"] = (
+                f"Pesquisa profunda sobre '{q}' concluída SEM síntese por IA: "
+                f"{pages_read} de {pages_total} fontes lidas por inteiro. O relatório é uma "
+                f"compilação de trechos das fontes — apresente-o como tal, não como análise própria."
+            )
+        else:
+            payload["message"] = f"Pesquisa profunda sobre '{q}' concluída."
+        return payload
 
     def _tool_done(self, args: dict[str, Any]) -> dict[str, Any]:
         return {"ok": True, "answer": str(args.get("answer") or ""), "finished": True}
@@ -3864,6 +4973,86 @@ class ToolRegistry:
             logger.warning("Falha ao escanear LAN: %s", exc)
             return {"ok": False, "error": f"Falha ao escanear dispositivos na LAN: {exc}"}
 
+    def _tool_network_discover_lan(self, args: dict[str, Any]) -> dict[str, Any]:
+        cidr = str(args.get("cidr") or "").strip()
+        try:
+            from ..core.network_inspector import NetworkInspector
+
+            if not cidr:
+                cidr = NetworkInspector.local_subnet_cidr() or "192.168.1.0/24"
+            devices = NetworkInspector.scan_subnet(cidr)
+            safe_summary = NetworkInspector.to_safe_summary(neighbors=devices)
+            return {
+                "ok": True,
+                "cidr": cidr,
+                "device_count": len(devices),
+                "devices": safe_summary.get("lan_devices", []),
+            }
+        except Exception as exc:
+            logger.warning("Falha na descoberta ativa de LAN: %s", exc)
+            return {"ok": False, "error": f"Falha na descoberta ativa da LAN: {exc}"}
+
+    def _tool_network_identify_device(self, args: dict[str, Any]) -> dict[str, Any]:
+        ip = str(args.get("ip") or "").strip()
+        if not ip:
+            return {"ok": False, "error": "O parâmetro 'ip' é obrigatório."}
+        try:
+            from ..core.network_inspector import NetworkInspector
+
+            result = NetworkInspector.identify_device(ip)
+            # Não expõe o MAC cru: mascara antes de devolver ao modelo.
+            if result.get("mac"):
+                result["mac_masked"] = NetworkInspector.mask_mac(result["mac"])
+                result.pop("mac", None)
+            return result
+        except Exception as exc:
+            logger.warning("Falha ao identificar dispositivo: %s", exc)
+            return {"ok": False, "error": f"Falha ao identificar o dispositivo: {exc}"}
+
+    def _tool_network_watch_lan(self, args: dict[str, Any]) -> dict[str, Any]:
+        cidr = str(args.get("cidr") or "").strip() or None
+        try:
+            from ..core.network_inspector import NetworkInspector
+
+            result = NetworkInspector.monitor_lan(cidr=cidr)
+            # O monitor_lan já mascara os MACs nos device lists; garantia extra de
+            # que nenhum MAC cru escapa ao modelo.
+            return result
+        except Exception as exc:
+            logger.warning("Falha ao monitorar a LAN: %s", exc)
+            return {"ok": False, "error": f"Falha ao monitorar a LAN: {exc}"}
+
+    def _tool_network_establish_baseline(self, args: dict[str, Any]) -> dict[str, Any]:
+        cidr = str(args.get("cidr") or "").strip() or None
+        try:
+            from ..core.network_inspector import NetworkInspector
+
+            result = NetworkInspector.establish_baseline(cidr=cidr)
+            return result
+        except Exception as exc:
+            logger.warning("Falha ao estabelecer baseline: %s", exc)
+            return {"ok": False, "error": f"Falha ao estabelecer o baseline: {exc}"}
+
+    def _tool_network_block_device(self, args: dict[str, Any]) -> dict[str, Any]:
+        ip = str(args.get("ip") or "").strip() or None
+        mac = str(args.get("mac") or "").strip() or None
+        action = str(args.get("action") or "block").strip() or "block"
+        try:
+            from ..core.network_actions import NetworkBlocker
+            from ..core.network_inspector import DeviceInventory
+
+            blocker = NetworkBlocker()
+            # Inventário local para resolver IP -> MAC real (privado; não exposto ao modelo).
+            inventory = DeviceInventory()
+            result = blocker.request_block(
+                mac=mac, ip=ip, action=action, inventory=inventory
+            )
+            # O blocker já mascara o MAC na resposta; reforço de que nenhum MAC cru escapa.
+            return result
+        except Exception as exc:
+            logger.warning("Falha ao conter dispositivo: %s", exc)
+            return {"ok": False, "error": f"Falha ao conter o dispositivo: {exc}"}
+
     def _tool_local_services_list(self, args: dict[str, Any]) -> dict[str, Any]:
         proto = str(args.get("protocol") or "all").strip().lower()
         try:
@@ -3912,12 +5101,66 @@ class ToolRegistry:
         force = bool(args.get("force", False))
         try:
             from ..core.network_actions import release_local_port
+            from ..core.network_inspector import NetworkInspector
+            from ..core.port_termination import confirm_port_freed
+
+            # Descobre protocolo/interface antes de encerrar, para confirmar corretamente.
+            protocol = "tcp"
+            ip_binding: str | None = None
+            try:
+                for lp in NetworkInspector.get_listening_ports():
+                    if lp.port == port:
+                        protocol = lp.protocol or "tcp"
+                        ip_binding = lp.ip_binding
+                        break
+            except Exception:
+                pass
 
             ok, msg, meta = release_local_port(port, force=force)
-            return {"ok": ok, "message": msg, "details": meta}
+
+            # S6: confirma se a porta foi de fato liberada (somente leitura).
+            report = confirm_port_freed(
+                port,
+                protocol,
+                expected_pid=(meta or {}).get("pid"),
+                expected_process=(meta or {}).get("process"),
+                ip_binding=ip_binding,
+            )
+            return {
+                "ok": ok,
+                "message": msg,
+                "freed": report.freed,
+                "confirmation": report.summary,
+                "details": meta,
+            }
         except Exception as exc:
             logger.warning("Falha em network_release_port: %s", exc)
             return {"ok": False, "error": f"Erro ao liberar porta: {exc}"}
+
+    def _tool_network_confirm_port(self, args: dict[str, Any]) -> dict[str, Any]:
+        try:
+            port = int(args.get("port", 0))
+        except (ValueError, TypeError):
+            return {"ok": False, "error": "Argumento 'port' deve ser um número inteiro válido."}
+        protocol = str(args.get("protocol") or "tcp").strip().lower()
+        if protocol not in ("tcp", "udp"):
+            protocol = "tcp"
+        try:
+            from ..core.port_termination import confirm_port_freed
+
+            report = confirm_port_freed(port, protocol)
+            return {
+                "ok": True,
+                "freed": report.freed,
+                "summary": report.summary,
+                "pid_state": report.pid_state.value,
+                "port_state": report.port_state.value,
+                "occupying_pid": report.occupying_pid,
+                "next_steps": report.next_steps,
+            }
+        except Exception as exc:
+            logger.warning("Falha em network_confirm_port: %s", exc)
+            return {"ok": False, "error": f"Erro ao verificar porta: {exc}"}
 
     def _tool_network_probe_service(self, args: dict[str, Any]) -> dict[str, Any]:
         host = str(args.get("host") or "").strip()

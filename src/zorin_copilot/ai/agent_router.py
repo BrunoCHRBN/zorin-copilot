@@ -20,6 +20,24 @@ from typing import Any, Iterable, Sequence
 
 from .agent import AgentDecision, ToolCall
 from .agent_tools import FINISH_TOOLS
+from .provider_failure import failure_reason, is_provider_failure
+
+
+def _text_of_provider_response(res: object) -> str:
+    """Extrai o TEXTO de uma resposta de provedor, seja qual for o formato.
+
+    `chat()` devolve `(texto, ações)`; um provedor estrangeiro pode devolver um
+    objeto com `.content`. O código anterior caía em `str(res)`, que para a tupla
+    produz `"('Não foi possível obter resposta do Gemini: …', [])"` — uma string que
+    começa com `"('"`. Consequências: a detecção de falha nunca casava (o prefixo não
+    está no começo) e a extração de JSON só funcionava por sorte, procurando o objeto
+    em qualquer posição. Aqui a tupla é desmontada antes.
+    """
+    if isinstance(res, str):
+        return res
+    if isinstance(res, (tuple, list)) and res:
+        return _text_of_provider_response(res[0])
+    return getattr(res, "content", str(res))
 
 logger = logging.getLogger(__name__)
 
@@ -219,9 +237,10 @@ _DOLPHIN_AGENT_INSTRUCTION = (
 class LLMPlanner:
     """Planejador que usa qualquer `BaseLLMProvider` (Ollama, Gemini, OpenAI...)."""
 
-    def __init__(self, provider: Any, name: str = "llm") -> None:
+    def __init__(self, provider: Any, name: str = "llm", trust_manager: Any | None = None) -> None:
         self.provider = provider
         self.name = name
+        self.trust_manager = trust_manager
 
     def decide(
         self,
@@ -235,20 +254,29 @@ class LLMPlanner:
         is_dolphin = "dolphin" in model_name or "dolphin" in self.name.lower()
         sys_inst = _DOLPHIN_AGENT_INSTRUCTION if is_dolphin else _SYSTEM_INSTRUCTION
         prompt = build_planner_prompt(
-            objective, tools, history, session_context=session_context, max_steps=max_steps, system_instruction=sys_inst
+            objective, tools, history, session_context=session_context, max_steps=max_steps,
+            system_instruction=sys_inst, trust_manager=self.trust_manager,
         )
         try:
             if hasattr(self.provider, "complete"):
                 raw = self.provider.complete(prompt, system_prompt=sys_inst, json_mode=True)
             else:
                 res = self.provider.chat([{"role": "user", "content": prompt}] if isinstance(prompt, str) else prompt)
-                raw = res if isinstance(res, str) else getattr(res, "content", str(res))
+                raw = _text_of_provider_response(res)
         except Exception as exc:
             return AgentDecision(error=f"Provedor '{self.name}' falhou: {exc}")
 
         raw = (raw or "").strip()
         if not raw:
             return AgentDecision(error=f"Provedor '{self.name}' respondeu vazio.")
+
+        # A falha do provedor chega aqui como TEXTO, não por exceção (ver
+        # `provider_failure.py`). Sem esta checagem o caminho falhava em segurança — a
+        # frase não é JSON, então o parse abaixo devolvia erro — mas o motivo exibido
+        # era "não era JSON utilizável", que manda investigar o formato quando o
+        # problema real é cota/credencial. O veredito é o mesmo; a causa, não.
+        if is_provider_failure(raw):
+            return AgentDecision(error=f"Provedor '{self.name}' falhou: {failure_reason(raw)}")
 
         parsed = extract_json_object(raw)
         if parsed is None:
@@ -270,6 +298,7 @@ def build_planner_prompt(
     session_context: Sequence[dict[str, str]] | None = None,
     max_steps: int | None = None,
     system_instruction: str = _SYSTEM_INSTRUCTION,
+    trust_manager: Any | None = None,
 ) -> str:
     """Monta o prompt de um passo com suporte a contexto conversacional de turnos anteriores."""
     lines = [
@@ -312,7 +341,12 @@ def build_planner_prompt(
             # são comprimidos (600 caracteres) para preservar a janela de contexto.
             recency = total_steps - idx_entry
             clip_limit = 3500 if recency <= 4 else 600
-            lines.append(f"{index}. {tool}({args}) -> {ok}: {_clip(observation, clip_limit)}")
+            clipped = _clip(observation, clip_limit)
+            # Marca observações de fontes externas (arquivo, web, tela, comando) como
+            # não confiáveis para mitigar injeção indireta de prompt (ver
+            # core/trust.DocumentTrustManager.sanitize_tool_observation).
+            safe_obs = trust_manager.sanitize_tool_observation(tool, clipped) if trust_manager else clipped
+            lines.append(f"{index}. {tool}({args}) -> {ok}: {safe_obs}")
     else:
         lines.append("")
         lines.append("HISTÓRICO: nenhuma ação executada ainda neste objetivo.")
@@ -452,6 +486,8 @@ def decision_from_json(payload: dict[str, Any]) -> AgentDecision:
         return AgentDecision(
             tool_call=ToolCall(name=name, args=dict(args or {}), rationale=rationale),
             final_answer=answer,
+            preconditions=list(payload.get("preconditions") or []),
+            postconditions=list(payload.get("postconditions") or []),
         )
     if answer:
         return AgentDecision(final_answer=answer)
@@ -531,10 +567,31 @@ class AgentRouter:
         *,
         local_planner: Any | None = None,
         cloud_planner: Any | None = None,
+        trust_manager: Any | None = None,
     ) -> None:
         self.config = config
         self._local = local_planner
         self._cloud = cloud_planner
+        self._trust = trust_manager
+
+    def _trust_manager(self) -> Any | None:
+        """Devolve o ``DocumentTrustManager`` a usar, criando um por padrão.
+
+        O padrão-ao-criar (em vez de ``None``) garante que as observações do
+        agente sejam marcadas como não confiáveis mesmo quando o chamador não
+        passou um gerenciador explícito. Se a criação falhar (ex.: ambiente de
+        teste sem config), degrada para ``None`` (sem envoltório) em vez de quebrar.
+        """
+        if self._trust is not None:
+            return self._trust
+        try:
+            from ..core.trust import DocumentTrustManager
+
+            self._trust = DocumentTrustManager()
+        except Exception as exc:  # pragma: no cover - depende de ambiente
+            logger.debug("TrustManager indisponível: %s", exc)
+            self._trust = None
+        return self._trust
 
     # -- construção sob demanda -------------------------------------------- #
 
@@ -554,7 +611,7 @@ class AgentRouter:
         except Exception as exc:
             logger.debug("Provedor local indisponível: %s", exc)
             return None
-        self._local = LLMPlanner(provider, name="local")
+        self._local = LLMPlanner(provider, name="local", trust_manager=self._trust_manager())
         return self._local
 
     def cloud_planner(self) -> Any | None:
@@ -580,7 +637,7 @@ class AgentRouter:
             return None
         if provider is None:
             return None
-        self._cloud = LLMPlanner(provider, name="cloud")
+        self._cloud = LLMPlanner(provider, name="cloud", trust_manager=self._trust_manager())
         return self._cloud
 
     # -- seleção ------------------------------------------------------------- #

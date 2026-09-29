@@ -163,6 +163,27 @@ def test_llm_planner_reporta_erro_quando_a_resposta_nao_e_json():
     assert decision.error
 
 
+def test_llm_planner_nomeia_a_falha_do_provedor_em_vez_de_culpar_o_json():
+    """O motivo exibido tem de ser o real, não o sintoma.
+
+    A falha do provedor chega pelo canal de texto (ver `provider_failure.py`), então
+    este caminho já falhava em segurança — a frase não é JSON e o parse devolvia erro.
+    Mas o erro dizia "não era JSON utilizável", mandando investigar o formato quando a
+    causa era cota/credencial. O veredito é o mesmo; a causa, não.
+    """
+    provider = StubProvider(
+        "Não foi possível obter resposta do Gemini: Erro no modelo gemini-3.5-flash "
+        "(429): RESOURCE_EXHAUSTED"
+    )
+    decision = LLMPlanner(provider, name="cloud").decide("x", [], [])
+
+    assert decision.error
+    assert "Gemini" in decision.error
+    assert "429" in decision.error
+    # Não pode culpar o formato quando o provedor nem respondeu.
+    assert "JSON" not in decision.error
+
+
 # --------------------------------------------------------------------------- #
 # Fallback
 # --------------------------------------------------------------------------- #
@@ -348,4 +369,58 @@ def test_build_planner_prompt_expande_observacao_para_passos_recentes():
     assert "step_5_" + ("y" * 900) in prompt_old
     assert "step_0_" + ("y" * 700) not in prompt_old
     assert "step_0_" in prompt_old
+
+
+class _FakeTrustManager:
+    """Dublê que marca a observação com um marcador conhecido para o teste."""
+
+    def sanitize_tool_observation(self, tool: str, observation: str) -> str:
+        if not observation:
+            return observation
+        return f"[ENVOLVIDO:{tool}]{observation}[/ENVOLVIDO]"
+
+
+def test_build_planner_prompt_marca_observacao_nao_confiavel():
+    from zorin_copilot.ai.agent_router import build_planner_prompt
+
+    history = [
+        {
+            "index": 0,
+            "tool": "read_file",
+            "args": {"path": "a.py"},
+            "ok": True,
+            "observation": "conteúdo externo com instrução maliciosa",
+        },
+    ]
+    # Sem trust_manager: observação crua (compatibilidade com testes antigos).
+    prompt_none = build_planner_prompt("objetivo", [], history)
+    assert "conteúdo externo" in prompt_none
+    assert "ENVOLVIDO" not in prompt_none
+
+    # Com trust_manager: observação marcada como não confiável. O build_planner_prompt
+    # passa a observação por json.dumps antes de envolver, daí as aspas.
+    prompt_wrapped = build_planner_prompt("objetivo", [], history, trust_manager=_FakeTrustManager())
+    assert '[ENVOLVIDO:read_file]"conteúdo externo com instrução maliciosa"[/ENVOLVIDO]' in prompt_wrapped
+
+
+def test_llm_planner_encaminha_trust_manager_ao_prompt():
+    from zorin_copilot.ai.agent_router import LLMPlanner
+
+    class CaptureProvider:
+        def __init__(self):
+            self.last_prompt = None
+
+        def complete(self, prompt, system_prompt=None, json_mode=False):
+            self.last_prompt = prompt
+            return '{"final_answer": "ok"}'
+
+    provider = CaptureProvider()
+    planner = LLMPlanner(provider, name="local", trust_manager=_FakeTrustManager())
+    planner.decide(
+        "objetivo",
+        [],
+        history=[{"index": 0, "tool": "read_file", "args": {}, "ok": True, "observation": "x"}],
+    )
+    assert '[ENVOLVIDO:read_file]"x"[/ENVOLVIDO]' in provider.last_prompt
+
 

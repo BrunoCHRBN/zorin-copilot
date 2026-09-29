@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 
 import pytest
@@ -39,7 +40,11 @@ class StubRegistry(ToolRegistry):
         self.default = default or {"ok": True, "message": "feito"}
         self.calls: list[tuple[str, dict]] = []
 
-    def call(self, name: str, args: dict | None = None) -> dict:
+    def call(self, name: str, args: dict | None = None, contract=None) -> dict:
+        # `contract` é opaco aqui, como em `ToolRegistry.call`: é o gancho que
+        # registros validadores usam. O stub precisa espelhar a assinatura da
+        # base, senão `AgentLoop` — que sempre repassa o contrato do passo —
+        # quebra com TypeError em vez de exercitar o laço.
         self.calls.append((name, dict(args or {})))
         if name in self.results:
             return dict(self.results[name])
@@ -51,9 +56,9 @@ class SleepyRegistry(StubRegistry):
         super().__init__()
         self.delay = delay
 
-    def call(self, name, args=None):
+    def call(self, name, args=None, contract=None):
         time.sleep(self.delay)
-        return super().call(name, args)
+        return super().call(name, args, contract=contract)
 
 
 class FakeMemory:
@@ -159,7 +164,10 @@ def test_falha_seguida_de_sucesso_nao_dispara_repeticao():
     registry.results = {}
     calls = {"n": 0}
 
-    def alternar(name, args=None):
+    def alternar(name, args=None, contract=None):
+        # `contract` faz parte da assinatura de `ToolRegistry.call`; o
+        # `AgentLoop` sempre o repassa, então um substituto que não o aceite
+        # quebra com TypeError antes de exercitar a lógica de repetição.
         calls["n"] += 1
         return {"ok": calls["n"] % 2 == 1, "error": "falha alternada"}
 
@@ -291,6 +299,50 @@ def test_reset_permite_nova_execucao_apos_aborto():
     loop.reset()
     result = loop.run("x")
     assert result.success is True
+
+
+class SleepyPlanner:
+    """Encapsula um `ScriptedPlanner` e dorme antes de cada `decide`.
+
+    Serve para exercitar o aborto cooperativo quando o planejador está no meio
+    de uma chamada demorada: o sinal de parada só é visto no topo do `while`
+    (agent.py), depois que o `decide` atual devolve.
+    """
+
+    name = "sonolento"
+
+    def __init__(self, decisions, delay: float = 2.0) -> None:
+        self.inner = ScriptedPlanner(list(decisions))
+        self.delay = delay
+
+    def decide(self, objective, tools, history, session_context=None):
+        time.sleep(self.delay)
+        return self.inner.decide(objective, tools, history, session_context=session_context)
+
+
+def test_abort_encerra_ate_quando_planejador_dorme():
+    """Defeito 1 / Frente A.1: o aborto cooperativo interrompe mesmo com o
+    planejador dormindo dentro de `decide()` — não travado para sempre."""
+    registry = StubRegistry()
+    planner = SleepyPlanner([ToolCall("noop")] * 5, delay=2.0)
+    loop = AgentLoop(planner, registry, max_steps=10, max_seconds=300.0)
+
+    captured: dict[str, object] = {}
+
+    def target():
+        captured["result"] = loop.run("x")
+
+    t = threading.Thread(target=target, daemon=True)
+    t.start()
+    # Deixa o planejador entrar em `decide` (dormindo) antes de abortar.
+    time.sleep(0.2)
+    loop.abort()
+    t.join(timeout=3.0)
+
+    assert not t.is_alive(), "o loop não encerrou após o aborto (travou)"
+    result = captured["result"]
+    assert result is not None
+    assert result.stop_reason == STOP_ABORTED
 
 
 # --------------------------------------------------------------------------- #

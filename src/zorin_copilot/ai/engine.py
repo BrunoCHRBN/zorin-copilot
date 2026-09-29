@@ -14,6 +14,7 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 from .actions import ActionPlan, ActionType, DesktopAction
+from .provider_failure import failure_reason, is_provider_failure
 from .providers import BaseLLMProvider, get_llm_provider
 from ..core.academic_hub import AcademicHub
 from ..core.a11y import DesktopInspector
@@ -500,7 +501,9 @@ class IntentEngine:
         )
         if learn_match:
             fact_content = learn_match.group(1).strip()
-            fact_key = f"fato_{int(time.time())}"
+            # Chave derivada do conteúdo (não do relógio): a mesma frase salva
+            # duas vezes atualiza a linha existente em vez de criar outra.
+            fact_key = self.memory.fact_key(fact_content)
             self.memory.save_fact(fact_key, fact_content, category="usuario", source="usuario")
             return ActionPlan(
                 thought=(
@@ -1173,7 +1176,18 @@ class IntentEngine:
                             f"[SOLICITAÇÃO DO USUÁRIO]:\n{prompt_clean}"
                         )
                         explanation, _ = self.llm_provider.chat(read_prompt)
-                        return ActionPlan(thought=explanation, actions=actions)
+                        if is_provider_failure(explanation):
+                            # A frase de erro do provedor chega no canal de texto, não
+                            # por exceção (ver `provider_failure.py`), então o `except`
+                            # abaixo não a pega. Devolvê-la como `thought` faria o app
+                            # responder a leitura da página com a mensagem de cota
+                            # esgotada, pulando o `thought` determinístico logo abaixo.
+                            logger.warning(
+                                "Leitura da página sem síntese por IA: %s",
+                                failure_reason(explanation),
+                            )
+                        else:
+                            return ActionPlan(thought=explanation, actions=actions)
                     except Exception as exc:
                         logger.warning(f"Erro ao processar conteúdo da página com LLM: {exc}")
 

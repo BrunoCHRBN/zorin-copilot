@@ -78,6 +78,10 @@ class AgentDecision:
     tool_call: ToolCall | None = None
     final_answer: str = ""
     error: str = ""
+    #: Pré/pós-condições do passo (preenchidas por planners conscientes da tela,
+    #: ex.: VisionLLMPlanner). Usadas pelo ValidatingToolRegistry para validar.
+    preconditions: list[str] = field(default_factory=list)
+    postconditions: list[str] = field(default_factory=list)
 
 
 class AgentPlanner(Protocol):
@@ -105,11 +109,15 @@ class Step:
     rationale: str = ""
     risk: str = "safe"
     requires_approval: bool = False
+    #: Passo ``AUTO``: já executou sem pergunta e deve ser avisado depois — não pede clique.
+    notify_after: bool = False
     approved: bool | None = None
     ok: bool | None = None
     observation: Any = None
     error: str = ""
     elapsed: float = 0.0
+    #: Contrato do passo (intent + pré/pós-condições) quando o planner o preenche.
+    contract: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -119,11 +127,13 @@ class Step:
             "rationale": self.rationale,
             "risk": self.risk,
             "requires_approval": self.requires_approval,
+            "notify_after": self.notify_after,
             "approved": self.approved,
             "ok": self.ok,
             "observation": self.observation,
             "error": self.error,
             "elapsed": self.elapsed,
+            "contract": self.contract,
         }
 
     @classmethod
@@ -135,11 +145,13 @@ class Step:
             rationale=str(data.get("rationale", "")),
             risk=str(data.get("risk", "safe")),
             requires_approval=bool(data.get("requires_approval", False)),
+            notify_after=bool(data.get("notify_after", False)),
             approved=data.get("approved"),
             ok=data.get("ok"),
             observation=data.get("observation"),
             error=str(data.get("error", "")),
             elapsed=float(data.get("elapsed", 0.0)),
+            contract=data.get("contract"),
         )
 
 
@@ -356,7 +368,7 @@ class AgentLoop:
                     )
 
                 call = decision.tool_call
-                step = self._new_step(len(steps), call, registry)
+                step = self._new_step(len(steps), call, registry, decision)
                 if step is None:
                     return self._finish(
                         steps,
@@ -389,7 +401,10 @@ class AgentLoop:
                             steps, objective, STOP_REJECTED, started, dry_run, error=step.error
                         )
 
-                observation = registry.call(step.tool, step.args)
+                # `contract` carrega pré/pós-condições do passo (quando o planner as
+                # preenche). Registros validadores (ex.: ValidatingToolRegistry) o
+                # usam para conferir o estado da tela; registros comuns o ignoram.
+                observation = registry.call(step.tool, step.args, contract=step.contract)
                 step.ok = bool(observation.get("ok"))
                 step.observation = observation
                 if not step.ok:
@@ -488,12 +503,27 @@ class AgentLoop:
             logger.debug("Falha na síntese pós-limite de passos", exc_info=True)
         return ""
 
-    def _new_step(self, index: int, call: ToolCall, registry: ToolRegistry) -> Step | None:
+    def _new_step(
+        self,
+        index: int,
+        call: ToolCall,
+        registry: ToolRegistry,
+        decision: "AgentDecision | None" = None,
+    ) -> Step | None:
         """Monta o passo. `None` = ferramenta de encerramento (`done`/`finish`)."""
         name = (call.name or "").strip()
         if name in FINISH_TOOLS:
             return None
         level, description = registry.classify(name, call.args)
+        pre = post = ()
+        if decision is not None:
+            pre = tuple(decision.preconditions)
+            post = tuple(decision.postconditions)
+        contract = (
+            {"intent": call.rationale, "preconditions": list(pre), "postconditions": list(post)}
+            if (pre or post)
+            else None
+        )
         return Step(
             index=index,
             tool=name,
@@ -501,6 +531,8 @@ class AgentLoop:
             rationale=call.rationale,
             risk=level.value,
             requires_approval=level == RiskLevel.CONFIRM,
+            notify_after=level == RiskLevel.AUTO,
+            contract=contract,
         )
 
     def _finish(

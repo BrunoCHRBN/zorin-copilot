@@ -14,8 +14,29 @@ from typing import Any, Final
 import requests
 
 from .actions import ActionType, DesktopAction
+from .provider_failure import (
+    GEMINI_KEY_MISSING_PREFIX,
+    GEMINI_UNAVAILABLE_PREFIX,
+    OLLAMA_ERROR_PREFIX,
+    OLLAMA_HTTP_ERROR_PREFIX,
+    OLLAMA_VISION_UNSUPPORTED_MARKER,
+    OPENAI_COMPAT_HTTP_ERROR_PREFIX,
+    OPENAI_COMPAT_KEY_MISSING_PREFIX,
+    OPENAI_COMPAT_REQUEST_ERROR_PREFIX,
+    PROVIDER_UNAVAILABLE_PREFIX,
+    WORKBUDDY_COMM_ERROR_PREFIX,
+    WORKBUDDY_HTTP_ERROR_PREFIX,
+    WORKBUDDY_KEY_MISSING_PREFIX,
+    is_provider_failure,
+)
 from ..core.config import CopilotConfig
 from ..core.desktop.env import current_environment, describe_for_prompt
+from ..core.identity import (
+    PERSONA_MARKER,
+    AssistantIdentity,
+    build_prompt,
+    identity_from_config,
+)
 from ..core.usage import TokenUsage, TokenUsageTracker, usage_from_gemini, usage_from_ollama, usage_from_openai
 
 logger = logging.getLogger(__name__)
@@ -27,26 +48,46 @@ DEFAULT_ENV_DESCRIPTION = "Zorin OS 18 Core (Linux / GNOME 46 no Wayland)"
 
 
 def build_system_prompt(env=None) -> str:
-    """Prompt de sistema com o ambiente real do usuário.
+    """Prompt de sistema com o ambiente real e a identidade do usuário.
 
-    No GNOME/Zorin o texto é idêntico ao constante. Em Arch/Hyprland a frase do
-    ambiente é trocada (ex.: "EndeavourOS (Linux / Hyprland no Wayland)").
+    **Adaptador fino, e só isso.** A composição (nome, override, addons, ordem das
+    substituições) mora em `core/identity.py`, que é puro e tem suíte própria. Aqui
+    ficam as duas coisas que o provedor sabe e a identidade não: a frase do
+    **ambiente** e o addon do **modo tutor**.
+
+    O que mudou em 2026-09-21, e por quê: esta função **ignorava**
+    `config.system_prompt`. O campo era preenchido por `CopilotConfig.load()`,
+    persistido por `save()` e nunca lido — quem o editasse não mudava nada e ainda
+    via o campo preenchido. Agora ele é lido, e é um **override** de verdade.
     """
     environment = env or current_environment()
     description = describe_for_prompt(environment)
-    prompt = SYSTEM_PROMPT
-    if description != DEFAULT_ENV_DESCRIPTION:
-        prompt = prompt.replace(DEFAULT_ENV_DESCRIPTION, description, 1)
-    try:  # modo tutor socrático (opcional — `config --tutor on`)
-        if CopilotConfig.load().study_tutor:
+
+    identidade = AssistantIdentity()
+    addons: list[str] = []
+    try:
+        config = CopilotConfig.load()
+        identidade = identity_from_config(config)
+        if config.study_tutor:
             from ..core.study_tutor import TUTOR_ADDON
-            prompt += TUTOR_ADDON
+
+            addons.append(TUTOR_ADDON)
     except Exception:
+        # Config ilegível não pode impedir a montagem do prompt: cai na identidade
+        # default e a resposta sai. Mesmo critério de "recurso, não requisito".
         pass
-    return prompt
+
+    return build_prompt(
+        identidade,
+        SYSTEM_PROMPT,
+        persona_marker=PERSONA_MARKER,
+        env_placeholder=DEFAULT_ENV_DESCRIPTION,
+        env_description=description,
+        addons=addons,
+    )
 
 
-SYSTEM_PROMPT = """Você é o Zorin Copilot, assistente e parceiro de desktop nativo do usuário no Zorin OS 18 Core (Linux / GNOME 46 no Wayland).
+SYSTEM_PROMPT = """Você é o __ASSISTANT_NAME__, assistente e parceiro de desktop nativo do usuário no Zorin OS 18 Core (Linux / GNOME 46 no Wayland).
 Sua missão é atuar como um colega de bancada inteligente, ágil, empático e resolutivo — ajudando a operar o computador, solucionar problemas técnicos, resumir informações e realizar tarefas no desktop.
 
 PERSONALIDADE & TOM DE VOZ (PARCEIRO DE DESKTOP):
@@ -108,7 +149,7 @@ AÇÕES DISPONÍVEIS NO ARRAY "actions":
 - "system_control": ajustes do sistema (volume, tema). target: "ação", params: {"action": "...", "value": "..."}.
 - "media_control": controle de música e Spotify. target: "play"|"pause"|"next"|"previous"|"search", params: {"action": "play"|"pause"|"search", "query": "nome da música ou artista", "player": "spotify"}.
 - "type_text": digitar texto na aplicação ativa. target: "descrição do campo", params: {"text": "conteúdo a digitar"}.
-- "write_file": gerar arquivo, script (.py, .sh) ou documento em disco. target: "nome.py" ou "nome.docx", params: {"filename": "...", "content": "auto", "directory": "~/scripts" ou "~/Documentos"}. DICA DE TOKEN: Se o arquivo a ser salvo for conter o mesmo texto redigido no campo "explanation", defina "content": "auto" ou omita "content". O Zorin Copilot usará automaticamente a redação integral de "explanation".
+- "write_file": gerar arquivo, script (.py, .sh) ou documento em disco. target: "nome.py" ou "nome.docx", params: {"filename": "...", "content": "auto", "directory": "~/scripts" ou "~/Documentos"}. DICA DE TOKEN: Se o arquivo a ser salvo for conter o mesmo texto redigido no campo "explanation", defina "content": "auto" ou omita "content". O __ASSISTANT_NAME__ usará automaticamente a redação integral de "explanation".
 - "organize_files": organizar pastas em categorias. target: "caminho", params: {"directory": "...", "dry_run": false}.
 - "notify": emitir notificação no sistema.
 
@@ -171,6 +212,40 @@ class BaseLLMProvider(ABC):
         """Gera resposta crua do modelo (string direta), ideal para o LLMPlanner do modo agente."""
         text, _ = self.chat(prompt)
         return text
+
+    @staticmethod
+    def _tool_system_prompt(schema: dict) -> str:
+        """Monta o system_prompt que embute o JSON-Schema para o modelo."""
+        required = ", ".join(schema.get("required", [])) or "nenhum"
+        return (
+            "Você é uma ferramenta que devolve APENAS um objeto JSON válido, sem "
+            "texto adicional, cercas de marcação ou comentários. O JSON deve obedecer "
+            "estritamente a este esquema JSON-Schema:\n"
+            + json.dumps(schema, ensure_ascii=False)
+            + "\nCampos obrigatórios: " + required + "."
+        )
+
+    def generate_with_tool(self, prompt: str, schema: dict, system_prompt: str | None = None) -> dict:
+        """Caminho de ferramenta estrita (JSON-Schema) para o modo agente/solver.
+
+        Converte ``schema`` numa instrução, pede ao modelo um objeto JSON que o
+        obedeça e devolve o dict extraído (tolerante a cercas/markdown). Levanta
+        ``ValueError`` se o provedor não devolver um objeto JSON utilizável.
+
+        Antes era um contrato morto — ``request_solution_graph`` quebrava para
+        todo provedor real porque nenhum implementava ``generate_with_tool``.
+        Agora ``BaseLLMProvider`` o implementa, então o dispatch
+        ``try_solve -> _solve_with_engine -> request_solution_graph`` funciona
+        de ponta a ponta (e os provedores concretos herdam sem esforço).
+        """
+        sys_p = system_prompt or self._tool_system_prompt(schema)
+        raw = self.complete(prompt, system_prompt=sys_p, json_mode=True)
+        if not isinstance(raw, str) or not raw.strip():
+            raise ValueError("provedor não devolveu texto utilizável para generate_with_tool")
+        data = self._repair_truncated_json(raw)
+        if not isinstance(data, dict):
+            raise ValueError("resposta do provedor não é um objeto JSON")
+        return data
 
     @staticmethod
     def _repair_truncated_json(raw: str) -> dict | None:
@@ -658,7 +733,7 @@ class GeminiProvider(BaseLLMProvider):
     ) -> tuple[str, list[DesktopAction]]:
         if not self.is_configured():
             return (
-                "Chave de API do Google Gemini não configurada. "
+                f"{GEMINI_KEY_MISSING_PREFIX}. "
                 "Clique no ícone de engrenagem para inserir sua chave gratuita do Google AI Studio.",
                 [],
             )
@@ -738,7 +813,7 @@ class GeminiProvider(BaseLLMProvider):
                 logger.warning(last_error)
                 continue
 
-        return f"Não foi possível obter resposta do Gemini: {last_error}", []
+        return f"{GEMINI_UNAVAILABLE_PREFIX} {last_error}", []
 
     def complete(
         self,
@@ -748,7 +823,7 @@ class GeminiProvider(BaseLLMProvider):
     ) -> str:
         """Gera texto puro diretamente da API Gemini (sem transformar em actions do HUD)."""
         if not self.is_configured():
-            raise RuntimeError("Chave de API do Google Gemini não configurada.")
+            raise RuntimeError(f"{GEMINI_KEY_MISSING_PREFIX}.")
 
         sys_text = system_prompt or build_system_prompt()
         contents = [{"role": "user", "parts": [{"text": prompt}]}]
@@ -789,7 +864,7 @@ class GeminiProvider(BaseLLMProvider):
             except Exception as exc:
                 last_error = f"Erro de comunicação com {current_model}: {exc}"
                 continue
-        raise RuntimeError(f"Não foi possível obter resposta do Gemini: {last_error}")
+        raise RuntimeError(f"{GEMINI_UNAVAILABLE_PREFIX} {last_error}")
 
 
 DOLPHIN_AGENT_ADDON = """
@@ -893,17 +968,17 @@ class OllamaProvider(BaseLLMProvider):
                 err_text = resp.text
                 if "does not support images" in err_text.lower():
                     return (
-                        f"O modelo local '{selected_model}' não possui suporte a visão de imagens. "
+                        f"O modelo local '{selected_model}' {OLLAMA_VISION_UNSUPPORTED_MARKER}. "
                         "Ele responde comandos e perguntas em texto de forma nativa.",
                         [],
                     )
-                return f"Erro no Ollama ({resp.status_code}): {err_text[:200]}", []
+                return f"{OLLAMA_HTTP_ERROR_PREFIX} ({resp.status_code}): {err_text[:200]}", []
             data = resp.json()
             raw_text = data.get("message", {}).get("content", "")
             self._record_usage(usage_from_ollama(data), provider="ollama", model=self.model)
             return self.parse_response_payload(raw_text)
         except Exception as exc:
-            return f"Erro ao consultar Ollama local ({selected_model}): {exc}", []
+            return f"{OLLAMA_ERROR_PREFIX} local ({selected_model}): {exc}", []
 
     def complete(
         self,
@@ -935,7 +1010,7 @@ class OllamaProvider(BaseLLMProvider):
 
         resp = requests.post(url, json=payload, timeout=self.timeout)
         if resp.status_code != 200:
-            raise RuntimeError(f"Erro no Ollama ({resp.status_code}): {resp.text[:200]}")
+            raise RuntimeError(f"{OLLAMA_HTTP_ERROR_PREFIX} ({resp.status_code}): {resp.text[:200]}")
         data = resp.json()
         raw_text = data.get("message", {}).get("content", "")
         self._record_usage(usage_from_ollama(data), provider="ollama", model=self.model)
@@ -981,7 +1056,7 @@ class OpenAICompatProvider(BaseLLMProvider):
         image_mime: str = "image/jpeg",
     ) -> tuple[str, list[DesktopAction]]:
         if not self.is_configured():
-            return "Chave de API ou URL não configurada.", []
+            return f"{OPENAI_COMPAT_KEY_MISSING_PREFIX}.", []
 
         url = f"{self.api_url}/chat/completions"
         headers = {"Authorization": f"Bearer {self.api_key}"}
@@ -1020,13 +1095,13 @@ class OpenAICompatProvider(BaseLLMProvider):
         try:
             resp = requests.post(url, headers=headers, json=payload, timeout=25)
             if resp.status_code != 200:
-                return f"Erro na API ({resp.status_code}): {resp.text[:200]}", []
+                return f"{OPENAI_COMPAT_HTTP_ERROR_PREFIX} ({resp.status_code}): {resp.text[:200]}", []
             data = resp.json()
             raw_text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
             self._record_usage(usage_from_openai(data), provider="openai", model=self.model)
             return self.parse_response_payload(raw_text)
         except Exception as exc:
-            return f"Erro na requisição: {exc}", []
+            return f"{OPENAI_COMPAT_REQUEST_ERROR_PREFIX} {exc}", []
 
     def complete(
         self,
@@ -1036,7 +1111,7 @@ class OpenAICompatProvider(BaseLLMProvider):
     ) -> str:
         """Gera resposta crua diretamente de API compatível com OpenAI."""
         if not self.is_configured():
-            raise RuntimeError("Chave de API ou URL não configurada.")
+            raise RuntimeError(f"{OPENAI_COMPAT_KEY_MISSING_PREFIX}.")
         url = f"{self.api_url}/chat/completions"
         headers = {"Authorization": f"Bearer {self.api_key}"}
         sys_text = system_prompt or build_system_prompt()
@@ -1053,7 +1128,7 @@ class OpenAICompatProvider(BaseLLMProvider):
 
         resp = requests.post(url, headers=headers, json=payload, timeout=30)
         if resp.status_code != 200:
-            raise RuntimeError(f"Erro na API ({resp.status_code}): {resp.text[:200]}")
+            raise RuntimeError(f"{OPENAI_COMPAT_HTTP_ERROR_PREFIX} ({resp.status_code}): {resp.text[:200]}")
         data = resp.json()
         raw_text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
         self._record_usage(usage_from_openai(data), provider="openai", model=self.model)
@@ -1113,7 +1188,7 @@ class WorkBuddyProvider(BaseLLMProvider):
         image_mime: str = "image/jpeg",
     ) -> tuple[str, list[DesktopAction]]:
         if not self.is_configured():
-            return "Chave de API do WorkBuddy AI não configurada.", []
+            return f"{WORKBUDDY_KEY_MISSING_PREFIX}.", []
 
         url = f"{self.api_url}/chat/completions"
         headers = {
@@ -1164,7 +1239,7 @@ class WorkBuddyProvider(BaseLLMProvider):
             resp = requests.post(url, headers=headers, json=payload, stream=True, timeout=timeout_sec)
             if resp.status_code != 200:
                 err_text = resp.text[:200]
-                return f"Erro no WorkBuddy AI ({resp.status_code}): {err_text}", []
+                return f"{WORKBUDDY_HTTP_ERROR_PREFIX} ({resp.status_code}): {err_text}", []
 
             collected_tokens: list[str] = []
             try:
@@ -1193,7 +1268,7 @@ class WorkBuddyProvider(BaseLLMProvider):
 
             return self.parse_response_payload(raw_text)
         except Exception as exc:
-            return f"Erro na comunicação com WorkBuddy AI: {exc}", []
+            return f"{WORKBUDDY_COMM_ERROR_PREFIX} {exc}", []
 
     def complete(
         self,
@@ -1203,7 +1278,7 @@ class WorkBuddyProvider(BaseLLMProvider):
     ) -> str:
         """Gera resposta crua diretamente do WorkBuddy AI."""
         if not self.is_configured():
-            raise RuntimeError("Chave de API do WorkBuddy AI não configurada.")
+            raise RuntimeError(f"{WORKBUDDY_KEY_MISSING_PREFIX}.")
         url = f"{self.api_url}/chat/completions"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -1221,7 +1296,7 @@ class WorkBuddyProvider(BaseLLMProvider):
         }
         resp = requests.post(url, headers=headers, json=payload, timeout=45)
         if resp.status_code != 200:
-            raise RuntimeError(f"Erro no WorkBuddy AI ({resp.status_code}): {resp.text[:200]}")
+            raise RuntimeError(f"{WORKBUDDY_HTTP_ERROR_PREFIX} ({resp.status_code}): {resp.text[:200]}")
         data = resp.json()
         raw_text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
         return raw_text.strip()
@@ -1265,14 +1340,10 @@ class HybridProvider(BaseLLMProvider):
 
     @staticmethod
     def _is_gemini_error(text: str) -> bool:
-        if not text:
-            return True
-        if (
-            text.startswith("Não foi possível obter resposta do Gemini:")
-            or text.startswith("Chave de API do Google Gemini não configurada")
-        ):
-            return True
-        return False
+        # Delega para a fonte única das frases. Antes esta função repetia as duas
+        # sentenças do Gemini em `startswith`; com a frase definida em dois lugares,
+        # mudar o texto de falha desligava o failover para o Ollama em silêncio.
+        return is_provider_failure(text)
 
     def chat(
         self,
@@ -1315,7 +1386,7 @@ class HybridProvider(BaseLLMProvider):
                 image_mime=image_mime,
             )
 
-            if local_expl and not local_expl.startswith("Erro ao consultar Ollama"):
+            if local_expl and not is_provider_failure(local_expl):
                 if use_gemini:
                     badge = (
                         f"⚡ *[Visão Computacional Local - {self.ollama.vision_model} (GPU Offline)]*\n\n"
@@ -1327,7 +1398,7 @@ class HybridProvider(BaseLLMProvider):
                 return local_expl, local_actions
 
         return (
-            "Não foi possível processar sua solicitação: o Gemini está indisponível/sem cota "
+            f"{PROVIDER_UNAVAILABLE_PREFIX} o Gemini está indisponível/sem cota "
             f"e o modelo local Ollama não pôde ser alcançado em {self.ollama.host_url}.",
             [],
         )
