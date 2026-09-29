@@ -71,3 +71,7 @@ no changes added to commit (use "git add" and/or "git commit -a"). Ancorando na 
 /core
 core.*
 core.[0-9]*
+
+# Estado das sessões do agente (memória do dia, notas de referência).
+# Não é código do projeto — fica fora do versionamento.
+.workbuddy-ai/
