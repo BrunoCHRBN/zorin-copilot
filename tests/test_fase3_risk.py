@@ -88,7 +88,6 @@ class LiveRiskGateTest(unittest.TestCase):
         c = GeminiLiveClient.__new__(GeminiLiveClient)
         c.risk_policy = RiskPolicy()
         c._pending_actions = {}
-        c._bypass_risk_gate = False
         c.inspector = inspector or _FakeInspector(_tree_app())
         c.input_driver = driver or _FakeInputDriver()
         return c
@@ -179,7 +178,6 @@ class LiveBlocklistTest(unittest.TestCase):
         c = GeminiLiveClient.__new__(GeminiLiveClient)
         c.risk_policy = None  # foca no blocklist; o gate de risco é ignorado
         c._pending_actions = {}
-        c._bypass_risk_gate = False
         c.inspector = _FakeInspector(root)
         return c
 
