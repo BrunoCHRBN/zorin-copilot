@@ -34,6 +34,8 @@ SLOT_HUD: Final = "hud"
 SLOT_CROP: Final = "crop"
 SLOT_VOICE: Final = "voice"
 SLOT_DICTATE: Final = "dictate"
+#: Atalho dedicado que sempre abre a pílula flutuante (não o HUD completo).
+SLOT_VOICE_PILL: Final = "voice-pill"
 
 _MODIFIER_ALIASES: Final[dict[str, str]] = {
     "super": "super",
@@ -161,6 +163,7 @@ def _slot_label(slot: str) -> str:
         SLOT_HUD: "Zorin Copilot",
         SLOT_CROP: "Zorin Copilot - Recorte",
         SLOT_VOICE: "Zorin Copilot - Voz",
+        SLOT_VOICE_PILL: "Zorin Copilot - Voz (Pílula)",
         SLOT_DICTATE: "Zorin Copilot - Ditado",
     }.get(slot, f"Zorin Copilot - {slot}")
 
@@ -210,6 +213,7 @@ class GnomeShortcutBackend(ShortcutBackend):
         SLOT_HUD: "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/zorin-copilot/",
         SLOT_CROP: "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/zorin-copilot-crop/",
         SLOT_VOICE: "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/zorin-copilot-voice/",
+        SLOT_VOICE_PILL: "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/zorin-copilot-voice-pill/",
         SLOT_DICTATE: "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/zorin-copilot-dictate/",
     }
 
@@ -628,6 +632,7 @@ class KdeShortcutBackend(ShortcutBackend):
         SLOT_HUD: "zorin-copilot-hud",
         SLOT_CROP: "zorin-copilot-crop",
         SLOT_VOICE: "zorin-copilot-voice",
+        SLOT_VOICE_PILL: "zorin-copilot-voice-pill",
         SLOT_DICTATE: "zorin-copilot-dictate",
     }
 

@@ -179,7 +179,7 @@ def describe_for_prompt(env: Environment) -> str:
     O modelo recebe isso e passa a sugerir comandos coerentes com a máquina real:
     `pacman` em Arch, `bind` em Hyprland, `grim` para captura.
     """
-    system = env.distro.pretty_name or env.distro.id or "Linux"
+    system = env.distro.display_name
     desktop = DESKTOP_LABELS.get(env.desktop, env.desktop.capitalize() if env.desktop else "")
     session = env.session_type.capitalize() if env.session_type else ""
 
@@ -200,6 +200,22 @@ class DistroInfo:
     id_like: tuple[str, ...] = ()
     pretty_name: str = ""
     version_id: str = ""
+
+    @property
+    def display_name(self) -> str:
+        """Nome curto para a interface: "EndeavourOS", "Zorin OS 17.3", "Linux".
+
+        Distinto de `describe_for_prompt`, que monta uma frase para o modelo com
+        desktop e sessão entre parênteses. Aqui é só o nome: cabe numa linha de
+        estado ao lado de outras informações, e o fallback existe porque
+        `/etc/os-release` pode faltar (contêiner, sistema mínimo) — melhor dizer
+        "Linux" do que mostrar um campo vazio.
+
+        O `id` vem capitalizado de propósito: por especificação ele é minúsculo
+        ("endeavouros"), e um identificador minúsculo no meio de uma frase de UI
+        lê como defeito, não como nome.
+        """
+        return self.pretty_name or self.id.capitalize() or "Linux"
 
     @property
     def is_arch_like(self) -> bool:

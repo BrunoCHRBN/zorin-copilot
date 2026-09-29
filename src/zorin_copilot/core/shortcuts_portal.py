@@ -43,6 +43,12 @@ class PortalShortcutManager:
         ("dictate", "Ditado por voz no aplicativo em foco", "<Super><Shift>d"),
     ]
 
+    #: Atalho dedicado da pílula flutuante. NÃO entra em ``SHORTCUTS`` porque é
+    #: opt-in: só é oferecido quando o usuário habilita ``voice_pill_shortcut_enabled``.
+    #: O portal pergunta ao usuário quais atalhos vincular, então oferecer um
+    #: atalho desligado seria ruído.
+    VOICE_PILL_SHORTCUT = ("voice-pill", "Conversa por voz — pílula flutuante", "<Super><Shift>p")
+
     def __init__(self, on_activated: Callable[[str], None]):
         self.on_activated = on_activated
         self.available = False
@@ -51,8 +57,14 @@ class PortalShortcutManager:
         self._subs: list[int] = []
 
     # ------------------------------------------------------------------ #
-    def start(self) -> bool:
-        """Cria a sessão, registra os atalhos e inscreve o sinal Activated."""
+    def start(self, shortcuts: list[tuple[str, str, str]] | None = None) -> bool:
+        """Cria a sessão, registra os atalhos e inscreve o sinal Activated.
+
+        ``shortcuts`` permite ao chamador filtrar a lista canônica conforme os
+        flags de config do usuário (ver :func:`portal_shortcut_list`). ``None``
+        usa ``SHORTCUTS`` — comportamento legado, preservado.
+        """
+        active = list(shortcuts) if shortcuts is not None else list(self.SHORTCUTS)
         try:
             self._bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
         except Exception as exc:
@@ -74,7 +86,7 @@ class PortalShortcutManager:
         # 2) BindShortcuts
         shortcuts = GLib.Variant(
             "a(sssv)",
-            [(sid, desc, trig, trig) for sid, desc, trig in self.SHORTCUTS],
+            [(sid, desc, trig, trig) for sid, desc, trig in active],
         )
         try:
             bind_req = self._call(
@@ -97,7 +109,7 @@ class PortalShortcutManager:
             )
         )
         self.available = True
-        logger.info("GlobalShortcuts portal ativo com %d atalhos.", len(self.SHORTCUTS))
+        logger.info("GlobalShortcuts portal ativo com %d atalhos.", len(active))
         return True
 
     # ------------------------------------------------------------------ #
@@ -174,3 +186,19 @@ class PortalShortcutManager:
                 pass
         self._subs.clear()
         self.available = False
+
+
+def portal_shortcut_list(config: object) -> list[tuple[str, str, str]]:
+    """Lista de atalhos a oferecer no portal, conforme a config do usuário.
+
+    Os quatro atalhos canônicos entram sempre (comportamento legado preservado).
+    O atalho dedicado da pílula só entra quando ``voice_pill_shortcut_enabled``
+    está ligado — assim o portal não pede ao usuário para vincular um atalho que
+    ele desligou.
+    """
+    shortcuts = list(PortalShortcutManager.SHORTCUTS)
+    if getattr(config, "voice_pill_shortcut_enabled", False):
+        _sid, _desc, default_trig = PortalShortcutManager.VOICE_PILL_SHORTCUT
+        trig = str(getattr(config, "voice_pill_shortcut_key", default_trig) or default_trig)
+        shortcuts.append(("voice-pill", "Conversa por voz — pílula flutuante", trig))
+    return shortcuts

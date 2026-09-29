@@ -72,6 +72,7 @@ _SLOT_FLAGS: Final[dict[str, str]] = {
     "hud": "--toggle",
     "crop": "--crop",
     "voice": "--voice",
+    "voice-pill": "--voice-pill",
     "dictate": "--dictate",
 }
 
@@ -193,6 +194,28 @@ class ShortcutManager:
     @classmethod
     def unregister_voice(cls) -> bool:
         return cls._unregister("voice")
+
+    # -------------------------------------------------------------------------
+    # Atalho dedicado da pílula flutuante (Super+Shift+P) — sempre abre a pílula,
+    # mesmo com voice_overlay_mode="full".
+    # -------------------------------------------------------------------------
+    @classmethod
+    def is_voice_pill_registered(cls) -> bool:
+        return cls._is_registered("voice-pill")
+
+    @classmethod
+    def get_voice_pill_binding(cls) -> str:
+        from .config import CopilotConfig
+
+        return CopilotConfig.load().voice_pill_shortcut_key
+
+    @classmethod
+    def register_voice_pill(cls, binding: str = "<Super><Shift>p") -> bool:
+        return cls._register("voice-pill", binding)
+
+    @classmethod
+    def unregister_voice_pill(cls) -> bool:
+        return cls._unregister("voice-pill")
 
     # -------------------------------------------------------------------------
     # Atalho de ditado contínuo no app em foco (Super+Shift+D)

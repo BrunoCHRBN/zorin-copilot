@@ -135,19 +135,50 @@ class TestPromptEnvironment(unittest.TestCase):
         self.assertIn("EndeavourOS", prompt)
 
     def test_prompt_no_gnome_zorin_mantem_texto_original(self):
-        from zorin_copilot.ai.providers import SYSTEM_PROMPT, build_system_prompt
+        """Trocar o ambiente não pode mexer em mais nada do prompt.
 
-        env = env_mod.Environment(
+        **Esta asserção foi corrigida em 2026-09-21 (P4), e o defeito era o teste.**
+        Ela media `len(build_system_prompt(env))` contra `len(SYSTEM_PROMPT)`, o
+        **texto-base cru**. O texto-base carrega a sentinela `__ASSISTANT_NAME__`
+        (18 caracteres) nas **duas** ocorrências, e a composição a troca pelo nome
+        real (13) — então as duas grandezas passaram a diferir em 2 × (18 − 13) = 10
+        caracteres, e o teste acusou uma regressão que não existia no comportamento.
+
+        A régua certa compara **composto com composto**, com o ambiente como única
+        variável. Isso é mais forte do que a contagem de caracteres: prova que o
+        resto do prompt é byte a byte o mesmo, e não apenas do mesmo tamanho.
+        """
+        from zorin_copilot.ai.providers import build_system_prompt
+
+        env_zorin = env_mod.Environment(
             distro=env_mod.DistroInfo(id="zorin", pretty_name="Zorin OS 18 Core"),
             session_type="wayland",
             desktop="gnome",
         )
-        # Ambiente diferente do literal padrão, mas o restante do prompt (tom,
-        # diretrizes de ação) precisa continuar intacto.
-        prompt = build_system_prompt(env)
-        self.assertIn("Zorin OS 18 Core", prompt)
-        self.assertIn("PERSONALIDADE & TOM DE VOZ", prompt)
-        self.assertEqual(len(prompt), len(SYSTEM_PROMPT) - len("Zorin OS 18 Core (Linux / GNOME 46 no Wayland)") + len("Zorin OS 18 Core (Linux / GNOME no Wayland)"))
+        env_outro = env_mod.Environment(
+            distro=env_mod.DistroInfo(id="endeavouros", pretty_name="EndeavourOS"),
+            session_type="wayland",
+            desktop="hyprland",
+        )
+        frase_zorin = env_mod.describe_for_prompt(env_zorin)
+        frase_outro = env_mod.describe_for_prompt(env_outro)
+        self.assertNotEqual(frase_zorin, frase_outro)
+
+        prompt_zorin = build_system_prompt(env_zorin)
+        prompt_outro = build_system_prompt(env_outro)
+
+        self.assertIn("Zorin OS 18 Core", prompt_zorin)
+        self.assertIn("PERSONALIDADE & TOM DE VOZ", prompt_zorin)
+
+        # Única variável = a frase do ambiente. O resto tem de ser idêntico.
+        self.assertEqual(
+            prompt_zorin.replace(frase_zorin, "<AMBIENTE>"),
+            prompt_outro.replace(frase_outro, "<AMBIENTE>"),
+        )
+        self.assertEqual(
+            len(prompt_zorin) - len(prompt_outro),
+            len(frase_zorin) - len(frase_outro),
+        )
 
 
 class TestAcceleratorConversion(unittest.TestCase):
