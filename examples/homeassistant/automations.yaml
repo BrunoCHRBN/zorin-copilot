@@ -1,0 +1,68 @@
+# Exemplos de automações do Home Assistant que conversam com o Zorin Copilot.
+# Cole no seu automations.yaml (ou crie pela interface) e ajuste as entidades.
+#
+# Requerem os rest_command definidos em configuration.yaml e a ponte
+# scripts/ha_bridge.py rodando. Substitua as entidades de exemplo pelas suas.
+
+# 1) Aviso no desktop quando alguém toca a campainha.
+- id: zorin_campainha
+  alias: "Zorin: avisar campainha no desktop"
+  trigger:
+    - platform: state
+      entity_id: binary_sensor.campainha
+      to: "on"
+  action:
+    - service: rest_command.zorin_notify
+      data:
+        event: campainha
+        message: "Alguém tocou a campainha."
+
+# 2) Aviso quando a máquina de lavar termina (tomada medindo consumo).
+- id: zorin_lavadora
+  alias: "Zorin: avisar fim da lavagem"
+  trigger:
+    - platform: numeric_state
+      entity_id: sensor.tomada_lavadora_potencia
+      below: 5
+      for: "00:02:00"
+  condition:
+    - condition: state
+      entity_id: switch.tomada_lavadora
+      state: "on"
+  action:
+    - service: rest_command.zorin_notify
+      data:
+        event: lavadora
+        message: "A lavagem terminou. Pode tirar a roupa."
+
+# 3) Porta aberta com a casa vazia: além de notificar, fala no desktop.
+- id: zorin_porta_aberta
+  alias: "Zorin: porta aberta com casa vazia"
+  trigger:
+    - platform: state
+      entity_id: binary_sensor.porta_entrada
+      to: "on"
+  condition:
+    - condition: state
+      entity_id: person.bruno
+      state: "not_home"
+  action:
+    - service: rest_command.zorin_notify
+      data:
+        event: seguranca
+        message: "Porta de entrada aberta e você está fora de casa."
+    - service: rest_command.zorin_speak
+      data: {}
+
+# 4) Rotina "boa noite": uma frase no Copilot pode acionar esta cena, e a
+#    automação avisa que a casa está fechada.
+- id: zorin_boa_noite
+  alias: "Zorin: confirmar modo boa noite"
+  trigger:
+    - platform: state
+      entity_id: scene.boa_noite
+  action:
+    - service: rest_command.zorin_notify
+      data:
+        event: rotina
+        message: "Modo boa noite ativado. Luzes apagadas e portas conferidas."

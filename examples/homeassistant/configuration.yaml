@@ -1,0 +1,60 @@
+# Exemplos para o Home Assistant — copie os blocos que fizerem sentido para o
+# seu configuration.yaml. Nada aqui é obrigatório: são atalhos para o HA
+# conversar com o desktop (Zorin Copilot) e vice-versa.
+#
+# A ponte scripts/ha_bridge.py precisa estar rodando antes (veja o README desta
+# pasta). Troque "SEGREDO" pelo mesmo valor de --token / ZORIN_HA_BRIDGE_TOKEN.
+
+# ---------------------------------------------------------------------------
+# rest_command — a forma recomendada de chamar a ponte a partir de automações.
+# ---------------------------------------------------------------------------
+rest_command:
+  zorin_notify:
+    url: "http://127.0.0.1:8787/webhook"
+    method: POST
+    headers:
+      X-Bridge-Token: "SEGREDO"
+      Content-Type: "application/json"
+    payload: >-
+      {"event": "{{ event }}", "message": "{{ message }}"}
+    content_type: "application/json"
+
+  # Variante com um payload fixo por comando (mais simples de usar em automações).
+  zorin_speak:
+    url: "http://127.0.0.1:8787/webhook"
+    method: POST
+    headers:
+      X-Bridge-Token: "SEGREDO"
+    payload: >-
+      {"event": "speak", "message": "{{ states('input_text.zorin_message') }}"}
+    content_type: "application/json"
+
+# ---------------------------------------------------------------------------
+# shell_command — alternativa sem rest_command (usa curl). Útil em versões
+# antigas do HA ou quando você prefere não expor headers na config.
+# ---------------------------------------------------------------------------
+shell_command:
+  zorin_notify_curl: >-
+    curl -s -X POST http://127.0.0.1:8787/webhook
+    -H "X-Bridge-Token: SEGREDO" -H "Content-Type: application/json"
+    -d '{"event":"{{ event }}","message":"{{ message }}"}'
+
+# ---------------------------------------------------------------------------
+# Helper opcional: uma caixa de texto onde você escreve o que o Copilot deve
+# falar. Combina com o botão/automação "zorin_speak" acima.
+# ---------------------------------------------------------------------------
+input_text:
+  zorin_message:
+    name: Mensagem para o Zorin
+    max: 255
+    initial: "Aviso do Home Assistant"
+
+# ---------------------------------------------------------------------------
+# Exemplo de "botão" na interface que faz o desktop falar. Requer o helper
+# acima. O Copilot, por sua vez, controla o HA por voz ("aciona a cena cinema").
+# ---------------------------------------------------------------------------
+script:
+  zorin_announce:
+    alias: "Zorin: anunciar mensagem"
+    sequence:
+      - service: rest_command.zorin_speak

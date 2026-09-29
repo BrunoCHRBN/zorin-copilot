@@ -8,10 +8,11 @@ import json
 import logging
 import os
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any
+from typing import Any, Callable
 
 from .config import CopilotConfig
 
@@ -74,24 +75,93 @@ class HomeAssistantManager:
     """Controlador de integração do Zorin Copilot com o Home Assistant."""
 
     _instance: HomeAssistantManager | None = None
+    _instance_config_mtime: float = -1.0
 
     def __init__(self, url: str | None = None, token: str | None = None) -> None:
         cfg = CopilotConfig.load()
         raw_url = url if url is not None else cfg.ha_url
         self.url = (raw_url or "http://localhost:8123").rstrip("/")
         self.token = token if token is not None else (cfg.ha_token or os.environ.get("HOME_ASSISTANT_TOKEN", ""))
+        # Criado sem URL/token explícitos = "apoiado na configuração": é assim que
+        # o app o constrói. Nesse modo ele também respeita o liga/desliga das
+        # preferências; instâncias explícitas (testes, "Testar Conexão") valem
+        # por si e não dependem do config.json do usuário.
+        self._from_config = url is None and token is None
         self._states_cache: list[dict[str, Any]] | None = None
         self._cache_timestamp: float = 0.0
 
     @classmethod
+    def _config_mtime(cls) -> float:
+        try:
+            return CopilotConfig.config_file().stat().st_mtime
+        except OSError:
+            return 0.0
+
+    @classmethod
     def get_default(cls) -> HomeAssistantManager:
-        if cls._instance is None:
+        """Instância compartilhada, **relida quando a configuração muda**.
+
+        O bug que isto corrige: o gerenciador era criado uma única vez e nunca
+        mais relia o config.json. O Live o construía no arranque (token ainda
+        vazio) e o processo inteiro ficava com a cópia antiga — a tela de
+        preferências conectava (cria instância própria, com o token digitado)
+        enquanto a voz respondia "Home Assistant não configurado". Salvar as
+        preferências agora tem efeito imediato, sem reiniciar o aplicativo.
+        """
+        mtime = cls._config_mtime()
+        if cls._instance is None or cls._instance_config_mtime != mtime:
             cls._instance = cls()
+            cls._instance_config_mtime = mtime
         return cls._instance
+
+    @classmethod
+    def reset(cls) -> None:
+        """Descarta a instância para forçar releitura na próxima chamada.
+
+        Usado ao salvar as preferências: garante efeito imediato mesmo quando o
+        mtime do arquivo não muda (granularidade de 1s do sistema de arquivos).
+        """
+        cls._instance = None
+        cls._instance_config_mtime = -1.0
 
     def is_configured(self) -> bool:
         """Indica se URL e token de acesso foram fornecidos."""
         return bool(self.url and self.token.strip())
+
+    def is_enabled(self) -> bool:
+        """Se a integração está ligada nas preferências.
+
+        Só consulta o config.json quando a instância é apoiada na configuração;
+        instâncias explícitas são consideradas habilitadas.
+        """
+        if not self._from_config:
+            return True
+        return bool(getattr(CopilotConfig.load(), "ha_enabled", True))
+
+    def unavailable(self) -> dict[str, Any] | None:
+        """Motivo pelo qual a integração não pode ser usada, ou ``None`` se pode.
+
+        Centraliza a resposta honesta: antes, sem configuração, o controle dizia
+        "Nenhuma lâmpada encontrada" (enganoso) enquanto o status dizia "não
+        configurado" — mensagens contraditórias para a mesma causa.
+        """
+        if not self.is_enabled():
+            return {
+                "success": False,
+                "message": (
+                    "Casa Inteligente está desabilitada nas preferências. "
+                    "Ative 'Habilitar Casa Inteligente' para usar o Home Assistant."
+                ),
+            }
+        if not self.is_configured():
+            return {
+                "success": False,
+                "message": (
+                    "Home Assistant não configurado. Defina a URL e o Token de "
+                    "Acesso de Longa Duração nas preferências."
+                ),
+            }
+        return None
 
     def _headers(self) -> dict[str, str]:
         headers = {
@@ -102,6 +172,50 @@ class HomeAssistantManager:
             headers["Authorization"] = f"Bearer {self.token.strip()}"
         return headers
 
+    def _request_json(
+        self,
+        method: str,
+        path: str,
+        data: dict[str, Any] | None = None,
+        *,
+        timeout: float = 5.0,
+        retries: int = 1,
+    ) -> dict[str, Any]:
+        """Requisição HTTP com retry curto para falhas transitórias de rede.
+
+        Devolve sempre ``{"ok", "status", "data"/"error"}`` — nunca levanta, para
+        que os chamadores não repitam tratamento de exceção. **Não** repete erros
+        de protocolo (HTTP 4xx/5xx): um 401 não melhora com insistência e só
+        atrasaria o feedback ao usuário. Repete apenas queda de conexão/timeout,
+        que é justamente o que acontece quando o container do HA reinicia.
+        """
+        url = f"{self.url}{path}"
+        payload = json.dumps(data).encode("utf-8") if data is not None else None
+        attempt = 0
+        last_err: str = ""
+        while True:
+            try:
+                req = urllib.request.Request(url, data=payload, headers=self._headers(), method=method)
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    body = resp.read().decode("utf-8")
+                    parsed = json.loads(body) if body.strip() else None
+                    return {"ok": True, "status": getattr(resp, "status", 200), "data": parsed}
+            except urllib.error.HTTPError as err:
+                return {
+                    "ok": False,
+                    "status": err.code,
+                    "error": str(err.reason or err),
+                    "http_error": True,
+                }
+            except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as err:
+                last_err = str(getattr(err, "reason", err))
+                attempt += 1
+                if attempt > retries:
+                    return {"ok": False, "status": 0, "error": last_err}
+                time.sleep(min(0.5 * attempt, 1.5))
+            except Exception as exc:
+                return {"ok": False, "status": 0, "error": str(exc)}
+
     def test_connection(self) -> dict[str, Any]:
         """Testa comunicação com a API do Home Assistant."""
         if not self.is_configured():
@@ -110,49 +224,42 @@ class HomeAssistantManager:
                 "message": "Home Assistant não configurado. Forneça a URL (ex: http://localhost:8123) e o Token de Acesso de Longa Duração.",
                 "url": self.url,
             }
-        try:
-            req = urllib.request.Request(f"{self.url}/api/", headers=self._headers(), method="GET")
-            with urllib.request.urlopen(req, timeout=4.0) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                msg = data.get("message", "API em execução")
-                return {
-                    "success": True,
-                    "message": f"Conexão com Home Assistant estabelecida com sucesso: {msg}.",
-                    "details": data,
-                    "url": self.url,
-                }
-        except urllib.error.HTTPError as err:
-            if err.code == 401:
-                return {
-                    "success": False,
-                    "message": "Erro de autenticação (HTTP 401): O Token de Acesso informado é inválido ou expirou.",
-                    "code": 401,
-                }
-            return {"success": False, "message": f"Erro HTTP {err.code} ao conectar no Home Assistant: {err.reason}"}
-        except urllib.error.URLError as err:
+        res = self._request_json("GET", "/api/", timeout=4.0, retries=1)
+        if res["ok"]:
+            data = res.get("data") or {}
+            msg = data.get("message", "API em execução") if isinstance(data, dict) else "API em execução"
+            return {
+                "success": True,
+                "message": f"Conexão com Home Assistant estabelecida com sucesso: {msg}.",
+                "details": data,
+                "url": self.url,
+            }
+        if res.get("http_error") and res.get("status") == 401:
             return {
                 "success": False,
-                "message": f"Não foi possível alcançar o Home Assistant em '{self.url}'. Verifique se o container/serviço está ativo ({err.reason}).",
+                "message": "Erro de autenticação (HTTP 401): O Token de Acesso informado é inválido ou expirou.",
+                "code": 401,
             }
-        except Exception as exc:
-            return {"success": False, "message": f"Falha na conexão com Home Assistant: {exc}"}
+        if res.get("http_error"):
+            return {"success": False, "message": f"Erro HTTP {res['status']} ao conectar no Home Assistant: {res['error']}"}
+        return {
+            "success": False,
+            "message": f"Não foi possível alcançar o Home Assistant em '{self.url}'. Verifique se o container/serviço está ativo ({res['error']}).",
+        }
 
     def get_states(self, domain: str | None = None, force_refresh: bool = False) -> list[dict[str, Any]]:
         """Recupera lista de entidades e seus estados atuais no Home Assistant."""
-        import time
-
         now = time.time()
         if not force_refresh and self._states_cache and (now - self._cache_timestamp < 8.0):
             states = self._states_cache
         else:
-            try:
-                req = urllib.request.Request(f"{self.url}/api/states", headers=self._headers(), method="GET")
-                with urllib.request.urlopen(req, timeout=5.0) as resp:
-                    states = json.loads(resp.read().decode("utf-8"))
-                    self._states_cache = states
-                    self._cache_timestamp = now
-            except Exception as exc:
-                logger.warning("Falha ao buscar estados do Home Assistant (%s): %s", self.url, exc)
+            res = self._request_json("GET", "/api/states", timeout=5.0, retries=1)
+            if res["ok"] and isinstance(res.get("data"), list):
+                states = res["data"]
+                self._states_cache = states
+                self._cache_timestamp = now
+            else:
+                logger.warning("Falha ao buscar estados do Home Assistant (%s): %s", self.url, res.get("error"))
                 return []
 
         if domain:
@@ -222,31 +329,26 @@ class HomeAssistantManager:
                 "message": "Home Assistant não configurado. Defina a URL e o Token nas configurações.",
             }
 
-        url = f"{self.url}/api/services/{domain}/{service}"
-        payload_bytes = json.dumps(service_data or {}).encode("utf-8")
-        try:
-            req = urllib.request.Request(url, data=payload_bytes, headers=self._headers(), method="POST")
-            with urllib.request.urlopen(req, timeout=5.0) as resp:
-                res_data = json.loads(resp.read().decode("utf-8"))
-                # Limpa cache para refletir nova mudança na próxima consulta
-                self._states_cache = None
-                return {
-                    "success": True,
-                    "message": f"Serviço '{domain}.{service}' executado com sucesso.",
-                    "result": res_data,
-                }
-        except urllib.error.HTTPError as err:
+        res = self._request_json(
+            "POST", f"/api/services/{domain}/{service}", service_data or {}, timeout=5.0, retries=1
+        )
+        if res["ok"]:
+            # Limpa cache para refletir nova mudança na próxima consulta
+            self._states_cache = None
+            return {
+                "success": True,
+                "message": f"Serviço '{domain}.{service}' executado com sucesso.",
+                "result": res.get("data"),
+            }
+        if res.get("http_error"):
             return {
                 "success": False,
-                "message": f"Erro do Home Assistant (HTTP {err.code}) ao chamar '{domain}.{service}': {err.reason}",
+                "message": f"Erro do Home Assistant (HTTP {res['status']}) ao chamar '{domain}.{service}': {res['error']}",
             }
-        except urllib.error.URLError as err:
-            return {
-                "success": False,
-                "message": f"Falha de rede ao conectar com Home Assistant: {err.reason}",
-            }
-        except Exception as exc:
-            return {"success": False, "message": f"Falha ao executar serviço '{domain}.{service}': {exc}"}
+        return {
+            "success": False,
+            "message": f"Falha de rede ao conectar com Home Assistant: {res['error']}",
+        }
 
     def control_light(
         self,
@@ -257,6 +359,9 @@ class HomeAssistantManager:
         color: str | list[int] | None = None,
     ) -> dict[str, Any]:
         """Controla lâmpadas inteligentes (ligar/desligar, dimerização de brilho, temperatura Kelvin e cor)."""
+        bloqueio = self.unavailable()
+        if bloqueio:
+            return bloqueio
         target_ent = self.find_entity(query=entity, domain="light")
         if not target_ent:
             available = [e.get("entity_id") for e in self.get_states(domain="light")]
@@ -359,6 +464,9 @@ class HomeAssistantManager:
         hvac_mode: str | None = None,
     ) -> dict[str, Any]:
         """Controla climatização / ar-condicionado (temperatura e modo de operação)."""
+        bloqueio = self.unavailable()
+        if bloqueio:
+            return bloqueio
         target_ent = self.find_entity(query=entity, domain="climate")
         if not target_ent:
             available = [e.get("entity_id") for e in self.get_states(domain="climate")]
@@ -421,6 +529,9 @@ class HomeAssistantManager:
 
     def control_switch(self, entity: str = "", action: str = "toggle") -> dict[str, Any]:
         """Controla tomadas, interruptores e relés inteligentes."""
+        bloqueio = self.unavailable()
+        if bloqueio:
+            return bloqueio
         target_ent = self.find_entity(query=entity, domain="switch")
         if not target_ent:
             available = [e.get("entity_id") for e in self.get_states(domain="switch")]
@@ -443,11 +554,9 @@ class HomeAssistantManager:
 
     def get_status(self, entity_or_query: str = "", domain: str | None = None) -> dict[str, Any]:
         """Retorna o estado legível e completo de um dispositivo ou de toda a casa."""
-        if not self.is_configured():
-            return {
-                "success": False,
-                "message": "Home Assistant não configurado. Defina a URL e o Token para consultar o estado da casa.",
-            }
+        bloqueio = self.unavailable()
+        if bloqueio:
+            return bloqueio
 
         if entity_or_query.strip():
             ent = self.find_entity(query=entity_or_query, domain=domain)
@@ -519,10 +628,161 @@ class HomeAssistantManager:
                 "attributes": attrs,
             }
 
+        if domain in ("scene", "script", "automation"):
+            label = {"scene": "Cena", "script": "Script", "automation": "Automação"}[domain]
+            return {
+                "success": True,
+                "entity_id": eid,
+                "state": state,
+                "message": f"{label} '{fname}' (estado '{state}').",
+                "attributes": attrs,
+            }
+
         return {
             "success": True,
             "entity_id": eid,
             "state": state,
             "message": f"Dispositivo '{fname}' está com estado '{state}'.",
             "attributes": attrs,
+        }
+
+    # ------------------------------------------------------------------------
+    # Cenas, Scripts e Automações — o que o Home Assistant tem de mais útil no
+    # dia a dia (uma frase aciona N dispositivos) e que a versão anterior não
+    # alcançava: ela só sabia falar de light/climate/switch.
+    # ------------------------------------------------------------------------
+    def _list_domain(self, domain: str) -> list[dict[str, Any]]:
+        """Lista entidades de um domínio com nome amigável e estado."""
+        out: list[dict[str, Any]] = []
+        for s in self.get_states(domain=domain):
+            attrs = s.get("attributes") or {}
+            eid = s.get("entity_id", "")
+            out.append({
+                "entity_id": eid,
+                "friendly_name": attrs.get("friendly_name") or eid,
+                "state": s.get("state"),
+            })
+        return out
+
+    def list_scenes(self) -> list[dict[str, Any]]:
+        """Cenas configuradas no Home Assistant."""
+        return self._list_domain("scene")
+
+    def list_scripts(self) -> list[dict[str, Any]]:
+        """Scripts configurados no Home Assistant."""
+        return self._list_domain("script")
+
+    def list_automations(self) -> list[dict[str, Any]]:
+        """Automações configuradas no Home Assistant."""
+        return self._list_domain("automation")
+
+    def _trigger_entity(self, domain: str, query: str, service: str, label: str) -> dict[str, Any]:
+        """Localiza uma entidade de cena/script/automação e aciona seu serviço."""
+        bloqueio = self.unavailable()
+        if bloqueio:
+            return bloqueio
+        ent = self.find_entity(query=query, domain=domain)
+        if not ent:
+            available = [e.get("entity_id") for e in self.get_states(domain=domain)]
+            if not available:
+                return {
+                    "success": False,
+                    "message": f"Nenhuma {label.lower()} encontrada no Home Assistant.",
+                }
+            return {
+                "success": False,
+                "message": f"{label} '{query}' não encontrada. Disponíveis: {', '.join(available)}.",
+                "available": available,
+            }
+        entity_id = ent["entity_id"]
+        friendly_name = (ent.get("attributes") or {}).get("friendly_name", entity_id)
+        res = self.call_service(domain, service, {"entity_id": entity_id})
+        if res.get("success"):
+            verb = "disparada" if service == "trigger" else "acionada"
+            res["message"] = f"{label} '{friendly_name}' {verb}."
+            res["entity_id"] = entity_id
+        return res
+
+    def trigger_scene(self, scene: str = "") -> dict[str, Any]:
+        """Ativa uma cena (scene.turn_on)."""
+        return self._trigger_entity("scene", scene, "turn_on", "Cena")
+
+    def run_script(self, script: str = "") -> dict[str, Any]:
+        """Executa um script do Home Assistant (script.turn_on)."""
+        return self._trigger_entity("script", script, "turn_on", "Script")
+
+    def trigger_automation(self, automation: str = "") -> dict[str, Any]:
+        """Dispara uma automação (automation.trigger), ignorando suas condições."""
+        return self._trigger_entity("automation", automation, "trigger", "Automação")
+
+    # ------------------------------------------------------------------------
+    # Eventos em tempo real (WebSocket) — delegação para o cliente dedicado.
+    # ------------------------------------------------------------------------
+    def _realtime(self):
+        from .home_assistant_realtime import get_realtime
+
+        return get_realtime(self.url, self.token)
+
+    def start_realtime(self) -> bool:
+        """Liga a escuta de eventos em tempo real (idempotente)."""
+        return self._realtime().start()
+
+    def stop_realtime(self) -> None:
+        """Desliga a escuta de eventos em tempo real."""
+        self._realtime().stop()
+
+    def realtime_status(self) -> dict[str, Any]:
+        """Estado do canal de eventos (rodando/conectado/nº de assinantes)."""
+        rt = self._realtime()
+        return {
+            "running": rt.is_running(),
+            "connected": rt.is_connected(),
+            "url": rt.url,
+        }
+
+    def on_event(
+        self,
+        callback: Callable[[dict[str, Any]], None],
+        *,
+        entity_filter: set[str] | None = None,
+        domains: set[str] | None = None,
+    ) -> Callable[[], None]:
+        """Assina mudanças de estado. Devolve a função de cancelamento.
+
+        O canal precisa estar ligado (``start_realtime``) para os callbacks
+        dispararem; assinar antes só enfileira a intenção.
+        """
+        return self._realtime().subscribe(callback, entity_filter=entity_filter, domains=domains)
+
+    def recent_events(self, limit: int = 20) -> list[dict[str, Any]]:
+        """Últimos eventos de estado observados em tempo real."""
+        return self._realtime().recent_events(limit)
+
+    def health(self) -> dict[str, Any]:
+        """Diagnóstico rápido: configurado? alcançável? canal de eventos ativo?"""
+        rt_status = self.realtime_status()
+        if not self.is_configured():
+            return {
+                "success": False,
+                "configured": False,
+                "reachable": False,
+                "realtime": rt_status,
+                "message": "Home Assistant não configurado (URL ou token ausente).",
+            }
+        res = self._request_json("GET", "/api/", timeout=3.0, retries=0)
+        reachable = bool(res["ok"])
+        if reachable:
+            message = "Home Assistant acessível."
+            if rt_status.get("connected"):
+                message += " Eventos em tempo real ativos."
+        elif res.get("http_error") and res.get("status") == 401:
+            message = "Token inválido (HTTP 401)."
+        else:
+            message = f"Home Assistant inalcançável: {res.get('error')}."
+        return {
+            "success": reachable,
+            "configured": True,
+            "reachable": reachable,
+            "realtime": rt_status,
+            "message": message,
         }
