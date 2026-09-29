@@ -21,6 +21,61 @@ from .memory import MemoryManager
 
 logger = logging.getLogger(__name__)
 
+#: Horário padrão quando a frase não traz hora ("amanhã" ⇒ 10:00). É o default
+#: histórico; mantido para não mudar o que o usuário já conhece.
+DEFAULT_EVENT_HOUR = 10
+
+
+def parse_when(date_str: str, now: datetime | None = None) -> datetime:
+    """Converte linguagem natural em data/hora. PURO — sem banco, sem rede.
+
+    Suporta "hoje", "amanhã", "depois de amanhã", horários ("15:30", "15h") e
+    ISO. Vive no **nível do módulo** (não só como método) porque o cliente da
+    Google Agenda reusa esta MESMA regra: duas cópias divergiriam em silêncio e
+    o mesmo "amanhã às 15h" agendaria dias diferentes conforme o caminho.
+
+    Uma correção sobre a versão anterior, com defeito **observável**:
+    - **"depois de amanhã" era inalcançável.** O `elif` vinha depois de um
+      `if "amanhã" in ...`, e "depois de amanhã" contém "amanhã" — então a frase
+      dava +1 dia em vez de +2. Agora a checagem mais específica vem primeiro.
+
+    Nota de honestidade: eu **supus** que o ISO com "T" maiúsculo também estava
+    quebrado (a string é baixada para minúsculas). Medido, é falso — o `strptime`
+    do Python é *case-insensitive* para literais, então `%Y-%m-%dT%H:%M` casa com
+    "2026-09-23t15:30". Não "corrigi" o que não estava quebrado; o `strptime`
+    segue rodando sobre `clean`, como antes.
+    """
+    clean = (date_str or "").strip().lower()
+    now = now or datetime.now()
+
+    # Extrai horário se presente (ex: 15:30 ou 15h)
+    hour = DEFAULT_EVENT_HOUR
+    minute = 0
+    time_match = re.search(r"(\d{1,2})[:h](\d{2})?", clean)
+    if time_match:
+        hour = int(time_match.group(1))
+        minute = int(time_match.group(2)) if time_match.group(2) else 0
+
+    target_date = now
+    if "depois de amanhã" in clean or "depois de amanha" in clean:
+        target_date = now + timedelta(days=2)
+    elif "amanhã" in clean or "amanha" in clean:
+        target_date = now + timedelta(days=1)
+    else:
+        # Tenta parsing ISO/formatado. `clean` serve: o `strptime` é
+        # case-insensitive para literais, então o "T" do ISO casa mesmo em baixa.
+        for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%d/%m/%Y %H:%M", "%Y-%m-%d"):
+            try:
+                parsed = datetime.strptime(clean, fmt)
+                if ":" in clean:
+                    return parsed
+                target_date = parsed
+                break
+            except ValueError:
+                pass
+
+    return target_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
 
 class CalendarManager:
     """Gerencia eventos de calendário e compromissos no desktop Zorin OS."""
@@ -67,36 +122,8 @@ class CalendarManager:
             conn.commit()
 
     def parse_datetime(self, date_str: str) -> datetime:
-        """Converte strings em datas (suporta termos como 'hoje', 'amanhã', horários e ISO)."""
-        clean = date_str.strip().lower()
-        now = datetime.now()
-
-        # Extrai horário se presente (ex: 15:30 ou 15h)
-        hour = 10
-        minute = 0
-        time_match = re.search(r"(\d{1,2})[:h](\d{2})?", clean)
-        if time_match:
-            hour = int(time_match.group(1))
-            minute = int(time_match.group(2)) if time_match.group(2) else 0
-
-        target_date = now
-        if "amanhã" in clean or "amanha" in clean:
-            target_date = now + timedelta(days=1)
-        elif "depois de amanhã" in clean:
-            target_date = now + timedelta(days=2)
-        else:
-            # Tenta parsing ISO
-            for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%d/%m/%Y %H:%M", "%Y-%m-%d"):
-                try:
-                    parsed = datetime.strptime(clean, fmt)
-                    if ":" in clean:
-                        return parsed
-                    target_date = parsed
-                    break
-                except ValueError:
-                    pass
-
-        return target_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        """Compatibilidade: a regra mora em `parse_when` (módulo), fonte única."""
+        return parse_when(date_str)
 
     def create_event(
         self,
@@ -201,6 +228,48 @@ class CalendarManager:
             cursor.execute("DELETE FROM calendar_events WHERE id = ?", (event_id,))
             conn.commit()
             return cursor.rowcount > 0
+
+    def mirror_events(self, events: list[dict[str, Any]]) -> int:
+        """Espelha eventos vindos da **fonte de verdade** (Google) no cache local.
+
+        O Google é a autoridade; esta cópia existe para consulta offline e para
+        não perder o histórico se a rede cair — nunca para decidir. `INSERT OR
+        REPLACE` pela chave `id`: rodar duas vezes não duplica.
+
+        Aceita tanto os nomes da API (`summary`) quanto os internos (`title`),
+        porque o normalizador do cliente devolve os dois. Evento sem id ou sem
+        título/início é **pulado** (não é erro): um registro parcial no cache é
+        pior que ausência — o usuário veria um compromisso sem nome.
+        """
+        gravados = 0
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            for event in events:
+                event_id = str(event.get("id") or "").strip()
+                title = str(event.get("title") or event.get("summary") or "").strip()
+                start = str(event.get("start") or "").strip()
+                if not event_id or not title or not start:
+                    continue
+                cursor.execute(
+                    """
+                    INSERT OR REPLACE INTO calendar_events
+                        (id, title, start_datetime, end_datetime, description, location, ics_path, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        event_id,
+                        title,
+                        start,
+                        str(event.get("end") or "").strip(),
+                        str(event.get("description") or "").strip(),
+                        str(event.get("location") or "").strip(),
+                        str(event.get("ics_path") or ""),
+                        str(event.get("created_at") or datetime.now().isoformat()),
+                    ),
+                )
+                gravados += 1
+            conn.commit()
+        return gravados
 
     def _generate_ics(
         self,
