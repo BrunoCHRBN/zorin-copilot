@@ -21,6 +21,7 @@ from .ai.providers import DEFAULT_GEMINI_MODEL, GEMINI_MODEL_CHOICES
 from .core.a11y import DesktopInspector
 from .core.browser import BrowserManager, WebPageReader
 from .core.config import CopilotConfig
+from .core.google_auth import known_services as google_services
 from .core.memory import MemoryManager
 from .core.rag import LocalDocumentRAG
 from .core.shortcuts import AutostartManager, ShortcutManager
@@ -70,6 +71,28 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["on", "off"],
         help="liga/desliga o modo tutor socrático no chat/HUD: guia com perguntas em vez de entregar respostas prontas",
     )
+
+    # google — integrações com o ecossistema Google (OAuth2 "Desktop app")
+    google_cmd = sub.add_parser(
+        "google", help="integrações com o ecossistema Google (Agenda, Drive, Gmail)"
+    )
+    google_sub = google_cmd.add_subparsers(dest="google_action", required=True)
+    google_sub.add_parser(
+        "status", help="mostra as bibliotecas, o cofre de tokens e o estado de cada serviço"
+    )
+    google_sub.add_parser("services", help="lista os serviços suportados e seus escopos mínimos")
+    g_connect = google_sub.add_parser(
+        "connect", help="autoriza um serviço no navegador e guarda o token com segurança"
+    )
+    g_connect.add_argument("service", choices=list(google_services()), help="serviço a conectar")
+    g_connect.add_argument(
+        "--no-browser", action="store_true", help="não abre o navegador; só imprime a URL"
+    )
+    g_connect.add_argument(
+        "--port", type=int, default=0, help="porta de loopback do redirect (0 = automática)"
+    )
+    g_disc = google_sub.add_parser("disconnect", help="remove o token guardado de um serviço")
+    g_disc.add_argument("service", choices=list(google_services()), help="serviço a desconectar")
 
     # memory
     memory_cmd = sub.add_parser("memory", help="gerencia a base de conhecimento e histórico de execuções")
@@ -151,6 +174,12 @@ def build_parser() -> argparse.ArgumentParser:
     agent_cmd.add_argument("--no-audit", action="store_true", help="não grava a execução na memória/auditoria")
     agent_cmd.add_argument("--verbose", action="store_true", help="mostra a observação completa de cada passo")
     agent_cmd.add_argument("--json", action="store_true", help="saída em JSON (para scriptar)")
+    agent_cmd.add_argument(
+        "--vision",
+        action="store_true",
+        help="modo guiado por visão: percepção fusionada (AT-SPI + screenshot + VLM), "
+        "validação pré/pós-ação e memória anti-loop",
+    )
 
     # study — captura e organização de material de estudo
     study_cmd = sub.add_parser("study", help="captura e organiza material de estudo a partir da tela")
@@ -273,6 +302,23 @@ def build_parser() -> argparse.ArgumentParser:
     study_lib.add_argument("--discipline", default=None, help="filtro por disciplina")
     study_lib.add_argument("--limit", type=int, default=15, help="máximo de itens (padrão 15)")
     study_lib.add_argument("--json", action="store_true", help="saída em JSON")
+
+    study_board = study_sub.add_parser(
+        "board",
+        help="abre o Quadro Negro Digital com o raciocínio estruturado (SolutionGraph)",
+    )
+    study_board.add_argument(
+        "--problem", default=None,
+        help="enunciado do problema (padrão: exemplo canônico x^2 - 5x + 6 = 0)",
+    )
+    study_board.add_argument(
+        "--json", action="store_true",
+        help="gera o SolutionGraph em JSON e sai (sem abrir a GUI)",
+    )
+    study_board.add_argument(
+        "--text", action="store_true",
+        help="imprime o raciocínio estruturado no terminal (sem abrir a GUI)",
+    )
 
     return parser
 
@@ -527,6 +573,93 @@ def cmd_config(args: argparse.Namespace) -> int:
         print(f"  Ollama URL: {cfg.ollama_url} (Modelo: {cfg.ollama_model})")
         print(f"  Modo tutor (HUD): {'ligado' if cfg.study_tutor else 'desligado'}")
         print(f"  Arquivo: {cfg.config_file()}")
+
+    return 0
+
+
+def cmd_google(args: argparse.Namespace) -> int:
+    """Gerencia as integrações com o ecossistema Google (OAuth2)."""
+    from .core import google_auth
+
+    action = args.google_action
+
+    if action == "services":
+        print("Serviços Google suportados (escopos mínimos, least-privilege):\n")
+        for service in google_auth.known_services():
+            label = google_auth.SERVICE_LABELS.get(service, service)
+            print(f"  {service} — {label}")
+            for scope in google_auth.scopes_for(service):
+                print(f"      {scope}")
+        print("\nConecte com:  zorin-copilot-cli google connect <serviço>")
+        return 0
+
+    if action == "status":
+        libs = google_auth.google_libs_available()
+        store = google_auth.default_token_store()
+        print("Integrações Google\n")
+        print(f"  Bibliotecas (extra [google]): {'instaladas' if libs else 'AUSENTES'}")
+        if not libs:
+            print("     Instale com:  pip install 'zorin-copilot[google]'")
+            print("     (ou no repositório:  uv sync --extra google)")
+        print(f"  Cofre de tokens: {store.name}")
+        print(f"  Credenciais: {google_auth.client_secret_path()}")
+        print()
+        rows = google_auth.connection_status(store=store)
+        width = max((len(r["label"]) for r in rows), default=0)
+        for row in rows:
+            if row["connected"]:
+                state = "conectado" if row["has_refresh"] else "conectado (sem refresh — reconecte em breve)"
+            else:
+                state = "não conectado"
+            print(f"  [{'OK' if row['connected'] else '--'}] {row['label']:<{width}}  {state}")
+
+        # Aviso proativo de expiração: em modo "Testing" a Google expira o refresh
+        # token em ~7 dias. A premissa vai escrita na mensagem, e o limite é
+        # configurável (`google_refresh_warning_days`; 0 desliga) — ver
+        # `google_auth.TESTING_REFRESH_WINDOW_DAYS` para o porquê.
+        from .core.config import CopilotConfig
+
+        warn_days = int(getattr(CopilotConfig.load(), "google_refresh_warning_days", 7) or 0)
+        avisos = google_auth.refresh_expiry_warnings(store=store, warn_days=warn_days)
+        if avisos:
+            print()
+            for aviso in avisos:
+                marca = "[!]" if aviso["severity"] == "warning" else "[i]"
+                print(f"  {marca} {aviso['message']}")
+        return 0
+
+    if action == "connect":
+        try:
+            result = google_auth.run_connect_flow(
+                args.service,
+                port=args.port,
+                open_browser=not args.no_browser,
+            )
+        except google_auth.GoogleLibsMissing as exc:
+            print(f"[FALHA] {exc}")
+            return 1
+        except google_auth.GoogleClientSecretMissing as exc:
+            print(f"[FALHA] {exc}")
+            return 1
+        except Exception as exc:
+            print(f"[FALHA] Não foi possível conectar '{args.service}': {exc}")
+            return 1
+        print(f"[OK] {result['label']} conectado (cofre: {result['backend']}).")
+        if not result["has_refresh"]:
+            print("  [Aviso] O provedor não devolveu refresh token — será preciso reconectar em breve.")
+        return 0
+
+    if action == "disconnect":
+        try:
+            had = google_auth.disconnect(args.service)
+        except google_auth.GoogleAuthError as exc:
+            print(f"[FALHA] {exc}")
+            return 1
+        if had:
+            print(f"[OK] '{args.service}' desconectado (token removido do cofre).")
+        else:
+            print(f"'{args.service}' já não estava conectado.")
+        return 0
 
     return 0
 
@@ -891,7 +1024,14 @@ def cmd_web(args: argparse.Namespace) -> int:
         researcher = DeepWebResearcher()
 
         def show_progress(stage: str, msg: str) -> None:
-            icons = {"search": "•", "download": "•", "synthesis": "•", "done": "[OK]", "failed": "[FALHA]"}
+            icons = {
+                "search": "•",
+                "download": "•",
+                "synthesis": "•",
+                "synthesis_failed": "[AVISO]",
+                "done": "[OK]",
+                "failed": "[FALHA]",
+            }
             print(f"  {icons.get(stage, '•')} {msg}")
 
         result = researcher.deep_search(
@@ -941,6 +1081,48 @@ def cmd_agent(args: argparse.Namespace) -> int:
         max_seconds=args.max_seconds,
         memory=memory,
     )
+
+    if args.vision:
+        try:
+            from .ai.browser_runtime import (
+                AntiLoopGuard,
+                VLMConditionChecker,
+                VisionBrowserPlanner,
+                VisionLLMPlanner,
+                build_browser_runtime,
+            )
+            from .core.perception import build_vision_perception
+
+            perception = build_vision_perception()
+            provider = getattr(route.planner, "provider", None)
+            if provider is None:
+                for getter in (router.cloud_planner, router.local_planner):
+                    try:
+                        provider = getter().provider
+                        if provider:
+                            break
+                    except Exception:
+                        pass
+            if provider is not None:
+                vplanner = VisionLLMPlanner(provider, perception=perception)
+            else:
+                vplanner = VisionBrowserPlanner(route.planner, perception=perception)
+            condition_checker = (
+                VLMConditionChecker(provider, perception) if provider is not None else None
+            )
+            loop = build_browser_runtime(
+                planner=vplanner,
+                perception=perception,
+                registry=registry,
+                condition_checker=condition_checker,
+                max_steps=args.max_steps,
+                max_seconds=args.max_seconds,
+            )
+            memory = loop.memory if loop.memory is not None else memory
+            if not args.json:
+                print("Modo visao: percepcao fusionada (AT-SPI + screenshot + VLM) ativa.")
+        except Exception as exc:
+            print(f"Falha ao ativar modo visao: {exc}. Usando modo agente padrao.")
 
     if not args.json:
         print(f"Objetivo: {args.objective}")
@@ -1017,6 +1199,43 @@ def cmd_study(args: argparse.Namespace) -> int:
         return _study_search(args)
     if args.study_action == "library":
         return _study_library(args)
+    if args.study_action == "board":
+        return _study_board(args)
+    return 0
+
+
+def _study_board(args: argparse.Namespace) -> int:
+    """Abre o Quadro Negro Digital com o SolutionGraph do problema.
+
+    --json gera o grafo estruturado sem abrir a GUI (caminho determinístico, útil
+    para scriptar e para os testes). Sem --json, abre a janela GTK (precisa de
+    ambiente gráfico)."""
+    from .ai.math_solver import build_quadratic_sample, render_terminal, solve
+
+    graph = solve(args.problem) if args.problem else build_quadratic_sample()
+
+    if args.json:
+        print(json.dumps(graph.to_dict(), ensure_ascii=False, indent=2))
+        return 0
+
+    if args.text:
+        print(render_terminal(graph))
+        return 0
+
+    try:
+        from gi.repository import Gtk
+        from .ui.widgets.blackboard import BlackboardWidget
+    except Exception as e:  # gi ausente (ex.: CI sem display)
+        print("Não foi possível abrir o Quadro Negro (sem ambiente gráfico).")
+        print("Abaixo, o raciocínio estruturado em modo texto:\n")
+        print(render_terminal(graph))
+        return 1
+
+    widget = BlackboardWidget.show_dialog(None, graph)
+    win = widget.get_root()
+    if win is not None:
+        win.connect("destroy", lambda *_: Gtk.main_quit())
+    Gtk.main()
     return 0
 
 
@@ -1480,6 +1699,7 @@ def main(argv: list[str] | None = None) -> int:
         "action": cmd_action,
         "ask": cmd_ask,
         "config": cmd_config,
+        "google": cmd_google,
         "memory": cmd_memory,
         "search": cmd_search,
         "rag": cmd_rag,
