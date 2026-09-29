@@ -60,6 +60,35 @@ class OperationalModulesTest(unittest.TestCase):
         self.assertEqual(dt_tomorrow.hour, 10)
         self.assertEqual(dt_tomorrow.minute, 0)
 
+    def test_calendar_depois_de_amanha_nao_e_amanha(self):
+        """'depois de amanhã' é +2 dias — a checagem de 'amanhã' não pode vencer.
+
+        Era um defeito latente: o `elif "depois de amanhã"` vinha DEPOIS de um
+        `if "amanhã" in ...`, e a frase contém "amanhã" — então dava +1 dia e o
+        ramo de +2 nunca rodava.
+        """
+        from datetime import datetime
+
+        from zorin_copilot.core.calendar import parse_when
+
+        now = datetime(2026, 9, 23, 8, 0)
+        self.assertEqual(parse_when("depois de amanhã às 10h", now=now), datetime(2026, 9, 25, 10, 0))
+        self.assertEqual(parse_when("amanhã às 10h", now=now), datetime(2026, 9, 24, 10, 0))
+
+    def test_calendar_iso_com_t_maiusculo_parseia(self):
+        """Guarda de regressão: ISO com 'T' parseia.
+
+        NÃO é a correção de um defeito — medido: o `strptime` do Python é
+        *case-insensitive* para literais, então a versão que baixava a string
+        para minúsculas já parseava "2026-09-23T15:30". Fica como guarda para
+        quem um dia trocar `strptime` por parsing manual.
+        """
+        from datetime import datetime
+
+        from zorin_copilot.core.calendar import parse_when
+
+        self.assertEqual(parse_when("2026-09-23T15:30"), datetime(2026, 9, 23, 15, 30))
+
     def test_calendar_create_event_generates_ics_and_stores_db(self):
         ok, msg, data = self.cal_mgr.create_event(
             title="Alinhamento de Projeto",
