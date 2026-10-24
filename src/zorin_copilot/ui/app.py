@@ -3031,7 +3031,13 @@ class CopilotWindow(Adw.ApplicationWindow):
         restrito por especialista: é a restrição de schema que impede um
         subagente de abrir outro (nenhuma allowlist autoriza `run_subagent`).
         """
-        def run_subagent_here(specialist: str, data: str) -> dict:
+        def run_subagent_here(
+            specialist: str,
+            data: str,
+            *,
+            target_window: str = "",
+            scratchpad_key: str = "",
+        ) -> dict:
             from ..ai.subagents import build_pipeline
 
             pipeline = build_pipeline(
@@ -3048,7 +3054,11 @@ class CopilotWindow(Adw.ApplicationWindow):
             # Guardado para o botão de parada alcançar o subagente em execução.
             self._active_subagent_pipeline = pipeline
             try:
-                result = pipeline.run(data)
+                result = pipeline.run(
+                    data,
+                    target_window=target_window,
+                    scratchpad_key=scratchpad_key,
+                )
             finally:
                 self._active_subagent_pipeline = None
             return {

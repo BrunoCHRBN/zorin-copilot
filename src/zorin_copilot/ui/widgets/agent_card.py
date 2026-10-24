@@ -196,6 +196,7 @@ SUBAGENT_ICONS: dict[str, str] = {
     "researcher": "system-search-symbolic",
     "refactorer": "applications-engineering-symbolic",
     "a11y_auditor": "preferences-desktop-accessibility-symbolic",
+    "window_analyst": "focus-windows-symbolic",
 }
 
 #: Ícone de um especialista que não está no mapa (catálogo novo, UI antiga).

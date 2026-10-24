@@ -111,15 +111,25 @@ class SubagentSpec:
     #: O que este estágio entrega ao próximo (documentação do pipeline).
     produces: str = ""
 
-    def build_objective(self, data: str) -> str:
-        """Objetivo concreto deste estágio a partir da entrada encadeada."""
+    def build_objective(self, data: str, *, target_window: str = "") -> str:
+        """Objetivo concreto deste estágio a partir da entrada encadeada e janela alvo opcional."""
         text = (data or "").strip()
         try:
-            return self.objective_template.format(input=text)
+            base = self.objective_template.format(input=text)
         except (KeyError, IndexError, ValueError):
             # Template com chave desconhecida ou chave literal: não vale derrubar
             # a execução por causa de um `{` solto — anexa e segue.
-            return f"{self.objective_template}\n\n{text}".strip()
+            base = f"{self.objective_template}\n\n{text}".strip()
+
+        win = (target_window or "").strip()
+        if win:
+            base = (
+                f"{base}\n\n"
+                f"ESCOPO DE JANELA DEDICADO: Opere prioritariamente na janela/aplicativo '{win}'. "
+                f"Use `inspect_window(query='{win}')` para focar e extrair a árvore AT-SPI desta janela "
+                f"e salve os dados coletados em `scratchpad_write`."
+            )
+        return base
 
 
 def chain_input(previous_input: str, stage_output: str) -> str:
@@ -221,13 +231,14 @@ class SubagentRun:
     error: str = ""
     elapsed: float = 0.0
     steps: list[Step] = field(default_factory=list)
+    target_window: str = ""
 
     @property
     def step_count(self) -> int:
         return len(self.steps)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "name": self.name,
             "title": self.title,
             "objective": self.objective,
@@ -239,6 +250,9 @@ class SubagentRun:
             "elapsed": round(self.elapsed, 3),
             "step_count": self.step_count,
         }
+        if self.target_window:
+            payload["target_window"] = self.target_window
+        return payload
 
 
 @dataclass
@@ -392,7 +406,13 @@ class SubagentPipeline:
 
     # -- execução ----------------------------------------------------------- #
 
-    def run(self, data: str) -> PipelineResult:
+    def run(
+        self,
+        data: str,
+        *,
+        target_window: str = "",
+        scratchpad_key: str = "",
+    ) -> PipelineResult:
         """Executa os estágios em sequência. Nunca levanta."""
         started = time.monotonic()
 
@@ -406,6 +426,8 @@ class SubagentPipeline:
 
         runs: list[SubagentRun] = []
         current = (data or "").strip()
+        clean_window = (target_window or "").strip()
+        clean_sp_key = (scratchpad_key or "").strip()
 
         for index, spec in enumerate(self.stages):
             if self._abort.is_set():
@@ -417,12 +439,27 @@ class SubagentPipeline:
             if planner is None:
                 return self._finish(PIPELINE_NO_PLANNER, runs, started)
 
-            objective = spec.build_objective(current)
+            objective = spec.build_objective(current, target_window=clean_window)
             self._notify(PHASE_START, index, spec, runs, started)
 
-            run = self._run_stage(spec, planner, objective, current, started)
+            run = self._run_stage(
+                spec,
+                planner,
+                objective,
+                current,
+                started,
+                target_window=clean_window,
+            )
             runs.append(run)
             self._notify(PHASE_END, index, spec, runs, started, run=run)
+
+            # Persiste achados consolidados do estágio na memória de trabalho (Scratchpad)
+            # compartilhada com o agente pai e os próximos estágios.
+            scratchpad = getattr(self.registry, "scratchpad", None)
+            if isinstance(scratchpad, dict) and run.output.strip():
+                scratchpad[f"subagent_{spec.name}"] = run.output.strip()
+                if clean_sp_key and index == len(self.stages) - 1:
+                    scratchpad[clean_sp_key] = run.output.strip()
 
             if not run.ok:
                 return self._finish(
@@ -458,6 +495,8 @@ class SubagentPipeline:
         objective: str,
         stage_input: str,
         started: float,
+        *,
+        target_window: str = "",
     ) -> SubagentRun:
         """Roda UM estágio. Devolve sempre um `SubagentRun` — nunca levanta."""
         stage_started = time.monotonic()
@@ -469,6 +508,19 @@ class SubagentPipeline:
         budget_steps = max(1, int(spec.max_steps))
 
         stage_registry = restrict_registry(self.registry, spec.allow)
+        if target_window:
+            try:
+                from ..core.window_manager import WindowManager
+
+                win = WindowManager.find_window(target_window)
+                if win:
+                    WindowManager.focus_window(win.id or win.app)
+                    fence = getattr(stage_registry, "_fence", None)
+                    if fence is not None and hasattr(fence, "set_chosen_window"):
+                        fence.set_chosen_window(win)
+            except Exception as exc:
+                logger.debug("Não foi possível pré-focar janela '%s' no subagente: %s", target_window, exc)
+
         trace_record(
             "subagent",
             "start",
@@ -519,6 +571,7 @@ class SubagentPipeline:
             error=result.error or "",
             elapsed=round(time.monotonic() - stage_started, 3),
             steps=list(result.steps),
+            target_window=target_window,
         )
         trace_record(
             "subagent",
@@ -614,6 +667,9 @@ _RESEARCHER = SubagentSpec(
         "read_file",
         "list_directory",
         "search_code",
+        "scratchpad_write",
+        "scratchpad_read",
+        "plan_update",
     ),
     max_steps=12,
     max_seconds=240.0,
@@ -644,6 +700,9 @@ _REFACTORER = SubagentSpec(
         "write_document",
         "run_command",
         "undo_last",
+        "scratchpad_write",
+        "scratchpad_read",
+        "plan_update",
     ),
     max_steps=15,
     max_seconds=300.0,
@@ -656,7 +715,7 @@ _A11Y_AUDITOR = SubagentSpec(
     objective_template=(
         "Audite a acessibilidade da interface descrita abaixo, em português do Brasil.\n"
         "Método:\n"
-        "1. Obtenha a árvore de acessibilidade da janela (`get_ui_tree`, `list_open_windows`).\n"
+        "1. Obtenha a árvore de acessibilidade da janela (`inspect_window`, `get_ui_tree`, `list_open_windows`).\n"
         "2. Procure os defeitos clássicos: controle sem nome acessível, ícone usado como "
         "único rótulo, ordem de foco incoerente, alvo de clique pequeno demais, "
         "informação transmitida só por cor, texto cortado.\n"
@@ -667,6 +726,7 @@ _A11Y_AUDITOR = SubagentSpec(
     ),
     allow=(
         "list_open_windows",
+        "inspect_window",
         "get_ui_tree",
         "find_element",
         "locate_element",
@@ -676,15 +736,49 @@ _A11Y_AUDITOR = SubagentSpec(
         "capture_screen",
         "focus_window",
         "scroll_page",
+        "scratchpad_write",
+        "scratchpad_read",
+        "plan_update",
     ),
     max_steps=12,
     max_seconds=180.0,
     produces="lista de achados com widget, defeito e correção sugerida",
 )
 
+_WINDOW_ANALYST = SubagentSpec(
+    name="window_analyst",
+    title="Analista de janelas",
+    objective_template=(
+        "Inspecione e cruze informações entre as janelas abertas conforme o pedido abaixo, "
+        "em português do Brasil.\n"
+        "Método:\n"
+        "1. Mapeie as janelas com `list_open_windows` e inspecione cada janela alvo com `inspect_window`.\n"
+        "2. Extraia os dados factuais de cada janela e grave imediatamente no Scratchpad com `scratchpad_write`.\n"
+        "3. Compare e consolide os dados entre os aplicativos sem inventar valores ausentes.\n"
+        "4. Entregue um relatório estruturado indicando de qual janela cada dado foi extraído.\n\n"
+        "Pedido: {input}"
+    ),
+    allow=(
+        "list_open_windows",
+        "inspect_window",
+        "focus_window",
+        "get_ui_tree",
+        "find_element",
+        "locate_element",
+        "read_screen_text",
+        "scroll_page",
+        "scratchpad_write",
+        "scratchpad_read",
+        "plan_update",
+    ),
+    max_steps=12,
+    max_seconds=180.0,
+    produces="dados estruturados extraídos e comparados entre múltiplas janelas",
+)
+
 #: Especialistas disponíveis, por nome.
 CATALOG: dict[str, SubagentSpec] = {
-    spec.name: spec for spec in (_RESEARCHER, _REFACTORER, _A11Y_AUDITOR)
+    spec.name: spec for spec in (_RESEARCHER, _REFACTORER, _A11Y_AUDITOR, _WINDOW_ANALYST)
 }
 
 

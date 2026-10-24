@@ -440,6 +440,9 @@ class ToolRegistry:
         """
         keep = {str(name) for name in names}
         clone = copy.copy(self)
+        # O Scratchpad (`_scratchpad`) é compartilhado intencionalmente entre pai e
+        # subagente; já os marcos do plano (`_plan_milestones`) são isolados por estágio.
+        clone._plan_milestones = []
         clone._specs = {
             name: spec for name, spec in self._specs.items() if name in keep
         }
@@ -747,13 +750,19 @@ class ToolRegistry:
 
         started = time.monotonic()
         timeout = spec.timeout if spec.timeout is not None else self.default_timeout
+        handler = spec.handler
+        if (
+            isinstance(getattr(handler, "__self__", None), ToolRegistry)
+            and getattr(handler, "__self__", None) is not self
+        ):
+            handler = getattr(self, getattr(handler, "__name__", ""), handler)
 
         try:
             if timeout and timeout > 0:
-                future = self._get_executor().submit(spec.handler, args)
+                future = self._get_executor().submit(handler, args)
                 result = future.result(timeout=timeout)
             else:
-                result = spec.handler(args)
+                result = handler(args)
         except concurrent.futures.TimeoutError:
             logger.warning("Ferramenta '%s' excedeu o timeout de %.1fs", name, timeout)
             result = {
@@ -1324,22 +1333,30 @@ class ToolRegistry:
                 description=(
                     "Delega uma tarefa LONGA e de raciocínio em várias etapas a um subagente "
                     "especializado. O subagente roda com contexto isolado (não vê esta conversa), "
-                    "ferramentas restritas ao seu domínio e orçamento próprio de passos — use-o "
-                    "quando a tarefa exigiria muitos passos aqui e poluiria o contexto principal. "
+                    "memória de trabalho (Scratchpad) compartilhada, ferramentas restritas ao seu "
+                    "domínio e orçamento próprio de passos — use-o quando a tarefa exigiria muitos "
+                    "passos aqui e poluiria o contexto principal. "
                     "Especialistas: 'researcher' (pesquisa com fontes e verificação), "
-                    "'refactorer' (refatoração de código com leitura, edição e testes) e "
-                    "'a11y_auditor' (auditoria de acessibilidade de uma janela aberta). "
+                    "'refactorer' (refatoração de código com leitura, edição e testes), "
+                    "'a11y_auditor' (auditoria de acessibilidade de uma janela aberta) e "
+                    "'window_analyst' (extração e cruzamento de dados entre múltiplas janelas). "
                     "Devolve o resultado consolidado do subagente; ele não conversa com o usuário."
                 ),
                 parameters=_param(
                     {
                         "specialist": _str(
-                            "Nome do especialista: 'researcher', 'refactorer' ou 'a11y_auditor'."
+                            "Nome do especialista: 'researcher', 'refactorer', 'a11y_auditor' ou 'window_analyst'."
                         ),
                         "input": _str(
                             "O que o subagente deve fazer, em detalhe. É a ÚNICA coisa que ele "
                             "recebe: inclua o alvo (tópico, caminho, janela) e o formato do "
                             "resultado esperado."
+                        ),
+                        "target_window": _str(
+                            "Opcional: nome do aplicativo ou título da janela à qual o subagente deve dedicar seu foco."
+                        ),
+                        "scratchpad_key": _str(
+                            "Opcional: chave do Scratchpad onde o relatório consolidado do subagente será gravado."
                         ),
                     },
                     required=["specialist", "input"],
@@ -3505,8 +3522,23 @@ class ToolRegistry:
                 ),
             }
 
+        target_window = str(args.get("target_window") or "").strip()
+        scratchpad_key = str(args.get("scratchpad_key") or "").strip()
+
         try:
-            result = runner(specialist, data)
+            import inspect
+
+            sig = inspect.signature(runner)
+            params = sig.parameters
+            accepts_kwargs = any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+            )
+            call_kwargs: dict[str, Any] = {}
+            if target_window and ("target_window" in params or accepts_kwargs):
+                call_kwargs["target_window"] = target_window
+            if scratchpad_key and ("scratchpad_key" in params or accepts_kwargs):
+                call_kwargs["scratchpad_key"] = scratchpad_key
+            result = runner(specialist, data, **call_kwargs)
         except Exception as exc:  # nenhum gancho pode derrubar o loop
             logger.exception("Subagente '%s' falhou", specialist)
             return {"ok": False, "error": f"Falha ao executar o subagente: {exc}"}
@@ -3527,6 +3559,15 @@ class ToolRegistry:
             result["ok"] = False
             result.setdefault("error", "O subagente não informou se concluiu a tarefa.")
         result.setdefault("specialist", specialist)
+        if target_window:
+            result.setdefault("target_window", target_window)
+        if result.get("ok"):
+            report_text = str(result.get("report") or result.get("output") or "").strip()
+            if report_text:
+                self._scratchpad[f"subagent_{specialist}"] = report_text
+                if scratchpad_key:
+                    self._scratchpad[scratchpad_key] = report_text
+                result.setdefault("scratchpad_key", scratchpad_key or f"subagent_{specialist}")
         return result
 
     def _tool_academic_search(self, args: dict[str, Any]) -> dict[str, Any]:

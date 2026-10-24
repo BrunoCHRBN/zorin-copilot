@@ -921,3 +921,88 @@ def test_run_subagent_nao_promove_retorno_nao_legivel_a_sucesso():
 
     assert resultado["ok"] is False
     assert "relatório" in resultado["error"]
+
+
+# --------------------------------------------------------------------------- #
+# 5ª Entrega: Escopo de janela dedicado e Scratchpad compartilhado
+# --------------------------------------------------------------------------- #
+
+
+def test_window_analyst_esta_no_catalogo_com_inspect_window_e_scratchpad():
+    assert "window_analyst" in CATALOG
+    analista = CATALOG["window_analyst"]
+    for ferramenta in ("inspect_window", "scratchpad_write", "scratchpad_read", "plan_update"):
+        assert ferramenta in analista.allow
+
+
+def test_subagente_compartilha_scratchpad_com_pai_e_isola_milestones():
+    pai = ToolRegistry()
+    pai.call("scratchpad_write", {"key": "contexto_pai", "content": "dados iniciais"})
+    pai.call("plan_update", {"steps": ["Etapa 1 do pai", "Etapa 2 do pai"]})
+
+    restrito = restrict_registry(pai, ("scratchpad_write", "scratchpad_read", "plan_update"))
+    assert restrito.scratchpad == {"contexto_pai": "dados iniciais"}
+    assert restrito.plan_milestones == []
+
+    # Escrita no subagente reflete no Scratchpad do pai, mas plano do subagente não altera o pai
+    restrito.call("scratchpad_write", {"key": "nota_sub", "content": "achado"})
+    restrito.call("plan_update", {"steps": ["Sub-etapa única"]})
+    assert pai.scratchpad["nota_sub"] == "achado"
+    assert len(pai.plan_milestones) == 2
+
+    # Pipeline persiste saída consolidada automaticamente no Scratchpad do registro
+    planner = RecordingPlanner(
+        responder=lambda objective: AgentDecision(final_answer="Relatório consolidado do estágio")
+    )
+    resultado = SubagentPipeline([spec("window_analyst")], pai, planner).run(
+        "comparar janelas", scratchpad_key="comparacao_final"
+    )
+    assert resultado.ok is True
+    assert pai.scratchpad["subagent_window_analyst"] == "Relatório consolidado do estágio"
+    assert pai.scratchpad["comparacao_final"] == "Relatório consolidado do estágio"
+
+
+def test_target_window_injeta_escopo_de_janela_no_objetivo_e_no_run():
+    planner = RecordingPlanner()
+    pipeline = SubagentPipeline([spec("window_analyst")], StubRegistry(), planner)
+    resultado = pipeline.run("extrair tabela de custos", target_window="LibreOffice Calc")
+
+    assert resultado.ok is True
+    assert resultado.runs[0].target_window == "LibreOffice Calc"
+    assert resultado.runs[0].to_dict()["target_window"] == "LibreOffice Calc"
+    assert "ESCOPO DE JANELA DEDICADO" in resultado.runs[0].objective
+    assert "LibreOffice Calc" in resultado.runs[0].objective
+
+
+def test_run_subagent_repassa_target_window_e_grava_scratchpad():
+    recebido = {}
+
+    def runner(especialista, entrada, *, target_window="", scratchpad_key=""):
+        recebido["especialista"] = especialista
+        recebido["entrada"] = entrada
+        recebido["target_window"] = target_window
+        recebido["scratchpad_key"] = scratchpad_key
+        return {"ok": True, "report": "Dados da planilha extraídos"}
+
+    registro = ToolRegistry(subagent_runner=runner)
+    resultado = registro.call(
+        "run_subagent",
+        {
+            "specialist": "window_analyst",
+            "input": "extrair coluna B",
+            "target_window": "Calc",
+            "scratchpad_key": "coluna_b",
+        },
+    )
+
+    assert resultado["ok"] is True
+    assert recebido == {
+        "especialista": "window_analyst",
+        "entrada": "extrair coluna B",
+        "target_window": "Calc",
+        "scratchpad_key": "coluna_b",
+    }
+    assert resultado["target_window"] == "Calc"
+    assert resultado["scratchpad_key"] == "coluna_b"
+    assert registro.scratchpad["coluna_b"] == "Dados da planilha extraídos"
+    assert registro.scratchpad["subagent_window_analyst"] == "Dados da planilha extraídos"
