@@ -466,6 +466,9 @@ class TestLocalMicReconnect(unittest.TestCase):
             config=self.config, executor=MagicMock(), engine=MagicMock()
         )
         self.client.on_error = MagicMock()
+        which_patcher = patch("zorin_copilot.ai.local_voice.shutil.which", return_value="/usr/bin/pw-record")
+        which_patcher.start()
+        self.addCleanup(which_patcher.stop)
 
     # --- L1: comando / abertura do gravador ------------------------------
     def test_build_recorder_cmd_none_without_recorder(self):

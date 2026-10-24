@@ -203,6 +203,18 @@ class MigracaoDoPromptTest(unittest.TestCase):
 # O prompt composto
 # ---------------------------------------------------------------------------
 class PromptCompostoTest(unittest.TestCase):
+    def setUp(self):
+        from zorin_copilot.core.desktop.env import DistroInfo, Environment
+
+        self._env = Environment(
+            distro=DistroInfo(id="endeavouros", pretty_name="EndeavourOS"),
+            desktop="hyprland",
+            session_type="wayland",
+        )
+        patcher = mock.patch.object(providers, "current_environment", return_value=self._env)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_com_a_identidade_default_o_prompt_nao_muda_um_byte(self):
         """**A prova de que o refactor não mudou comportamento.**
 

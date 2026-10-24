@@ -90,6 +90,7 @@ jobs:
         # PyGObject vem do pacman: instalá-lo pelo pip quebraria por PEP 668 e
         # por falta de typelibs. --no-deps mantém essa separação explícita.
         run: |
+          git config --global --add safe.directory "*"
           python -m venv --system-site-packages .venv
           .venv/bin/pip install -e . --no-deps
           # setuptools entrou na lista de propósito: desde o Python 3.12 o venv
@@ -181,6 +182,7 @@ jobs:
 
       - name: Prepara o ambiente
         run: |
+          git config --global --add safe.directory "*"
           python -m venv --system-site-packages .venv
           .venv/bin/pip install -e . --no-deps
           # setuptools entrou na lista de propósito: desde o Python 3.12 o venv

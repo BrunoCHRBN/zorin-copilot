@@ -3763,7 +3763,7 @@ class ToolRegistry:
             max_count = 10
         max_count = max(1, min(max_count, 50))
 
-        cmd = ["git", "log", f"-n{max_count}", "--pretty=format:%h %ad | %s (%an)", "--date=short"]
+        cmd = ["git", "-c", "safe.directory=*", "log", f"-n{max_count}", "--pretty=format:%h %ad | %s (%an)", "--date=short"]
 
         rev_range = (args.get("revision_range") or "").strip()
         if rev_range:
@@ -3843,7 +3843,7 @@ class ToolRegistry:
 
         work_dir = target_path if os.path.isdir(target_path) else os.path.dirname(target_path)
 
-        cmd = ["git", "status", "--short", "--branch"]
+        cmd = ["git", "-c", "safe.directory=*", "status", "--short", "--branch"]
         try:
             proc = subprocess.run(
                 cmd,
@@ -4469,7 +4469,7 @@ class ToolRegistry:
                 "message": f"Caminho não encontrado: '{raw_path}'",
             }
         work_dir = target_path if os.path.isdir(target_path) else os.path.dirname(target_path)
-        cmd = ["git", "diff"]
+        cmd = ["git", "-c", "safe.directory=*", "diff"]
         if args.get("staged"):
             cmd.append("--cached")
         fpath = (args.get("file_path") or "").strip()
