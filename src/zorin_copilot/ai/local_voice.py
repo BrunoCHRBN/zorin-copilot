@@ -211,6 +211,16 @@ def build_spoken_response(
     return result
 
 
+def split_into_speech_clauses(text: str) -> list[str]:
+    """Divide o texto higienizado em cláusulas/sentenças para síntese incremental (menor TTFA)."""
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return []
+    parts = [p.strip() for p in re.split(r"(?<=[.!?;:])\s+", cleaned) if p.strip()]
+    return parts if parts else [cleaned]
+
+
+
 def piper_available() -> bool:
     """Diz se o motor de voz local (Piper) pode ser carregado.
 
@@ -340,15 +350,19 @@ class LocalVoiceSynthesizer:
                 stderr=subprocess.DEVNULL,
             )
 
-            # Sintetiza chunks do Piper em streaming e escreve diretamente no stdin do tocador
-            for chunk in self._voice.synthesize(cleaned):
+            # Sintetiza cláusulas/sentenças do Piper em streaming incremental (menor TTFA)
+            clauses = split_into_speech_clauses(cleaned)
+            for clause in clauses:
                 if self._stop_event.is_set():
                     break
-                if self._playback_proc and self._playback_proc.stdin:
-                    try:
-                        self._playback_proc.stdin.write(chunk.audio_int16_bytes)
-                    except (BrokenPipeError, OSError):
+                for chunk in self._voice.synthesize(clause):
+                    if self._stop_event.is_set():
                         break
+                    if self._playback_proc and self._playback_proc.stdin:
+                        try:
+                            self._playback_proc.stdin.write(chunk.audio_int16_bytes)
+                        except (BrokenPipeError, OSError):
+                            break
 
             if self._playback_proc and self._playback_proc.stdin:
                 try:
@@ -566,6 +580,9 @@ class LocalLiveVoiceClient:
         self.silence_threshold = 0.08  # RMS normalizado sensível calibrado para voz humana
         self.silence_chunks_timeout = 8  # 8 * 100ms = 800ms de silêncio para fechar turno
         self.min_speech_chunks = 6  # Mínimo de 600ms de fala para evitar ruído de respiração ou clique
+        self.barge_in_enabled: bool = bool(getattr(config, "live_local_barge_in_enabled", True))
+        self.barge_in_threshold: float = 0.38  # Limiar acústico acima do eco do alto-falante
+        self.barge_in_min_chunks: int = 3  # 3 * 100ms = 300ms de fala firme para interromper TTS
 
         # Histórico da sessão para persistência
         self._executed_actions_log: list[dict[str, Any]] = []
@@ -843,9 +860,28 @@ class LocalLiveVoiceClient:
         if self._is_muted:
             return
 
-        # Isolamento acústico e anti-eco: Enquanto o assistente fala ou processa,
-        # ignoramos a entrada do microfone para evitar auto-interrupção e eco dos alto-falantes.
-        if self.state in (LiveVoiceState.SPEAKING, LiveVoiceState.THINKING, LiveVoiceState.EXECUTING):
+        # Barge-in acústico com histerese durante SPEAKING e isolamento em THINKING/EXECUTING
+        if self.state == LiveVoiceState.SPEAKING:
+            if self.barge_in_enabled and norm_level >= self.barge_in_threshold:
+                self._barge_in_chunks += 1
+                self._preroll_buffer.append(pcm_chunk)
+                if self._barge_in_chunks >= self.barge_in_min_chunks:
+                    logger.info("Barge-in acústico detectado no modo voz local; interrompendo TTS.")
+                    self._barge_in_chunks = 0
+                    self.interrupt()
+                    self._is_user_speaking = True
+                    self._speech_buffer = list(self._preroll_buffer)
+                    self._silence_chunks = 0
+                return
+            self._barge_in_chunks = 0
+            self._speech_buffer.clear()
+            self._preroll_buffer.clear()
+            self._is_user_speaking = False
+            self._silence_chunks = 0
+            return
+
+        if self.state in (LiveVoiceState.THINKING, LiveVoiceState.EXECUTING):
+            self._barge_in_chunks = 0
             self._speech_buffer.clear()
             self._preroll_buffer.clear()
             self._is_user_speaking = False

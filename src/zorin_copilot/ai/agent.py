@@ -84,6 +84,8 @@ class AgentDecision:
     #: ex.: VisionLLMPlanner). Usadas pelo ValidatingToolRegistry para validar.
     preconditions: list[str] = field(default_factory=list)
     postconditions: list[str] = field(default_factory=list)
+    #: Marcos de execução multipassos (inline ou atualizados pelo planejador).
+    plan: list[dict[str, str]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.tool_call is not None and not self.tool_calls:
@@ -374,6 +376,12 @@ class AgentLoop:
                         steps, objective, STOP_ERROR, started, dry_run, error=decision.error
                     )
 
+                if decision.plan:
+                    pm = getattr(registry, "plan_milestones", None)
+                    if isinstance(pm, list):
+                        pm.clear()
+                        pm.extend(dict(m) for m in decision.plan if isinstance(m, dict))
+
                 if decision.tool_call is None:
                     return self._finish(
                         steps,
@@ -524,6 +532,10 @@ class AgentLoop:
                 sp = getattr(self.registry, "scratchpad", None)
                 if isinstance(sp, dict):
                     kwargs["scratchpad"] = dict(sp)
+            if "plan_milestones" in sig.parameters:
+                pm = getattr(self.registry, "plan_milestones", None)
+                if isinstance(pm, list):
+                    kwargs["plan_milestones"] = [dict(m) for m in pm]
             return self.planner.decide(
                 objective,
                 tools,

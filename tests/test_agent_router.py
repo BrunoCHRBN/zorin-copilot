@@ -467,4 +467,46 @@ def test_decision_from_json_interpreta_tool_calls_em_lote():
     assert decision.tool_calls[0].rationale == "Pesquisar simultaneamente na web e em bases acadêmicas"
 
 
+def test_build_planner_prompt_inclui_marcos_e_alerta_replanejamento():
+    from zorin_copilot.ai.agent_router import build_planner_prompt
+
+    milestones = [
+        {"title": "Localizar botão de filtro", "status": "done"},
+        {"title": "Aplicar ordenação por menor preço", "status": "in_progress"},
+        {"title": "Extrair 3 melhores ofertas", "status": "pending"},
+    ]
+    history = [
+        {"index": 0, "tool": "click_on_screen", "args": {"query": "Menor preço"}, "ok": False, "error": "Elemento não encontrado"},
+    ]
+    prompt = build_planner_prompt(
+        "filtrar ofertas por menor preço",
+        [],
+        history=history,
+        plan_milestones=milestones,
+    )
+    assert "PLANO DE EXECUÇÃO MULTIPASSOS (MARCOS):" in prompt
+    assert "1. [✓ CONCLUÍDO] Localizar botão de filtro" in prompt
+    assert "2. [→ EM ANDAMENTO] Aplicar ordenação por menor preço" in prompt
+    assert "3. [  PENDENTE] Extrair 3 melhores ofertas" in prompt
+    assert "ALERTA DE REPLANEJAMENTO AUTÔNOMO" in prompt
+    assert "scroll_page" in prompt
+    assert "inspect_window" in prompt
+
+
+def test_decision_from_json_interpreta_plan_inline():
+    payload = {
+        "tool": "web_search",
+        "args": {"query": "zorin os"},
+        "rationale": "Iniciar etapa 2",
+        "plan": ["1. Definir escopo", "2. Buscar fontes", "3. Sintetizar"],
+        "completed_step": 1,
+    }
+    decision = decision_from_json(payload)
+    assert len(decision.plan) == 3
+    assert decision.plan[0] == {"title": "Definir escopo", "status": "done"}
+    assert decision.plan[1] == {"title": "Buscar fontes", "status": "in_progress"}
+    assert decision.plan[2] == {"title": "Sintetizar", "status": "pending"}
+
+
+
 

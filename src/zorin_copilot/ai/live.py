@@ -1405,6 +1405,61 @@ LIVE_TOOLS_DECLARATION = [
                     "required": ["deck_id"],
                 },
             },
+            {
+                "name": "inspect_screen_region",
+                "description": (
+                    "Vision-on-Demand: captura um recorte em alta definição (resolução nativa) de uma janela "
+                    "específica ou região de interesse (ROI) da tela e extrai sua árvore semântica AT-SPI. "
+                    "Ideal para ler textos pequenos em terminais, planilhas, código ou janelas secundárias."
+                ),
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "window_query": {
+                            "type": "STRING",
+                            "description": "Nome do aplicativo ou trecho do título da janela a inspecionar (opcional).",
+                        },
+                        "focus": {
+                            "type": "BOOLEAN",
+                            "description": "Se true, foca na janela alvo antes de capturar (padrão false).",
+                        },
+                        "x": {"type": "INTEGER", "description": "Coordenada X opcional do recorte."},
+                        "y": {"type": "INTEGER", "description": "Coordenada Y opcional do recorte."},
+                        "width": {"type": "INTEGER", "description": "Largura opcional do recorte."},
+                        "height": {"type": "INTEGER", "description": "Altura opcional do recorte."},
+                    },
+                },
+            },
+            {
+                "name": "scratchpad_note",
+                "description": (
+                    "Gerencia o bloco de notas de trabalho (Scratchpad) da sessão Live para guardar, consultar "
+                    "ou cruzar dados coletados entre diferentes janelas e aplicativos."
+                ),
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "action": {
+                            "type": "STRING",
+                            "enum": ["write", "read", "clear"],
+                            "description": "Operação no Scratchpad ('write', 'read' ou 'clear').",
+                        },
+                        "key": {
+                            "type": "STRING",
+                            "description": "Chave identificadora da nota (ex: 'cotacao_aba1', 'erro_terminal').",
+                        },
+                        "content": {
+                            "type": "STRING",
+                            "description": "Conteúdo a salvar quando action='write'.",
+                        },
+                        "append": {
+                            "type": "BOOLEAN",
+                            "description": "Se true, concatena ao valor existente na chave.",
+                        },
+                    },
+                    "required": ["action"],
+                },
+            },
         ]
     }
 ]
@@ -1546,6 +1601,7 @@ class GeminiLiveClient:
         # Entrega G / P1-7: forma única `{"role","text"}` (antes era tupla), igual à do
         # cliente local — os dois devolvem esta lista sob a mesma chave no resumo.
         self._transcripts_log: list[dict[str, str]] = []
+        self._scratchpad: dict[str, str] = {}
 
     def _set_state(self, state: LiveVoiceState, message: str = "") -> None:
         if getattr(self, "state", None) == state and getattr(self, "_last_state_msg", None) == message:
@@ -1714,6 +1770,9 @@ class GeminiLiveClient:
                 name = a.get("name") or a.get("tool") or "ação"
                 acts.append(str(name))
             lines.append("Ações executadas: " + ", ".join(acts))
+        if getattr(self, "_scratchpad", None):
+            notes_preview = "; ".join(f"{k}={v[:80]}" for k, v in list(self._scratchpad.items())[-5:])
+            lines.append(f"Scratchpad: {notes_preview}")
         return "\n".join(lines)
 
     async def _summary_loop(self) -> None:
@@ -3083,11 +3142,27 @@ class GeminiLiveClient:
                 else:
                     ok, img_bytes, mode = ScreenCaptureService.capture(interactive=interactive)
                 if ok and img_bytes:
+                    if getattr(self, "_ws", None) is not None and getattr(self, "_loop", None) is not None:
+                        try:
+                            if self._loop.is_running():
+                                b64_snap = base64.b64encode(img_bytes).decode("utf-8")
+                                asyncio.run_coroutine_threadsafe(
+                                    self._ws.send(json.dumps(build_realtime_video_msg(b64_snap))),
+                                    self._loop,
+                                )
+                        except Exception:
+                            pass
                     return {
                         "success": True,
                         "message": f"Captura ({mode}) realizada com sucesso com {len(img_bytes)} bytes.",
                     }
                 return {"success": False, "message": "Captura de tela cancelada pelo usuário."}
+
+            elif name == "inspect_screen_region":
+                return self._tool_inspect_screen_region(args)
+
+            elif name == "scratchpad_note":
+                return self._tool_scratchpad_note(args)
 
             elif name == "open_url":
                 url = args.get("url", "").strip()
@@ -3912,6 +3987,129 @@ class GeminiLiveClient:
             logger.error(f"Erro ao despachar ferramenta {name}: {exc}")
             return {"success": False, "message": f"Erro de execução: {exc}"}
 
+    def _tool_inspect_screen_region(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Vision-on-Demand: captura recorte em resolução nativa de janela ou ROI + árvore AT-SPI."""
+        window_query = str(args.get("window_query") or "").strip()
+        should_focus = bool(args.get("focus", False))
+        crop_rect: tuple[int, int, int, int] | None = None
+        target_app = ""
+        target_title = ""
+
+        if window_query:
+            try:
+                from ..core.window_manager import WindowManager
+
+                win = WindowManager.find_window(window_query)
+                if win is not None:
+                    target_app = win.app or window_query
+                    target_title = win.title or ""
+                    if win.width > 0 and win.height > 0:
+                        crop_rect = (win.x, win.y, win.width, win.height)
+                    if should_focus:
+                        WindowManager.focus_window(win.id or win.app)
+                        time.sleep(0.08)
+            except Exception as exc:
+                logger.debug("Falha ao buscar janela em inspect_screen_region: %s", exc)
+
+        if crop_rect is None:
+            rx, ry, rw, rh = args.get("x"), args.get("y"), args.get("width"), args.get("height")
+            if rx is not None and ry is not None and rw and rh:
+                try:
+                    crop_rect = (int(rx), int(ry), max(1, int(rw)), max(1, int(rh)))
+                except (TypeError, ValueError):
+                    crop_rect = None
+
+        if not target_app and hasattr(self, "inspector") and self.inspector is not None:
+            try:
+                app_n, win_t, active_rect = self.inspector.get_active_window_info()
+                target_app = app_n or ""
+                target_title = win_t or ""
+                if crop_rect is None and active_rect:
+                    crop_rect = active_rect
+            except Exception:
+                pass
+
+        if self._window_is_sensitive(target_app, target_title):
+            return {
+                "success": False,
+                "privacy_shield": True,
+                "message": "A janela alvo é protegida pelo Privacy Shield e não pode ser capturada.",
+            }
+
+        ok, img_bytes, mode = ScreenCaptureService.capture(
+            interactive=False,
+            crop_rect=crop_rect,
+            quality=FULL_CAPTURE_QUALITY,
+            max_size=FULL_CAPTURE_MAX_SIZE,
+        )
+        if not ok or not img_bytes:
+            return {"success": False, "message": "Não foi possível capturar a região solicitada."}
+
+        if getattr(self, "_ws", None) is not None and getattr(self, "_loop", None) is not None:
+            try:
+                if self._loop.is_running():
+                    b64_roi = base64.b64encode(img_bytes).decode("utf-8")
+                    asyncio.run_coroutine_threadsafe(
+                        self._ws.send(json.dumps(build_realtime_video_msg(b64_roi))),
+                        self._loop,
+                    )
+            except Exception:
+                pass
+
+        ui_summary = ""
+        if hasattr(self, "inspector") and self.inspector is not None:
+            try:
+                tree = self.inspector.get_ui_tree(app_name=target_app or None)
+                if tree is not None and hasattr(tree, "to_summary"):
+                    ui_summary = str(tree.to_summary(include_bounds=False))[:1500]
+            except Exception:
+                ui_summary = ""
+
+        return {
+            "success": True,
+            "app": target_app,
+            "title": target_title,
+            "crop_rect": list(crop_rect) if crop_rect else None,
+            "bytes": len(img_bytes),
+            "ui_tree": ui_summary,
+            "message": f"Inspeção em alta definição ({mode}) de '{target_app or 'tela'}' enviada ({len(img_bytes)} bytes).",
+        }
+
+    def _tool_scratchpad_note(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Gerencia o Scratchpad de notas durante sessões Live Voice/Video."""
+        pad: dict[str, str] = self.__dict__.setdefault("_scratchpad", {})
+        action = str(args.get("action") or "read").strip().lower()
+        key = str(args.get("key") or "").strip()
+
+        if action == "write":
+            if not key:
+                return {"success": False, "message": "Informe 'key' para salvar no Scratchpad."}
+            content = str(args.get("content") or "")
+            if bool(args.get("append", False)) and key in pad and pad[key]:
+                pad[key] = f"{pad[key]}\n{content}"
+            else:
+                pad[key] = content
+            return {
+                "success": True,
+                "key": key,
+                "length": len(pad[key]),
+                "notes_count": len(pad),
+                "message": f"Nota '{key}' salva no Scratchpad ({len(pad[key])} caracteres).",
+            }
+
+        if action == "clear":
+            if key:
+                pad.pop(key, None)
+                return {"success": True, "cleared_key": key, "remaining": len(pad), "message": f"Nota '{key}' removida."}
+            pad.clear()
+            return {"success": True, "remaining": 0, "message": "Scratchpad limpo."}
+
+        if key:
+            if key not in pad:
+                return {"success": False, "available_keys": list(pad.keys()), "message": f"Chave '{key}' não encontrada."}
+            return {"success": True, "key": key, "content": pad[key], "message": pad[key]}
+        return {"success": True, "count": len(pad), "notes": dict(pad), "message": f"{len(pad)} nota(s) no Scratchpad."}
+
     # Fase 4B: tempo máximo (segundos) que uma confirmação de risco fica
     # aguardando decisão do usuário antes de expirar automaticamente.
     PENDING_CONFIRMATION_TTL_SEC = 120
@@ -4456,12 +4654,20 @@ class GeminiLiveClient:
                         # 5. Notificação de mudança de foco da janela ativa (Context Injection)
                         current_focus_id = f"{app_name} - {win_title}" if win_title else app_name
                         if current_focus_id and current_focus_id != self._last_focused_window_title:
+                            prev_focus_id = self._last_focused_window_title
                             self._last_focused_window_title = current_focus_id
                             if self.on_window_focus_change:
                                 try:
                                     self.on_window_focus_change(app_name, win_title)
                                 except Exception:
                                     pass
+                            if prev_focus_id:
+                                focus_ctx = build_realtime_text_msg(
+                                    f"[Sistema: O usuário alternou o foco da janela para '{app_name}' ({win_title[:60]}).]"
+                                )
+                                asyncio.run_coroutine_threadsafe(
+                                    self._ws.send(json.dumps(focus_ctx)), self._loop
+                                )
 
                         # 6. Frame Diffing (detecção de tela estática para economizar tokens e evitar 1011)
                         diff = ScreenCaptureService.compute_frame_diff(

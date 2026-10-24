@@ -359,6 +359,7 @@ class ToolRegistry:
         board_opener: Any | None = None,
         subagent_runner: Any | None = None,
         scratchpad: dict[str, str] | None = None,
+        plan_milestones: list[dict[str, str]] | None = None,
     ) -> None:
         self._inspector = inspector
         self._input_driver = input_driver
@@ -366,6 +367,7 @@ class ToolRegistry:
         self._fence = fence
         self._memory = memory
         self._scratchpad: dict[str, str] = dict(scratchpad) if scratchpad is not None else {}
+        self._plan_milestones: list[dict[str, str]] = [dict(m) for m in plan_milestones] if plan_milestones else []
         # Gancho de UI para o Quadro Negro: callable `(graph, focus) -> dict`.
         # O registro é agnóstico de GTK; a UI injeta o abridor (pode ser definido
         # depois, via `registry.board_opener = ...`). Sem ele, a ferramenta
@@ -533,6 +535,11 @@ class ToolRegistry:
     def scratchpad(self) -> dict[str, str]:
         """Bloco de notas de trabalho (Working Memory) da sessão atual."""
         return self._scratchpad
+
+    @property
+    def plan_milestones(self) -> list[dict[str, str]]:
+        """Checklist de marcos (sub-objetivos) da demanda multipassos atual."""
+        return self._plan_milestones
 
 
     # -- descrição para o modelo ------------------------------------------- #
@@ -2577,6 +2584,30 @@ class ToolRegistry:
                     required=["query"],
                 ),
                 handler=self._tool_inspect_window,
+                mutating=False,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="plan_update",
+                description=(
+                    "Cria ou atualiza o checklist de marcos (sub-objetivos) de uma tarefa multipassos "
+                    "e marca etapas concluídas ou em andamento."
+                ),
+                parameters=_param(
+                    {
+                        "steps": {
+                            "type": "ARRAY",
+                            "items": {"type": "STRING"},
+                            "description": "Lista ordenada de marcos/etapas do plano (ao criar ou redefinir o plano).",
+                        },
+                        "completed_step": _int("Índice 1-based da etapa que acabou de ser concluída."),
+                        "current_step": _int("Índice 1-based da etapa atualmente em execução."),
+                    },
+                    required=[],
+                ),
+                handler=self._tool_plan_update,
                 mutating=False,
             )
         )
@@ -5696,6 +5727,66 @@ class ToolRegistry:
             "tree": summary[: self.max_tree_chars],
             "tree_available": True,
             "truncated": truncated,
+        }
+
+    def _tool_plan_update(self, args: dict[str, Any]) -> dict[str, Any]:
+        import re
+
+        raw_steps = args.get("steps")
+        if isinstance(raw_steps, str) and raw_steps.strip():
+            raw_steps = [s.strip() for s in re.split(r"[\n;]+", raw_steps) if s.strip()]
+
+        if isinstance(raw_steps, list) and raw_steps:
+            new_milestones: list[dict[str, str]] = []
+            for idx, item in enumerate(raw_steps):
+                if isinstance(item, dict):
+                    title = str(item.get("title") or item.get("step") or "").strip()
+                    status = str(item.get("status") or "pending").strip().lower()
+                else:
+                    title = re.sub(r"^\s*\d+[\.\)\-]\s*", "", str(item or "").strip())
+                    status = "in_progress" if idx == 0 else "pending"
+                if title:
+                    if status not in ("pending", "in_progress", "done", "blocked"):
+                        status = "pending"
+                    new_milestones.append({"title": title, "status": status})
+            if new_milestones:
+                self._plan_milestones.clear()
+                self._plan_milestones.extend(new_milestones)
+
+        completed_step = args.get("completed_step")
+        if completed_step is not None and self._plan_milestones:
+            try:
+                c_idx = int(completed_step) - 1
+                if 0 <= c_idx < len(self._plan_milestones):
+                    for i in range(c_idx + 1):
+                        self._plan_milestones[i]["status"] = "done"
+                    if c_idx + 1 < len(self._plan_milestones) and self._plan_milestones[c_idx + 1]["status"] == "pending":
+                        self._plan_milestones[c_idx + 1]["status"] = "in_progress"
+            except (TypeError, ValueError):
+                pass
+
+        current_step = args.get("current_step")
+        if current_step is not None and self._plan_milestones:
+            try:
+                cur_idx = int(current_step) - 1
+                if 0 <= cur_idx < len(self._plan_milestones):
+                    for i, m in enumerate(self._plan_milestones):
+                        if i < cur_idx and m["status"] == "in_progress":
+                            m["status"] = "done"
+                        elif i == cur_idx:
+                            m["status"] = "in_progress"
+            except (TypeError, ValueError):
+                pass
+
+        if not self._plan_milestones:
+            return {"ok": False, "error": "Nenhuma etapa informada em 'steps' e nenhum plano ativo na sessão."}
+
+        done_count = sum(1 for m in self._plan_milestones if m.get("status") == "done")
+        return {
+            "ok": True,
+            "total": len(self._plan_milestones),
+            "completed": done_count,
+            "milestones": [dict(m) for m in self._plan_milestones],
         }
 
 

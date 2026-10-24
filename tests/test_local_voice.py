@@ -583,6 +583,29 @@ class TestLocalMicReconnect(unittest.TestCase):
         self.assertEqual(len(self.client._speech_buffer), 0)
         self.assertEqual(len(self.client._preroll_buffer), 1)
 
+    def test_barge_in_acustico_durante_speaking_interrompe_tts(self):
+        from zorin_copilot.ai.local_voice import split_into_speech_clauses
+
+        clauses = split_into_speech_clauses("Primeira frase curta. Segunda frase complementar!")
+        self.assertEqual(clauses, ["Primeira frase curta.", "Segunda frase complementar!"])
+
+        self.client.state = LiveVoiceState.SPEAKING
+        self.client.synthesizer = MagicMock()
+        # Amostra com energia alta (~4000 int16 -> norm_level > 0.38)
+        import struct
+        loud_chunk = struct.pack("<1600h", *([4000] * 1600))
+
+        # 3 chunks consecutivos acima do limiar de barge-in disparam interrupt() e iniciam captura
+        self.client._process_chunk(loud_chunk)
+        self.client._process_chunk(loud_chunk)
+        self.client.synthesizer.interrupt.assert_not_called()
+
+        self.client._process_chunk(loud_chunk)
+        self.client.synthesizer.interrupt.assert_called_once()
+        self.assertEqual(self.client.state, LiveVoiceState.LISTENING)
+        self.assertTrue(self.client._is_user_speaking)
+        self.assertEqual(len(self.client._speech_buffer), 3)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1066,3 +1066,29 @@ def test_call_batch_executa_ferramentas_safe_em_paralelo():
     assert registry.scratchpad["k1"] == "v1"
     assert registry.scratchpad["k2"] == "v2"
     registry.close()
+
+
+def test_plan_update_cria_e_avanca_marcos():
+    registry = ToolRegistry()
+    r1 = registry.call(
+        "plan_update",
+        {
+            "steps": [
+                "1. Pesquisar referências acadêmicas",
+                "2. Extrair citações no Scratchpad",
+                "3. Escrever documento final",
+            ]
+        },
+    )
+    assert r1["ok"] is True
+    assert r1["total"] == 3
+    assert r1["completed"] == 0
+    assert registry.plan_milestones[0]["status"] == "in_progress"
+    assert registry.plan_milestones[1]["status"] == "pending"
+
+    r2 = registry.call("plan_update", {"completed_step": 1})
+    assert r2["ok"] is True
+    assert r2["completed"] == 1
+    assert registry.plan_milestones[0]["status"] == "done"
+    assert registry.plan_milestones[1]["status"] == "in_progress"
+    registry.close()

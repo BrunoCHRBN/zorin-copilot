@@ -228,6 +228,50 @@ class LiveVideoClientTest(unittest.TestCase):
                 f"Falso positivo por substring reintroduzido: {app} / {title}",
             )
 
+    def test_inspect_screen_region_e_scratchpad_note_no_live_client(self):
+        """Testa Vision-on-Demand (inspect_screen_region) com respeito ao Privacy Shield e Scratchpad Live."""
+        # 1. Scratchpad Live (write, read, clear)
+        w_res = self.client._dispatch_tool(
+            "scratchpad_note",
+            {"action": "write", "key": "terminal_err", "content": "Port 8080 already in use"},
+            approved=True,
+        )
+        self.assertTrue(w_res["success"])
+        r_res = self.client._dispatch_tool(
+            "scratchpad_note",
+            {"action": "read", "key": "terminal_err"},
+            approved=True,
+        )
+        self.assertTrue(r_res["success"])
+        self.assertEqual(r_res["content"], "Port 8080 already in use")
+
+        # 2. inspect_screen_region bloqueia janela sensível pelo Privacy Shield
+        with patch.object(self.client, "inspector") as mock_insp:
+            mock_insp.get_active_window_info.return_value = ("bitwarden", "Bitwarden Vault", (0, 0, 800, 600))
+            blocked = self.client._dispatch_tool("inspect_screen_region", {}, approved=True)
+            self.assertFalse(blocked["success"])
+            self.assertTrue(blocked.get("privacy_shield"))
+
+        # 3. inspect_screen_region captura em alta resolução quando a janela é segura
+        with patch.object(self.client, "inspector") as mock_insp, \
+             patch.object(ScreenCaptureService, "capture", return_value=(True, b"fake_hd_jpeg", "region")) as mock_cap:
+            mock_insp.get_active_window_info.return_value = ("gnome-terminal", "bash", (10, 20, 900, 700))
+            mock_tree = MagicMock()
+            mock_tree.to_summary.return_value = "- [1] terminal: 'bash'"
+            mock_insp.get_ui_tree.return_value = mock_tree
+
+            ok_res = self.client._dispatch_tool(
+                "inspect_screen_region",
+                {"x": 10, "y": 20, "width": 900, "height": 700},
+                approved=True,
+            )
+            self.assertTrue(ok_res["success"])
+            self.assertEqual(ok_res["bytes"], len(b"fake_hd_jpeg"))
+            self.assertEqual(ok_res["crop_rect"], [10, 20, 900, 700])
+            self.assertIn("bash", ok_res["ui_tree"])
+            mock_cap.assert_called_once()
+
+
 
 class LiveVoiceWidgetUITest(unittest.TestCase):
     """Testes unitários para os componentes de UI do LiveVoiceWidget."""

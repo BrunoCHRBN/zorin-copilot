@@ -540,3 +540,33 @@ def test_loop_encaminha_scratchpad_para_planejador():
     registry.close()
 
 
+def test_loop_sincroniza_plan_inline_e_encaminha_ao_planejador():
+    registry = ToolRegistry()
+    seen_plans: list[list[dict]] = []
+
+    class PlanAwarePlanner:
+        name = "plan_aware"
+
+        def decide(self, objective, tools, history, plan_milestones=None):
+            seen_plans.append(list(plan_milestones or []))
+            if not history:
+                return AgentDecision(
+                    tool_call=ToolCall("scratchpad_write", {"key": "etapa1", "content": "ok"}),
+                    plan=[
+                        {"title": "Coletar dados", "status": "done"},
+                        {"title": "Redigir resumo", "status": "in_progress"},
+                    ],
+                )
+            return AgentDecision(final_answer="Plano multipassos concluído")
+
+    result = loop_for(PlanAwarePlanner(), registry).run("executar plano multipassos")
+    assert result.success is True
+    assert seen_plans[0] == []
+    assert seen_plans[1] == [
+        {"title": "Coletar dados", "status": "done"},
+        {"title": "Redigir resumo", "status": "in_progress"},
+    ]
+    registry.close()
+
+
+

@@ -210,7 +210,8 @@ _SYSTEM_INSTRUCTION = (
     "13. BUSCA DE CÓDIGO E PROCESSOS: Para encontrar funções, classes, referências ou arquivos em código, use `search_code` (alta performance via ripgrep) em vez de ler arquivos individualmente. "
     "Para verificar processos ativos, servidores locais e consumo de recursos, use `system_processes`.\n"
     "14. MÚLTIPLAS JANELAS E MEMÓRIA DE TRABALHO (SCRATCHPAD): Ao extrair dados de uma janela/documento/pesquisa para usar em outro aplicativo ou comparar fontes, salve os dados relevantes com `scratchpad_write` (eles permanecem visíveis no bloco SCRATCHPAD do prompt sem truncamento). Para focar e inspecionar outra janela em um único passo, use `inspect_window`.\n"
-    "15. LOTE PARALELO DE LEITURA (`tool_calls`): Para executar de 2 a 4 ferramentas independentes somente-leitura simultaneamente num único passo, responda `{\"tool_calls\": [{\"tool\": \"nome1\", \"args\": {...}}, {\"tool\": \"nome2\", \"args\": {...}}], \"rationale\": \"por quê\"}`."
+    "15. LOTE PARALELO DE LEITURA (`tool_calls`): Para executar de 2 a 4 ferramentas independentes somente-leitura simultaneamente num único passo, responda `{\"tool_calls\": [{\"tool\": \"nome1\", \"args\": {...}}, {\"tool\": \"nome2\", \"args\": {...}}], \"rationale\": \"por quê\"}`.\n"
+    "16. DEMANDAS MULTIPASSOS E REPLANEJAMENTO: Em tarefas com múltiplas etapas, estruturar ou atualizar os marcos via ferramenta `plan_update` ou incluindo o campo `\"plan\": [\"1. ...\", \"2. ...\"]` (e `\"completed_step\": N`) no JSON. Quando houver um ALERTA DE REPLANEJAMENTO, mude imediatamente a abordagem."
 )
 
 
@@ -234,7 +235,8 @@ _DOLPHIN_AGENT_INSTRUCTION = (
     "12. Ao digitar buscas via `keyboard_type`, use `press_enter: true`.\n"
     "13. BUSCA DE CÓDIGO E PROCESSOS: Use `search_code` para buscar código rapidamente e `system_processes` para inspecionar processos ativos.\n"
     "14. SCRATCHPAD E MÚLTIPLAS JANELAS: Use `scratchpad_write` para preservar dados extraídos entre janelas/etapas e `inspect_window` para alternar e inspecionar janelas em um único passo.\n"
-    "15. LOTE PARALELO (`tool_calls`): Para consultas independentes somente-leitura, use `{\"tool_calls\": [{\"tool\": \"...\", \"args\": {...}}, ...], \"rationale\": \"...\"}`."
+    "15. LOTE PARALELO (`tool_calls`): Para consultas independentes somente-leitura, use `{\"tool_calls\": [{\"tool\": \"...\", \"args\": {...}}, ...], \"rationale\": \"...\"}`.\n"
+    "16. MARCOS MULTIPASSOS: Use `plan_update` ou o campo `\"plan\"` no JSON para acompanhar sub-objetivos e pivote imediatamente se receber ALERTA DE REPLANEJAMENTO."
 )
 
 
@@ -255,6 +257,7 @@ class LLMPlanner:
         max_steps: int | None = None,
         scratchpad: dict[str, str] | None = None,
         open_windows: Sequence[dict[str, Any]] | None = None,
+        plan_milestones: Sequence[dict[str, str]] | None = None,
     ) -> AgentDecision:
         model_name = str(getattr(self.provider, "model", "")).lower()
         is_dolphin = "dolphin" in model_name or "dolphin" in self.name.lower()
@@ -269,6 +272,7 @@ class LLMPlanner:
             trust_manager=self.trust_manager,
             scratchpad=scratchpad,
             open_windows=open_windows,
+            plan_milestones=plan_milestones,
         )
         try:
             if hasattr(self.provider, "complete"):
@@ -304,6 +308,57 @@ class LLMPlanner:
 # --------------------------------------------------------------------------- #
 
 
+def _build_replan_guidance(history: Sequence[dict[str, Any]] | None) -> str:
+    """Gera instrução de replanejamento autônomo quando o(s) passo(s) recente(s) falharam."""
+    if not history:
+        return ""
+    last = history[-1]
+    if last.get("ok") is not False:
+        return ""
+
+    failed_tool = str(last.get("tool") or "?")
+    consecutive_failures = 0
+    for entry in reversed(history):
+        if entry.get("ok") is False:
+            consecutive_failures += 1
+        else:
+            break
+
+    ui_tools = {"click_on_screen", "click_element", "find_element", "find_on_screen", "mouse_click", "click_and_type"}
+    file_tools = {"read_file", "open_document", "write_document"}
+    web_tools = {"open_url", "read_web_page", "browser_search"}
+
+    if failed_tool in ui_tools:
+        pivot_hint = (
+            "A interação visual/UI anterior falhou. NÃO repita o mesmo clique/busca. "
+            "Alternativas recomendadas: (a) use `scroll_page` para revelar elementos ocultos; "
+            "(b) use `inspect_window` para garantir foco na janela correta e atualizar a árvore AT-SPI; "
+            "(c) use `keyboard_hotkey` / `keyboard_type` com `press_enter: true`."
+        )
+    elif failed_tool in file_tools:
+        pivot_hint = (
+            "O acesso ao arquivo/documento falhou. Use `list_directory` ou `search_code` "
+            "para descobrir o caminho exato antes de tentar ler novamente."
+        )
+    elif failed_tool in web_tools:
+        pivot_hint = (
+            "A ação web anterior falhou. Tente `web_search` para localizar a URL exata "
+            "ou inspecione o navegador aberto com `inspect_window`."
+        )
+    else:
+        pivot_hint = (
+            f"A ferramenta `{failed_tool}` falhou. Escolha uma ferramenta ou estratégia alternativa "
+            "e NÃO repita os mesmos argumentos."
+        )
+
+    severity = (
+        f"{consecutive_failures} falhas consecutivas detectadas"
+        if consecutive_failures >= 2
+        else f"Falha no último passo (`{failed_tool}`)"
+    )
+    return f"ALERTA DE REPLANEJAMENTO AUTÔNOMO ({severity}): {pivot_hint}"
+
+
 def build_planner_prompt(
     objective: str,
     tools: list[dict[str, Any]],
@@ -314,8 +369,9 @@ def build_planner_prompt(
     trust_manager: Any | None = None,
     scratchpad: dict[str, str] | None = None,
     open_windows: Sequence[dict[str, Any]] | None = None,
+    plan_milestones: Sequence[dict[str, str]] | None = None,
 ) -> str:
-    """Monta o prompt de um passo com suporte a contexto conversacional, mapa de janelas e scratchpad."""
+    """Monta o prompt de um passo com suporte a contexto conversacional, mapa de janelas, scratchpad e marcos."""
     lines = [
         system_instruction,
     ]
@@ -337,6 +393,20 @@ def build_planner_prompt(
             app = w.get("app", "App")
             title = _clip(str(w.get("title", "")), 90)
             lines.append(f"- [{status}] id={wid} | app={app} | título=\"{title}\"")
+
+    if plan_milestones:
+        lines.append("")
+        lines.append("PLANO DE EXECUÇÃO MULTIPASSOS (MARCOS):")
+        badge_map = {
+            "done": "✓ CONCLUÍDO",
+            "in_progress": "→ EM ANDAMENTO",
+            "blocked": "! BLOQUEADO",
+            "pending": "  PENDENTE",
+        }
+        for idx_m, m in enumerate(plan_milestones, 1):
+            st = badge_map.get(str(m.get("status", "pending")).lower(), "  PENDENTE")
+            title = _clip(str(m.get("title", "")), 160)
+            lines.append(f"{idx_m}. [{st}] {title}")
 
     if scratchpad:
         lines.append("")
@@ -378,6 +448,11 @@ def build_planner_prompt(
             # core/trust.DocumentTrustManager.sanitize_tool_observation).
             safe_obs = trust_manager.sanitize_tool_observation(tool, clipped) if trust_manager else clipped
             lines.append(f"{index}. {tool}({args}) -> {ok}: {safe_obs}")
+
+        replan_alert = _build_replan_guidance(history)
+        if replan_alert:
+            lines.append("")
+            lines.append(replan_alert)
     else:
         lines.append("")
         lines.append("HISTÓRICO: nenhuma ação executada ainda neste objetivo.")
@@ -457,10 +532,43 @@ def extract_json_object(text: str) -> dict[str, Any] | None:
     return None
 
 
+def _parse_inline_plan(payload: dict[str, Any]) -> list[dict[str, str]]:
+    """Extrai o plano de marcos (`plan`) opcionalmente retornado no JSON do planejador."""
+    raw_plan = payload.get("plan")
+    if not isinstance(raw_plan, list) or not raw_plan:
+        return []
+    milestones: list[dict[str, str]] = []
+    for idx, item in enumerate(raw_plan):
+        if isinstance(item, dict):
+            title = str(item.get("title") or item.get("step") or "").strip()
+            status = str(item.get("status") or "pending").strip().lower()
+        else:
+            title = re.sub(r"^\s*\d+[\.\)\-]\s*", "", str(item or "").strip())
+            status = "in_progress" if idx == 0 else "pending"
+        if title:
+            if status not in ("pending", "in_progress", "done", "blocked"):
+                status = "pending"
+            milestones.append({"title": title, "status": status})
+
+    completed_step = payload.get("completed_step")
+    if completed_step is not None and milestones:
+        try:
+            c_idx = int(completed_step) - 1
+            if 0 <= c_idx < len(milestones):
+                for i in range(c_idx + 1):
+                    milestones[i]["status"] = "done"
+                if c_idx + 1 < len(milestones) and milestones[c_idx + 1]["status"] == "pending":
+                    milestones[c_idx + 1]["status"] = "in_progress"
+        except (TypeError, ValueError):
+            pass
+    return milestones
+
+
 def decision_from_json(payload: dict[str, Any]) -> AgentDecision:
-    """Converte o JSON do modelo em `AgentDecision`, tolerando variações de chave e lotes (`tool_calls`)."""
+    """Converte o JSON do modelo em `AgentDecision`, tolerando variações de chave, lotes (`tool_calls`) e `plan`."""
     answer = str(payload.get("final_answer") or payload.get("answer") or "").strip()
     rationale = str(payload.get("rationale") or payload.get("reason") or payload.get("thought") or "")
+    inline_plan = _parse_inline_plan(payload)
 
     raw_batch = payload.get("tool_calls") or payload.get("tools")
     if isinstance(raw_batch, list) and raw_batch:
@@ -485,6 +593,7 @@ def decision_from_json(payload: dict[str, Any]) -> AgentDecision:
                 final_answer=answer,
                 preconditions=list(payload.get("preconditions") or []),
                 postconditions=list(payload.get("postconditions") or []),
+                plan=inline_plan,
             )
 
     name = str(payload.get("tool") or payload.get("name") or payload.get("action") or "").strip()
@@ -545,9 +654,10 @@ def decision_from_json(payload: dict[str, Any]) -> AgentDecision:
             final_answer=answer,
             preconditions=list(payload.get("preconditions") or []),
             postconditions=list(payload.get("postconditions") or []),
+            plan=inline_plan,
         )
     if answer:
-        return AgentDecision(final_answer=answer)
+        return AgentDecision(final_answer=answer, plan=inline_plan)
     return AgentDecision(error=f"JSON sem ferramenta nem resposta final: {payload}")
 
 
@@ -573,6 +683,7 @@ class FallbackPlanner:
         max_steps: int | None = None,
         scratchpad: dict[str, str] | None = None,
         open_windows: Sequence[dict[str, Any]] | None = None,
+        plan_milestones: Sequence[dict[str, str]] | None = None,
     ) -> AgentDecision:
         errors: list[str] = []
         for planner in self.planners:
@@ -588,6 +699,8 @@ class FallbackPlanner:
                     kwargs["scratchpad"] = scratchpad
                 if "open_windows" in sig.parameters:
                     kwargs["open_windows"] = open_windows
+                if "plan_milestones" in sig.parameters:
+                    kwargs["plan_milestones"] = plan_milestones
                 decision = planner.decide(objective, tools, history, **kwargs)
             except Exception as exc:
                 decision = AgentDecision(error=f"Planejador falhou: {exc}")
