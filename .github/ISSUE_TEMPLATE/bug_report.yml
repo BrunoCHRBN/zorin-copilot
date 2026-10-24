@@ -1,0 +1,93 @@
+name: "Relatório de Bug / Bug Report"
+description: "Crie um relatório de bug detalhado para nos ajudar a identificar e corrigir o problema."
+title: "[BUG]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Obrigado por relatar o problema! Antes de abrir este issue, certifique-se de executar `zorin-copilot-cli doctor` no terminal para verificar a integridade dos barramentos AT-SPI2, D-Bus e drivers de entrada.
+  - type: input
+    id: version
+    attributes:
+      label: "Versão do Zorin Copilot"
+      description: "Execute `zorin-copilot-cli --version` ou indique o hash do commit git."
+      placeholder: "ex: 0.1.0 ou commit 349ef75"
+    validations:
+      required: true
+  - type: dropdown
+    id: distro
+    attributes:
+      label: "Distribuição Linux"
+      description: "Qual distribuição você está utilizando?"
+      options:
+        - "Zorin OS 18 / 18.1"
+        - "Ubuntu 24.04 LTS"
+        - "EndeavourOS / Arch Linux"
+        - "Fedora 40+"
+        - "Debian 12+"
+        - "Outra (especificar na descrição)"
+    validations:
+      required: true
+  - type: dropdown
+    id: desktop_env
+    attributes:
+      label: "Ambiente de Desktop (DE / Compositor)"
+      description: "Qual ambiente gráfico ou compositor Wayland está em execução?"
+      options:
+        - "GNOME 46 (Mutter / Wayland)"
+        - "GNOME (X11)"
+        - "Hyprland (Wayland)"
+        - "Sway (wlroots / Wayland)"
+        - "KDE Plasma 6 (Wayland)"
+        - "KDE Plasma (X11)"
+        - "Outro (especificar na descrição)"
+    validations:
+      required: true
+  - type: dropdown
+    id: ai_provider
+    attributes:
+      label: "Provedor de IA ativo"
+      description: "Qual backend de IA estava configurado no momento da falha?"
+      options:
+        - "Google Gemini (gemini-2.5-flash / gemini-2.0-flash / etc.)"
+        - "Ollama local (Qwen2.5, Dolphin 3.1, etc.)"
+        - "WorkBuddy AI / Tencent HY4"
+        - "OpenAI-compatible"
+        - "Nenhum / Falha de percepção local (AT-SPI2 / Shell)"
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: "Descrição do Problema"
+      description: "Descreva o comportamento inesperado de forma clara e objetiva."
+      placeholder: "Ao acionar o atalho global de ditado <Super><Shift>D, a pílula OSD aparece mas..."
+    validations:
+      required: true
+  - type: textarea
+    id: steps_to_reproduce
+    attributes:
+      label: "Passos para Reproduzir"
+      description: "Como reproduzir o bug passo a passo?"
+      placeholder: |
+        1. Abrir aplicação X (ex: Firefox)
+        2. Executar `zorin-copilot-cli agent 'pesquisar artigo'`
+        3. Observar erro no passo 2
+    validations:
+      required: true
+  - type: textarea
+    id: expected_vs_actual
+    attributes:
+      label: "Comportamento Esperado vs. Comportamento Real"
+      description: "O que você esperava que acontecesse e o que realmente aconteceu?"
+    validations:
+      required: true
+  - type: textarea
+    id: doctor_output
+    attributes:
+      label: "Saída do comando `doctor` e Logs de Terminal"
+      description: "Cole aqui a saída do comando `zorin-copilot-cli doctor` e eventuais mensagens de log com traceback."
+      render: shell
+      placeholder: "Cole a saída de `zorin-copilot-cli doctor` aqui..."
+

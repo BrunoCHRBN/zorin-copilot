@@ -1,0 +1,45 @@
+name: "Sugestão de Funcionalidade / Feature Request"
+description: "Proponha uma nova capacidade, suporte a ferramenta de desktop ou melhoria de arquitetura."
+title: "[FEATURE]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Obrigado por ajudar a evoluir o Zorin Copilot! Descreva sua proposta técnica com clareza, destacando o caso de uso e os barramentos ou APIs envolvidos.
+  - type: textarea
+    id: problem_statement
+    attributes:
+      label: "Problema ou Necessidade"
+      description: "Qual limitação atual ou cenário de uso motivou esta sugestão?"
+      placeholder: "Atualmente, ao utilizar o compositor X, não é possível..."
+    validations:
+      required: true
+  - type: textarea
+    id: proposed_solution
+    attributes:
+      label: "Solução Proposta"
+      description: "Como a funcionalidade deve operar no desktop? Quais módulos ou ferramentas seriam adicionados ou modificados?"
+      placeholder: "Adicionar integração com o protocolo D-Bus..."
+    validations:
+      required: true
+  - type: dropdown
+    id: affected_layer
+    attributes:
+      label: "Camada Principal Afetada"
+      description: "Qual camada da arquitetura é o foco principal?"
+      options:
+        - "Percepção / AT-SPI2 / VLM Grounding"
+        - "Camada de Agente / Subagentes / Tool Calling"
+        - "Shell / Input Driver (Wayland/X11) / Riscos e Undo"
+        - "Interface GTK4 / Libadwaita / Layer-Shell"
+        - "Integrações Externas (Google, Home Assistant, n8n, MCP)"
+        - "Voz / Ditado / VAD / Modelos Neurais"
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives_considered
+    attributes:
+      label: "Alternativas Consideradas"
+      description: "Houve outras abordagens analisadas antes desta proposta?"
+

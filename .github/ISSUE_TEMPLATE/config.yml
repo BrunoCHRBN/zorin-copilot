@@ -1,0 +1,6 @@
+blank_issues_enabled: false
+contact_links:
+  - name: "Documentação do Projeto / Project Documentation"
+    url: "https://github.com/BrunoCHRBN/zorin-copilot/tree/main/docs"
+    about: "Consulte guias de arquitetura, configuração de desktops e tutoriais passo a passo."
+

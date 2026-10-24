@@ -1,271 +1,278 @@
 # Zorin Copilot
 
-[![CI](https://github.com/BrunoCHRBN/zorin-copilot/actions/workflows/ci.yml/badge.svg)](https://github.com/BrunoCHRBN/zorin-copilot/actions/workflows/ci.yml)
+<p align="center">
+  <a href="README.en.md">🇺🇸 English Version</a> &nbsp;|&nbsp; <strong>🇧🇷 Versão em Português</strong>
+</p>
 
-Assistente de Inteligência Artificial integrado nativamente ao desktop **Zorin OS 18** (GNOME 46 / Wayland).
+<p align="center">
+  <a href="https://github.com/BrunoCHRBN/zorin-copilot/actions/workflows/ci.yml"><img src="https://github.com/BrunoCHRBN/zorin-copilot/actions/workflows/ci.yml/badge.svg" alt="Status do CI"></a>
+  <img src="https://img.shields.io/badge/Python-3.10%20%7C%203.11%20%7C%203.12-blue.svg" alt="Versões do Python">
+  <img src="https://img.shields.io/badge/GTK-4.0%20%2B%20Libadwaita-green.svg" alt="GTK4">
+  <img src="https://img.shields.io/badge/Wayland-GNOME%20%7C%20KDE%20%7C%20Hyprland%20%7C%20Sway-orange.svg" alt="Wayland">
+  <img src="https://img.shields.io/badge/Licen%C3%A7a-MIT-yellow.svg" alt="Licença MIT">
+</p>
 
-Diferente de assistentes convencionais que apenas respondem perguntas em chat ou tiram prints lentos da tela, o **Zorin Copilot** interage de verdade com os elementos do seu desktop por meio dos barramentos nativos do Linux (**AT-SPI2**, **D-Bus** e extensões do compositor).
+---
 
-```
-GUI : zorin-copilot
-CLI : zorin-copilot-cli
-```
+## 📌 Visão Geral
+
+O **Zorin Copilot** é um assistente de inteligência artificial projetado para operar nativamente no ambiente desktop Linux. O projeto foi construído para resolver um problema recorrente de assistentes convencionais: a lentidão e imprecisão de ferramentas baseadas exclusivamente em capturas periódicas de tela e OCR.
+
+Em vez de tratar a interface gráfica como uma imagem estática opaca, o Zorin Copilot conecta-se diretamente aos barramentos de introspecção do sistema operacional (**AT-SPI2**, **D-Bus** e protocolos Wayland). Isso permite identificar botões, campos de entrada, janelas ativas e estruturas de menus com latência mínima e baixo consumo de CPU, acionando modelos multimodais de visão (VLM) apenas sob demanda para regiões específicas da tela (*Region of Interest* — ROI).
+
+O software oferece três interfaces complementares:
+- **Interface Gráfica (GUI):** Barra flutuante em GTK4 e Libadwaita com tema glassmorphism no estilo Spotlight/Raycast.
+- **Linha de Comando (CLI):** Ferramenta `zorin-copilot-cli` para automação, inspeção de acessibilidade e diagnóstico de sistema.
+- **Terminal HY4 (`hy4`):** Cliente de linha de comando para o modelo Tencent HY4 via WorkBuddy AI com visualização da cadeia de raciocínio (*thinking*).
 
 ---
 
 ## 🎯 Capacidades Principais
 
-* **Inspeção Semântica da Tela (AT-SPI2):** Lê botões, menus, caixas de texto e janelas em tempo real sem depender de OCR pesado.
-* **Orquestração de Janelas & Multitarefa:** Organiza layouts, move janelas para áreas de trabalho e alterna o foco por comando de voz ou texto.
-* **Automação de Ações no Desktop:** Preenchimento de formulários, cliques guiados em botões da interface e atalhos de produtividade.
-* **Modo Agente Supervisionado (GUI & CLI):** Execução autônoma de tarefas multi-etapa no desktop com visualização de etapas em tempo real (*stepper*), aprovação interativa para ações sensíveis e parada de emergência imediata.
-* **Ditado Global por Voz (Voice Typing):** Fale em qualquer aplicativo em foco (LibreOffice, navegadores, terminal, editores de código) com o atalho `<Super><Shift>D` ou `--dictate`. Pílula flutuante OSD não-intrusiva que preserva 100% do foco, VAD com sensibilidade de silêncio, transcrição Whisper local (CPU INT8) e injeção automática de texto no cursor via drivers de entrada virtual.
-* **Barra de Comandos Estilo Spotlight:** Interface minimalista em GTK4 / Libadwaita acessível globalmente via atalho de teclado (`Super + Espaço`).
-* **Privacidade Híbrida:** Suporte a modelos locais (via Ollama / llama.cpp) e APIs em nuvem com sanitização automática de dados confidenciais.
+* **Inspeção Semântica da Interface (AT-SPI2):** Lê a hierarquia de widgets de aplicações GTK, Qt, Electron e navegadores (Firefox/Chromium) sem depender de OCR contínuo.
+* **Modo Agente Supervisionado:** Execução autônoma de tarefas multi-etapas com visualização de progresso (*stepper*), auditoria passo a passo e parada de emergência imediata.
+* **Subagentes Especializados e Memória de Trabalho:** Divisão de tarefas complexas entre subagentes (`window_analyst`, `research`, `code`) que compartilham um *scratchpad* estruturado.
+* **Ditado Global por Voz (Voice Typing):** Digitação por voz em qualquer aplicativo em foco via atalho `<Super><Shift>D` ou flag `--dictate`, com transcrição local Whisper INT8, supressão de silêncio via VAD e injeção virtual de texto via `libei`/`ydotool`.
+* **Voz Bidirecional ao Vivo:** Conversação contínua por áudio com suporte a interrupção natural (*barge-in*), síntese neural local via Piper TTS e palavra de ativação (*wake word*) offline via Vosk.
+* **Hub Acadêmico e Modo Tutor:** Captura de questões na tela, tutoria socrática passo a passo e renderização de quadro negro com suporte a fórmulas LaTeX/KaTeX.
+* **Segurança e Reversibilidade:** Cerca digital de monitores (`ScreenFenceManager`), classificação de risco de ações (`RiskPolicy`) e pilha de reversão (`UndoStack`) com suporte a `Ctrl+Z`.
+* **Integrações de Produtividade:** Conexão nativa com Google Workspace (Agenda, Drive, Gmail via OAuth2 Desktop app com token em keyring), Home Assistant (WebSocket tempo real) e automações n8n / MCP.
 
 ---
 
-## 🏗️ Arquitetura
+## 🖥️ Matriz de Compatibilidade de Desktops
 
-Veja detalhes completos em [ARCHITECTURE.md](ARCHITECTURE.md).
+O Zorin Copilot possui módulos específicos para abstração de compositores e ambientes gráficos:
+
+| Ambiente de Desktop | Sessão | Gerenciador de Janelas | Captura de Tela | Atalhos Globais |
+|---|---|---|---|---|
+| **Zorin OS 18 / GNOME 46+** | Wayland / X11 | Mutter | XDG Desktop Portal | `gsettings` (media-keys) |
+| **KDE Plasma 6** | Wayland / X11 | KWin | Spectacle / Portal | `kglobalshortcutsrc` |
+| **Hyprland** | Wayland | Hyprland | `grim` + `slurp` | Snippet `hyprland.conf` |
+| **Sway** | Wayland (wlroots) | Sway | `grim` + `slurp` | Snippet `sway/config` |
+
+---
+
+## 🏗️ Arquitetura Resumida
+
+O projeto adota uma arquitetura em 5 camadas com baixo acoplamento. Consulte a especificação técnica detalhada em [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                    Zorin Copilot UI                         │
-│           (GTK4 / Libadwaita - Barra Flutuante)             │
+│       (GTK4 / Libadwaita · Layer-Shell · OSD Pill)          │
 └──────────────┬───────────────────────────────┬──────────────┘
                │                               │
                ▼                               ▼
-    [Núcleo de Percepção]             [Motor de Execução]
-    • AT-SPI2 (Árvore de A11y)        • D-Bus Bridge (Mutter/Shell)
-    • D-Bus Active Window Monitor     • Extensão GNOME Shell
-    • PipeWire Audio Monitor          • Synthesizer (libei / ydotool)
+    [Núcleo de Percepção]             [Shell & Execução]
+    • AT-SPI2 (Árvore de A11y)        • Input Drivers (libei / ydotool)
+    • D-Bus Active Window Monitor     • RiskPolicy (SAFE / CONFIRM)
+    • VLM Grounding & Continuous ROI  • ScreenFenceManager (Zonas)
+    • Local Voice (Whisper INT8)      • UndoStack (Reversibilidade)
                │                               │
                └───────────────┬───────────────┘
                                │
                                ▼
                     [Camada de Inteligência]
-                    • Provedor Local (Ollama)
-                    • Provedor Nuvem (Gemini / Claude)
-                    • Intent Parser & Action Schema
+                    • AgentLoop & Subagents (Scratchpad)
+                    • Fast RNN Router (Local vs Nuvem)
+                    • Provedores: Ollama / Gemini / Claude / HY4
 ```
 
 ---
 
-## 🚀 Instalação e Desenvolvimento
+## 🚀 Instalação e Configuração
 
-O Zorin Copilot utiliza o runtime nativo do Zorin OS (Python 3.12, PyGObject, AT-SPI2 e GTK4):
+### Método 1: Setup Automatizado (Recomendado)
+
+O script `setup.sh` detecta a distribuição Linux, instala pacotes de sistema, cria o virtualenv com isolamento adequado e configura os atalhos globais:
 
 ```bash
-# Clone ou acesse a pasta do projeto
+# Clone o repositório
+git clone https://github.com/BrunoCHRBN/zorin-copilot.git ~/zorin-copilot
 cd ~/zorin-copilot
 
-# Testes automatizados do núcleo
+# Execute o script de configuração
+./setup.sh
+```
+
+### Método 2: Instalação Manual
+
+O Zorin Copilot exige as bibliotecas PyGObject do sistema para acessar as typelibs GTK4 e Libadwaita. O virtualenv **deve** ser criado com `--system-site-packages`:
+
+#### 1. Instalar dependências do sistema
+
+* **Debian / Ubuntu / Zorin OS:**
+  ```bash
+  sudo apt-get update
+  sudo apt-get install -y python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1 \
+    libadwaita-1-0 poppler-utils xvfb dbus-x11 python3-venv ydotool
+  ```
+* **Arch Linux / EndeavourOS:**
+  ```bash
+  sudo pacman -Syu --needed python python-pip python-gobject gtk4 libadwaita \
+    poppler xorg-server-xvfb dbus at-spi2-core python-cairo ydotool
+  ```
+
+#### 2. Configurar o ambiente virtual Python
+
+```bash
+cd ~/zorin-copilot
+python3 -m venv --system-site-packages .venv
+.venv/bin/pip install --upgrade pip
+.venv/bin/pip install -e . --no-deps
+.venv/bin/pip install requests beautifulsoup4 websockets
+```
+
+#### 3. Instalar pacotes opcionais conforme necessidade
+
+```bash
+# Suporte a voz local (faster-whisper e piper-tts)
+.venv/bin/pip install faster-whisper piper-tts
+
+# Suporte a palavra de ativação offline (vosk)
+.venv/bin/pip install vosk
+
+# Integrações Google Workspace (OAuth2 Desktop app)
+.venv/bin/pip install google-api-python-client google-auth-oauthlib google-auth keyring
+
+# Exportação para documentos Office reais (.docx e .pptx)
+.venv/bin/pip install python-docx python-pptx
+```
+
+---
+
+## 💻 Guia de Uso
+
+### 1. Interface Gráfica (GUI)
+
+Inicie o assistente com a janela flutuante estilo Spotlight:
+
+```bash
+zorin-copilot
+```
+
+Ou utilize o atalho de sistema registrado (`Super + C` ou `Super + Espaço`).
+
+### 2. Linha de Comando (`zorin-copilot-cli`)
+
+O CLI expõe todas as capacidades do núcleo para testes, scripts de automação e auditoria:
+
+```bash
+# Diagnosticar barramentos AT-SPI2, Wayland e integridade do ambiente
+zorin-copilot-cli doctor
+
+# Inspecionar a árvore de elementos da aplicação ativa na tela
+zorin-copilot-cli inspect
+
+# Executar o Modo Agente supervisionado com dry-run (apenas planejamento)
+zorin-copilot-cli agent "abrir o navegador e buscar a documentação do kernel" --dry-run
+
+# Executar o Modo Agente real (ações de risco solicitam confirmação)
+zorin-copilot-cli agent "organizar a pasta ~/Downloads por extensão" --max-steps 15
+
+# Realizar busca semântica em documentos pessoais (RAG)
+zorin-copilot-cli rag "qual o valor total da fatura de internet?"
+
+# Capturar exercício da tela e abrir sessão de estudos socrática
+zorin-copilot-cli study capture
+```
+
+### 3. Cliente de Terminal HY4 (`hy4`)
+
+Para interagir diretamente com o modelo Tencent HY4 via terminal:
+
+```bash
+# Enviar um prompt único exibindo o fluxo de raciocínio
+hy4 "Como otimizar a latência de chamadas D-Bus no GNOME?"
+
+# Ocultar o processo de raciocínio (modo direto para pipes e scripts)
+hy4 --no-think --raw "Liste 5 comandos úteis do journalctl"
+```
+
+---
+
+## ⌨️ Atalhos de Teclado
+
+| Atalho | Ação | Contexto |
+|---|---|---|
+| `Super + C` | Abrir / Alternar janela principal do Copilot | Global |
+| `Super + Shift + D` | Iniciar / Parar ditado por voz global (Voice Typing) | Global |
+| `Super + Shift + S` | Capturar região da tela para análise | Global |
+| `Super + Shift + V` | Iniciar sessão de voz bidirecional ao vivo | Global |
+| `Ctrl + K` | Painel de comandos (busca difusa de ações) | Janela Copilot |
+| `Ctrl + Z` | Desfazer última ação reversível (`UndoStack`) | Janela Copilot |
+| `Ctrl + S` | Exportar histórico da conversa como Markdown | Janela Copilot |
+| `Ctrl + N` | Iniciar nova conversa | Janela Copilot |
+| `Ctrl + H` | Alternar exibição da barra lateral | Janela Copilot |
+| `Ctrl + Q` | Fechar o aplicativo | Janela Copilot |
+
+---
+
+## ↩️ Segurança e Reversibilidade de Ações
+
+O Zorin Copilot executa ações em ambiente de desktop real. Para garantir a segurança dos dados do usuário, o sistema adota proteções estritas:
+
+1. **Ações Reversíveis (com Snapshot):**
+   - Criação ou sobrescrita de arquivos: restaura o conteúdo anterior ou remove o arquivo criado.
+   - Organização de diretórios: move cada arquivo de volta à pasta de origem e remove diretórios vazios criados na operação.
+2. **Ações Não-Reversíveis (Exigem Confirmação Prévia):**
+   - Cliques físicos, digitação em aplicativos externos, execução de scripts shell e finalização de processos alteram estados externos do sistema operacional. O Copilot classifica essas ações como `CONFIRM` via `RiskPolicy`, exigindo aprovação antes do disparo.
+3. **Cerca Digital de Tela (`ScreenFenceManager`):**
+   - O usuário pode restringir a área de atuação do cursor e da visão a monitores ou coordenadas específicas, impedindo interação involuntária com janelas contendo dados confidenciais.
+
+---
+
+## 🧪 Suíte de Testes e Sandbox
+
+A suíte de testes do projeto foi arquitetada para garantir isolamento estrito e proteção contra exaustão de memória RAM:
+
+```bash
+# Executar a suíte de testes com pytest
 .venv/bin/python -m pytest -q
 ```
 
-> **Use `pytest`, não `unittest`.** A suíte tem as duas famílias de teste (classes
-> `unittest.TestCase` **e** funções no estilo pytest). O `python -m unittest` coleta
-> **só a primeira**: os outros 14 módulos saem com `Ran 0 tests` e código **5**.
-> Até 2026-09-21 isso significava **435 testes que passavam e nunca rodavam** — o
-> `tests/test_study_tutor.py`, que cobre a injeção do addon do modo tutor no prompt,
-> era um deles. `exit 5` significa **"não rodou"**, não "verde por outro caminho".
-> O `pytest` está no `.venv` (extra `[test]`); o `python3` do sistema **não** o tem.
+> [!IMPORTANT]
+> **Use sempre `pytest`, nunca `python -m unittest`:**
+> A suíte combina classes legadas `unittest.TestCase` e funções nativas de `pytest`. O runner do `unittest` descarta testes em estilo pytest com código de saída 5, mascarando módulos não executados.
+>
+> O isolamento (`tests/_sandbox.py` e `tests/conftest.py`) redireciona `XDG_CONFIG_HOME` e `XDG_DATA_HOME` para pastas temporárias e define `ZORIN_TEST_MODE=1`. Isso impede que os testes acessem suas credenciais reais ou iniciem daemons pesados em segundo plano.
 
-O `tests/__init__.py` e o `tests/conftest.py` ativam o mesmo isolamento de ambiente
-por caminhos diferentes — `unittest` importa o primeiro, `pytest` carrega o segundo.
-É ele que redireciona `XDG_CONFIG_HOME`/`XDG_DATA_HOME`, define `ZORIN_TEST_MODE` e
-bloqueia os serviços pesados (MCP, indexação RAG em disco, wake word). Sem ele a
-suíte roda contra o `config.json` e o `memory.db` **reais do usuário** e sobe um
-processo de servidor MCP por janela criada, o que esgota a memória da máquina.
-Detalhes em `tests/_sandbox.py`.
-
-A suíte completa (inclui os testes de interface) roda sob um servidor gráfico
-virtual — é exatamente o que o CI faz:
-
-```bash
-xvfb-run -a .venv/bin/python -m pytest -q
-```
-
-> **Nesta máquina o `xvfb-run` não está instalado** (verificado em 2026-09-21), então
-> esse comando é o do CI, não o local. Localmente há `DISPLAY=:0`, e é por isso que o
-> caminho recomendado aqui é o runner com guarda abaixo — ele roda um módulo por
-> processo e não depende de servidor gráfico virtual.
-
-**Para a suíte inteira com guarda de memória**, use o runner que roda um módulo por
-processo e aborta quem passar de 900 MB (esta máquina **não tem swap**):
-
-```bash
-.venv/bin/python ~/.workbuddy-ai/skills/zorin-copilot-gui-change/scripts/run_tests_safe.py \
-    --python .venv/bin/python
-```
-
-Baseline: **147 módulos, 0 falhas**.
-
-> **Por que o isolamento e por que os testes travavam:** o diagnóstico completo
-> (duas falhas independentes — estouro de memória e um `wl-copy` órfão segurando
-> o pipe de saída) está em [`docs/ESTABILIDADE_TESTES.md`](docs/ESTABILIDADE_TESTES.md).
-
-Os testes de interface precisam das typelibs do sistema (`gir1.2-gtk-4.0`,
-`gir1.2-adw-1`). Pillow é opcional em runtime, mas obrigatória para rodar a
-suíte: `pip install -e ".[test]"`.
-
-### Rodando um subconjunto
-
-Prefira um arquivo por processo. Um arquivo de UI cria dezenas de janelas e,
-mesmo com o isolamento, a memória só volta de fato quando o processo termina:
-
-```bash
-.venv/bin/python -m pytest -q tests/test_ui_refactor.py
-.venv/bin/python -m pytest -q tests/test_ui_reform.py tests/test_sidebar_grouping.py
-```
+Para mais detalhes sobre estabilidade e diagnósticos de execução, consulte [`docs/ESTABILIDADE_TESTES.md`](docs/ESTABILIDADE_TESTES.md).
 
 ---
 
-## ⌨️ Atalhos
+## 🎨 Personalização Visual (CSS)
 
-| Atalho | Ação |
-|---|---|
-| `Ctrl+K` | Painel de comandos (busca difusa sobre tudo que o app faz) |
-| `Ctrl+S` | Exportar a conversa como Markdown |
-| `Ctrl+Z` | Desfazer a última ação reversível |
-| `Ctrl+N` | Nova conversa |
-| `Ctrl+H` | Mostrar/ocultar a barra de conversas |
-| `Ctrl+P` | Fixar a conversa atual no topo |
-| `Ctrl+M` | Conversa por voz ao vivo |
-| `Ctrl+Q` | Sair |
-
-O painel de comandos também tem um botão de lupa no canto superior esquerdo.
-Com o foco num campo de texto, `Ctrl+K` e `Ctrl+Z` continuam sendo os atalhos de
-edição do GTK — o app não rouba a combinação.
-
----
-
-## ↩️ Desfazendo ações
-
-O Copilot executa ações no desktop, e parte delas mexe nos seus arquivos. Essas
-têm volta: depois de executar, aparece um toast com **Desfazer**, e o `Ctrl+Z`
-(ou o painel de comandos) desfaz a última ação reversível a qualquer momento —
-as últimas 5 ficam na pilha.
-
-| Ação | Desfazer |
-|---|---|
-| Salvar/escrever arquivo | Restaura o conteúdo anterior; se o arquivo foi criado pela ação, é removido. Em modo *append*, volta ao tamanho anterior. |
-| Organizar pasta | Devolve cada arquivo à pasta de origem e remove as pastas de categoria que ficaram vazias. |
-
-**O que não entra na pilha, e por que:** clique, digitação, abrir aplicativo,
-abrir URL, controle de mídia e execução de comando mexem em estado de terceiros.
-Prometer desfazer isso seria uma promessa falsa — é melhor não oferecer do que
-oferecer e falhar. A linha da ação mostra **Desfeito ↩** quando você desfaz,
-para não ficar marcada como “Executado”.
-
-Casos em que o desfazer avisa em vez de prometer:
-
-- o arquivo foi movido ou apagado por você depois da ação (a mensagem diz quais
-  não foram encontrados e quantos voltaram);
-- o arquivo original era binário, ou maior que 1 MB — restaurar por texto
-  corromperia o conteúdo, então a ação acontece sem snapshot.
-
----
-
-## 📎 Anexando arquivos ao chat
-
-Arraste um arquivo do gerenciador de arquivos para dentro da janela e solte.
-
-| Tipo | O que acontece |
-|---|---|
-| Imagem (PNG, JPEG, WebP, GIF…) | Vai para o canal multimodal, no mesmo slot da captura de tela — com miniatura acima da barra de prompt. Uma imagem por vez. |
-| PDF | Texto extraído via `pdftotext` (poppler-utils) e injetado como contexto. |
-| Texto e código (`.txt`, `.md`, `.csv`, `.json`, `.py`, `.html`…) | Conteúdo lido e injetado como contexto. |
-
-Cada anexo de texto/PDF ganha um chip removível acima da barra de prompt. Enquanto
-o chip estiver lá, o conteúdo acompanha as próximas mensagens — é o mesmo critério
-da visão contínua. Para tirar o contexto, use o **x** do chip ou “Remover anexos do
-chat” no `Ctrl+K`.
-
-Detalhes que importam:
-
-- **Limites:** 12.000 caracteres por arquivo (o excedente é truncado e marcado no chip) e 8 MB por imagem.
-- **O conteúdo do arquivo não vira instrução.** Ele entra no prompt entre delimitadores (`----- início de notas.txt -----`) e cercado por um aviso explícito de que é material de leitura.
-- **A bolha do usuário não incha.** O que vai para o histórico é só o que você digitou; o contexto dos anexos é montado na hora de falar com o modelo.
-- **Soltar sem digitar nada** envia “Resuma e explique o conteúdo anexado.”.
-- Pastas, binários e formatos sem leitura possível são recusados com o motivo no toast — e o mesmo arquivo não é anexado duas vezes.
-
----
-
-## 📤 Exportando uma conversa
-
-`Ctrl+S` (ou "Exportar conversa (.md)" no painel de comandos) salva a conversa atual
-em Markdown, com frontmatter YAML pronto para Obsidian, Docusaurus ou Jekyll:
-
-```markdown
----
-title: "Como listar arquivos grandes?"
-source: "zorin-copilot"
-topic_id: "2a9650a7681e"
-provider: "gemini"
-model: "gemini-flash-latest"
-turn_count: 2
-created_at: "2025-03-12T09:05:00"
-updated_at: "2025-03-12T14:22:10"
-exported_at: "2025-03-12T14:30:00"
----
-
-# Como listar arquivos grandes?
-
-> Exportado do Zorin Copilot em 12/03/2025 14:30 · gemini · gemini-flash-latest
-
-## Você · 12/03/2025 09:05
-
-como listar arquivos grandes?
-
-## Copilot
-
-Use `find`: …
-
----
-```
-
-As respostas são gravadas literalmente — blocos de código, tabelas e links chegam
-intactos ao arquivo. O nome sugerido é `<titulo>-<AAAA-MM-DD>.md`, com acentos
-removidos para evitar problemas ao compartilhar.
-
----
-
-## 🎨 Personalizando a aparência
-
-O tema glassmorphism fica em `src/zorin_copilot/data/zorin-copilot.css`. Não é preciso
-mexer nele: dá para sobrescrever qualquer regra sem tocar no código.
-
-Cada item abaixo vence o anterior:
-
-| Ordem | Arquivo | Para que serve |
-|---|---|---|
-| 1 | `data/zorin-copilot.css` | tema embutido no pacote |
-| 2 | `/usr/share/zorin-copilot/zorin-copilot.css` | ajuste feito pela distribuição |
-| 3 | `~/.config/zorin-copilot/themes/*.css` | temas instalados, aplicados em ordem alfabética |
-| 4 | `~/.config/zorin-copilot/user.css` | override final do usuário |
-
-Exemplo de `~/.config/zorin-copilot/user.css`:
+O tema glassmorphism é definido em `src/zorin_copilot/data/zorin-copilot.css`. É possível sobrescrever as regras visuais sem modificar o código-fonte criando o arquivo `~/.config/zorin-copilot/user.css`:
 
 ```css
-/* Deixa o vidro mais opaco e troca a cor de destaque */
-window.glass-window > contents {
-    background-color: rgba(20, 24, 32, 0.99);
-}
-
+/* Exemplo de personalização de cores em ~/.config/zorin-copilot/user.css */
 @define-color accent_color #7d5fff;
+
+window.glass-window > contents {
+    background-color: rgba(20, 24, 32, 0.98);
+}
 ```
 
-Redefinir `@accent_color` é suficiente para retintar a interface inteira: botão
-de envio, bordas de foco, chips e o item ativo da barra lateral leem a variável,
-não a cor literal. Uma linha troca tudo.
+A redefinição da variável `@accent_color` atualiza automaticamente todos os botões de envio, bordas de foco e indicadores da barra lateral.
 
-O diretório de configuração respeita `XDG_CONFIG_HOME`. CSS inválido é ignorado com um
-aviso no log — o tema embutido continua sendo aplicado.
+---
+
+## 📚 Documentação Adicional
+
+Explore o diretório [`docs/`](docs/) para especificações técnicas detalhadas:
+- [Índice Geral de Documentação](docs/README.md)
+- [Especificação Técnica de Arquitetura](ARCHITECTURE.md)
+- [Design do Modo Agente Supervisionado](docs/AGENT_MODE.md)
+- [Guia de Portabilidade para Arch Linux / EndeavourOS](docs/ENDEAVOUROS_PORT.md)
+- [Guia de Configuração Google OAuth2](docs/google-oauth-setup.md)
+- [Integração com Home Assistant](docs/CASA_INTELIGENTE.md)
+- [Diretrizes de Contribuição](CONTRIBUTING.md)
+- [Política de Segurança](SECURITY.md)
 
 ---
 
 ## 📄 Licença
 
-MIT License.
+Distribuído sob a licença **MIT**. Consulte `LICENSE` para mais informações.

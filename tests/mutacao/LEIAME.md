@@ -1,5 +1,7 @@
 # Harnesses de mutação
 
+[🇺🇸 English Version](README.en.md) | [🇧🇷 Versão em Português](LEIAME.md)
+
 Cada arquivo daqui quebra **de propósito** um pedaço do código de produção, roda a suíte
 correspondente e exige que ela **falhe**. Se a suíte continuar verde com o defeito
 reintroduzido, o teste que deveria pegar aquilo não morde — e o harness acusa.

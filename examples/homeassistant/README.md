@@ -1,5 +1,7 @@
 # Integração Zorin Copilot ↔ Home Assistant (exemplos)
 
+[🇺🇸 English Version](README.en.md) | [🇧🇷 Versão em Português](README.md)
+
 Esta pasta traz os exemplos para deixar a integração **bidirecional e fluida**:
 
 ```
