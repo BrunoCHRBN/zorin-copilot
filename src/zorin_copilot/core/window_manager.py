@@ -366,15 +366,73 @@ class WindowManager:
         if not q:
             return None
         windows = cls.list_windows(exclude_copilot=True)
-        # Correspondência exata de app
+        # Correspondência exata de app ou id
         for w in windows:
-            if w.app.lower() == q:
+            if w.app.lower() == q or w.id.lower() == q:
                 return w
         # Substring de app ou título
         for w in windows:
             if q in w.app.lower() or q in w.title.lower():
                 return w
         return None
+
+    @classmethod
+    def get_context_summary(
+        cls,
+        exclude_copilot: bool = True,
+        max_windows: int = 8,
+    ) -> list[dict[str, Any]]:
+        """Retorna um mapa compacto das janelas abertas para injeção no contexto do planejador."""
+        try:
+            windows = cls.list_windows(exclude_copilot=exclude_copilot)[: max(1, int(max_windows))]
+            return [
+                {
+                    "id": w.id,
+                    "app": w.app,
+                    "title": w.title,
+                    "workspace": w.workspace,
+                    "monitor_index": w.monitor_index,
+                    "is_active": w.is_active,
+                    "display_name": w.display_name(max_title_chars=60),
+                }
+                for w in windows
+            ]
+        except Exception as exc:
+            logger.debug("Falha ao montar get_context_summary de janelas: %s", exc)
+            return []
+
+    @classmethod
+    def format_window_map(
+        cls,
+        windows: list[dict[str, Any]] | None = None,
+        exclude_copilot: bool = True,
+        max_windows: int = 8,
+    ) -> str:
+        """Formata o mapa de janelas abertas em texto conciso para o prompt do agente."""
+        entries = (
+            windows
+            if windows is not None
+            else cls.get_context_summary(exclude_copilot=exclude_copilot, max_windows=max_windows)
+        )
+        if not entries:
+            return ""
+        lines: list[str] = []
+        for idx, w in enumerate(entries):
+            is_act = bool(w.get("is_active") or idx == 0)
+            status = "ATIVA" if is_act else "ABERTA"
+            app = str(w.get("app") or "App").strip()
+            title = str(w.get("title") or "").strip()
+            ws = str(w.get("workspace") or "").strip()
+            wid = str(w.get("id") or "").strip()
+            meta_parts = []
+            if wid:
+                meta_parts.append(f"id={wid}")
+            if ws:
+                meta_parts.append(f"ws={ws}")
+            meta_str = f" ({', '.join(meta_parts)})" if meta_parts else ""
+            label = f"{app} — {title}" if title else app
+            lines.append(f"- [{status}] {label}{meta_str}")
+        return "\n".join(lines)
 
     @classmethod
     def list_monitors(cls) -> list[dict[str, Any]]:

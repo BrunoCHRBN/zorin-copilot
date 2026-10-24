@@ -424,3 +424,47 @@ def test_llm_planner_encaminha_trust_manager_ao_prompt():
     assert '[ENVOLVIDO:read_file]"x"[/ENVOLVIDO]' in provider.last_prompt
 
 
+def test_build_planner_prompt_inclui_scratchpad_e_mapa_de_janelas():
+    from zorin_copilot.ai.agent_router import build_planner_prompt
+
+    open_windows = [
+        {"id": "0x01", "app": "Firefox", "title": "Artigo Científico - PDF", "active": True, "workspace": "0"},
+        {"id": "0x02", "app": "LibreOffice", "title": "Fichamento.odt", "active": False, "workspace": "0"},
+    ]
+    scratchpad = {
+        "citacao_1": "Silva (2025) demonstra redução de 42% na latência.",
+        "tabela_custos": "Plano A: R$ 100 | Plano B: R$ 180",
+    }
+
+    prompt = build_planner_prompt(
+        "comparar artigo com fichamento",
+        [],
+        history=[],
+        scratchpad=scratchpad,
+        open_windows=open_windows,
+    )
+    assert "MAPA DE JANELAS ABERTAS NO DESKTOP:" in prompt
+    assert '[ATIVA] id=0x01 | app=Firefox | título="Artigo Científico - PDF"' in prompt
+    assert '[ABERTA] id=0x02 | app=LibreOffice | título="Fichamento.odt"' in prompt
+    assert "MEMÓRIA DE TRABALHO (SCRATCHPAD" in prompt
+    assert "[citacao_1]: Silva (2025) demonstra redução de 42% na latência." in prompt
+    assert "[tabela_custos]: Plano A: R$ 100 | Plano B: R$ 180" in prompt
+
+
+def test_decision_from_json_interpreta_tool_calls_em_lote():
+    payload = {
+        "rationale": "Pesquisar simultaneamente na web e em bases acadêmicas",
+        "tool_calls": [
+            {"tool": "web_search", "args": {"query": "zorin os 18"}},
+            {"tool": "academic_search", "args": {"query": "linux desktop ergonomics"}},
+        ],
+    }
+    decision = decision_from_json(payload)
+    assert decision.tool_call is not None
+    assert decision.tool_call.name == "web_search"
+    assert len(decision.tool_calls) == 2
+    assert [tc.name for tc in decision.tool_calls] == ["web_search", "academic_search"]
+    assert decision.tool_calls[0].rationale == "Pesquisar simultaneamente na web e em bases acadêmicas"
+
+
+

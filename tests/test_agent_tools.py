@@ -941,3 +941,128 @@ def test_search_code_and_system_processes_tools():
     assert "summary" in res_proc
 
     registry.close()
+
+
+def test_scratchpad_write_read_clear():
+    registry = ToolRegistry()
+
+    # 1. Escrita inicial
+    w1 = registry.call("scratchpad_write", {"key": "fornecedor_a", "content": "R$ 1.250,00 - Prazo 5 dias"})
+    assert w1["ok"] is True
+    assert w1["key"] == "fornecedor_a"
+    assert registry.scratchpad["fornecedor_a"] == "R$ 1.250,00 - Prazo 5 dias"
+
+    # 2. Append na mesma chave
+    w2 = registry.call("scratchpad_write", {"key": "fornecedor_a", "content": "Frete grátis", "append": True})
+    assert w2["ok"] is True
+    assert "R$ 1.250,00" in registry.scratchpad["fornecedor_a"]
+    assert "Frete grátis" in registry.scratchpad["fornecedor_a"]
+
+    # 3. Segunda chave e leitura individual / completa
+    registry.call("scratchpad_write", {"key": "fornecedor_b", "content": "R$ 1.190,00 - Prazo 10 dias"})
+    r_one = registry.call("scratchpad_read", {"key": "fornecedor_b"})
+    assert r_one["ok"] is True
+    assert r_one["content"] == "R$ 1.190,00 - Prazo 10 dias"
+
+    r_all = registry.call("scratchpad_read", {})
+    assert r_all["ok"] is True
+    assert r_all["count"] == 2
+    assert "fornecedor_a" in r_all["notes"]
+    assert "fornecedor_b" in r_all["notes"]
+
+    # 4. Limpeza de chave específica e total
+    c1 = registry.call("scratchpad_clear", {"key": "fornecedor_a"})
+    assert c1["ok"] is True
+    assert c1["existed"] is True
+    assert c1["remaining"] == 1
+
+    c_all = registry.call("scratchpad_clear", {})
+    assert c_all["ok"] is True
+    assert c_all["remaining"] == 0
+    assert registry.scratchpad == {}
+    registry.close()
+
+
+def test_inspect_window_foca_e_extrai_arvore(monkeypatch):
+    from zorin_copilot.core.window_manager import WindowInfo, WindowManager
+
+    fake_win = WindowInfo(
+        id="0x0400001",
+        app="LibreOffice",
+        title="Planilha de Custos - LibreOffice Calc",
+        x=10,
+        y=20,
+        width=1200,
+        height=800,
+        workspace="0",
+    )
+    focused_ids: list[str] = []
+    monkeypatch.setattr(WindowManager, "find_window", classmethod(lambda cls, q: fake_win if " calc" in f" {q.lower()}" or "libre" in q.lower() else None))
+    monkeypatch.setattr(WindowManager, "focus_window", classmethod(lambda cls, wid: focused_ids.append(wid) or True))
+
+    registry = make_registry(inspector=FakeInspector(_tree()))
+    res = registry.call("inspect_window", {"query": "LibreOffice Calc", "focus": True})
+    assert res["ok"] is True
+    assert res["window"]["id"] == "0x0400001"
+    assert res["window"]["app"] == "LibreOffice"
+    assert res["tree_available"] is True
+    assert "Salvar" in res["tree"]
+    assert focused_ids == ["0x0400001"]
+    registry.close()
+
+
+def test_schema_filtra_dominios_builtin_por_objetivo():
+    registry = ToolRegistry()
+
+    # Sem objetivo -> catálogo completo
+    full_schema = registry.schema()
+    full_names = {t["name"] for t in full_schema}
+    assert len(full_schema) >= 90
+    assert "network_inspect" in full_names
+    assert "study_generate_deck" in full_names
+    assert "docker_list_containers" in full_names
+
+    # Objetivo genérico de desktop/web -> enxuto (core apenas, sem domínios especializados)
+    core_schema = registry.schema(objective="abrir o Firefox e pesquisar notebook gamer")
+    core_names = {t["name"] for t in core_schema}
+    assert len(core_schema) < len(full_schema) - 35
+    assert "open_url" in core_names
+    assert "scratchpad_write" in core_names
+    assert "inspect_window" in core_names
+    assert "network_inspect" not in core_names
+    assert "study_generate_deck" not in core_names
+    assert "docker_list_containers" not in core_names
+
+    # Objetivo de rede -> inclui grupo network
+    net_schema = registry.schema(objective="diagnosticar latência de rede, dns e ping")
+    net_names = {t["name"] for t in net_schema}
+    assert "network_inspect" in net_names
+    assert "network_dns_benchmark" in net_names
+    assert "study_generate_deck" not in net_names
+
+    # Ferramenta já ativa na sessão destrava seu grupo
+    active_schema = registry.schema(
+        objective="continuar tarefa atual",
+        active_tools={"study_summarize"},
+    )
+    active_names = {t["name"] for t in active_schema}
+    assert "study_summarize" in active_names
+    registry.close()
+
+
+def test_call_batch_executa_ferramentas_safe_em_paralelo():
+    registry = ToolRegistry()
+    res = registry.call_batch(
+        [
+            ("scratchpad_write", {"key": "k1", "content": "v1"}),
+            ("scratchpad_write", {"key": "k2", "content": "v2"}),
+            ("scratchpad_read", {}),
+        ]
+    )
+    assert res["ok"] is True
+    assert res["batch"] is True
+    assert res["count"] == 3
+    assert len(res["results"]) == 3
+    assert registry.scratchpad["k1"] == "v1"
+    assert registry.scratchpad["k2"] == "v2"
+    registry.close()

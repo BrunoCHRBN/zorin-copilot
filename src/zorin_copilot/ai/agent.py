@@ -71,17 +71,25 @@ class ToolCall:
 class AgentDecision:
     """O que o planejador quer fazer a seguir.
 
-    Ou vem `tool_call`, ou vem `final_answer` (encerramento), ou vem `error`
+    Ou vem `tool_call` (ou `tool_calls` para lote paralelo de leitura segura),
+    ou vem `final_answer` (encerramento), ou vem `error`
     (falha do provedor — o loop para com `STOP_ERROR`).
     """
 
     tool_call: ToolCall | None = None
+    tool_calls: list[ToolCall] = field(default_factory=list)
     final_answer: str = ""
     error: str = ""
     #: Pré/pós-condições do passo (preenchidas por planners conscientes da tela,
     #: ex.: VisionLLMPlanner). Usadas pelo ValidatingToolRegistry para validar.
     preconditions: list[str] = field(default_factory=list)
     postconditions: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.tool_call is not None and not self.tool_calls:
+            self.tool_calls = [self.tool_call]
+        elif self.tool_calls and self.tool_call is None:
+            self.tool_call = self.tool_calls[0]
 
 
 class AgentPlanner(Protocol):
@@ -118,9 +126,11 @@ class Step:
     elapsed: float = 0.0
     #: Contrato do passo (intent + pré/pós-condições) quando o planner o preenche.
     contract: dict[str, Any] | None = None
+    #: Ferramentas executadas em paralelo quando o passo é um lote SAFE read-only.
+    batch_tools: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "index": self.index,
             "tool": self.tool,
             "args": dict(self.args),
@@ -135,6 +145,9 @@ class Step:
             "elapsed": self.elapsed,
             "contract": self.contract,
         }
+        if self.batch_tools:
+            payload["batch_tools"] = list(self.batch_tools)
+        return payload
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Step:
@@ -152,6 +165,7 @@ class Step:
             error=str(data.get("error", "")),
             elapsed=float(data.get("elapsed", 0.0)),
             contract=data.get("contract"),
+            batch_tools=list(data.get("batch_tools") or []),
         )
 
 
@@ -325,6 +339,9 @@ class AgentLoop:
 
                 # Ferramentas dinâmicas relevantes ao objetivo, contexto e passos ativos
                 active_tools = {s.tool for s in steps}
+                for s in steps:
+                    if s.batch_tools:
+                        active_tools.update(s.batch_tools)
                 tools = registry.schema(
                     objective=objective,
                     session_context=ctx,
@@ -366,6 +383,55 @@ class AgentLoop:
                         dry_run,
                         final_answer=decision.final_answer or "Objetivo concluído.",
                     )
+
+                batch_calls = [
+                    tc for tc in (decision.tool_calls or [])
+                    if tc.name and tc.name not in FINISH_TOOLS
+                ]
+                is_safe_fn = getattr(registry, "is_safe_read_only", None)
+                can_batch = (
+                    len(batch_calls) > 1
+                    and callable(is_safe_fn)
+                    and hasattr(registry, "call_batch")
+                    and all(bool(is_safe_fn(tc.name, tc.args)) for tc in batch_calls)
+                )
+                if can_batch:
+                    call = batch_calls[0]
+                    step = self._new_step(len(steps), call, registry, decision)
+                    if step is not None:
+                        step.batch_tools = [tc.name for tc in batch_calls]
+                        step.args = {
+                            "batch": [{"tool": tc.name, "args": dict(tc.args or {})} for tc in batch_calls]
+                        }
+                        observation = registry.call_batch(
+                            [(tc.name, dict(tc.args or {})) for tc in batch_calls],
+                            contract=step.contract,
+                        )
+                        step.ok = bool(observation.get("ok"))
+                        step.observation = observation
+                        if not step.ok:
+                            step.error = str(
+                                observation.get("error") or observation.get("message") or "falha em lote"
+                            )
+                        step.elapsed = round(time.monotonic() - step_start_time, 3)
+                        steps.append(step)
+                        self._audit(objective, step)
+
+                        if on_step is not None:
+                            try:
+                                on_step(step)
+                            except Exception:
+                                logger.debug("on_step falhou", exc_info=True)
+
+                        repeated = self._repeated_failure(steps)
+                        if repeated:
+                            return self._finish(steps, objective, STOP_REPEATED, started, dry_run, error=repeated)
+
+                        if getattr(self.planner, "name", "") != "scripted":
+                            loop_msg = self._detected_loop(steps)
+                            if loop_msg:
+                                return self._finish(steps, objective, STOP_LOOP, started, dry_run, error=loop_msg)
+                        continue
 
                 call = decision.tool_call
                 step = self._new_step(len(steps), call, registry, decision)
@@ -454,6 +520,10 @@ class AgentLoop:
                 kwargs["session_context"] = session_context
             if "max_steps" in sig.parameters:
                 kwargs["max_steps"] = self.max_steps
+            if "scratchpad" in sig.parameters:
+                sp = getattr(self.registry, "scratchpad", None)
+                if isinstance(sp, dict):
+                    kwargs["scratchpad"] = dict(sp)
             return self.planner.decide(
                 objective,
                 tools,

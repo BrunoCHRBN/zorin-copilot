@@ -496,3 +496,47 @@ def test_get_step_budget_adaptativo():
     assert steps_fixed == 20
     assert secs_fixed == 250.0
 
+
+def test_loop_executa_lote_paralelo_safe_em_um_unico_passo():
+    registry = ToolRegistry()
+    batch_decision = AgentDecision(
+        tool_calls=[
+            ToolCall("scratchpad_write", {"key": "aba_1", "content": "Preço A: R$ 200"}, rationale="salvar cotações em lote"),
+            ToolCall("scratchpad_write", {"key": "aba_2", "content": "Preço B: R$ 180"}, rationale="salvar cotações em lote"),
+        ]
+    )
+    planner = ScriptedPlanner([batch_decision, ToolCall("done", {"answer": "Cotações salvas em lote"})])
+    result = loop_for(planner, registry).run("comparar preços entre abas")
+
+    assert result.success is True
+    assert result.stop_reason == STOP_DONE
+    assert len(result.steps) == 1
+    step = result.steps[0]
+    assert step.ok is True
+    assert step.batch_tools == ["scratchpad_write", "scratchpad_write"]
+    assert step.observation["batch"] is True
+    assert step.observation["count"] == 2
+    assert registry.scratchpad == {"aba_1": "Preço A: R$ 200", "aba_2": "Preço B: R$ 180"}
+    registry.close()
+
+
+def test_loop_encaminha_scratchpad_para_planejador():
+    registry = ToolRegistry(scratchpad={"nota_inicial": "valor 42"})
+    seen_scratchpads: list[dict] = []
+
+    class ScratchpadAwarePlanner:
+        name = "aware"
+
+        def decide(self, objective, tools, history, scratchpad=None):
+            seen_scratchpads.append(dict(scratchpad or {}))
+            if not history:
+                return AgentDecision(tool_call=ToolCall("scratchpad_write", {"key": "nova", "content": "ok"}))
+            return AgentDecision(final_answer="concluído com scratchpad")
+
+    result = loop_for(ScratchpadAwarePlanner(), registry).run("usar memória de trabalho")
+    assert result.success is True
+    assert seen_scratchpads[0] == {"nota_inicial": "valor 42"}
+    assert seen_scratchpads[1] == {"nota_inicial": "valor 42", "nova": "ok"}
+    registry.close()
+
+

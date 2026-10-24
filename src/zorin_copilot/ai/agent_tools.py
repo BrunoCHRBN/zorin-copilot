@@ -27,7 +27,7 @@ import subprocess
 import tempfile
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Sequence
 
 from ..core.board_outcome import message_for, outcome_from_payload
 from ..shell.risk import RiskLevel, RiskPolicy, is_blocked_app
@@ -49,6 +49,115 @@ DEFAULT_TOOL_TIMEOUT = 25.0
 #: Sentinel que marca "já tentamos construir e não deu" — evita repetir o import
 #: falho a cada passo do loop.
 _UNAVAILABLE = object()
+
+#: Famílias especializadas de ferramentas built-in. Quando um objetivo é informado
+#: a `schema(objective=...)`, o núcleo essencial (UI, janelas, arquivos, web,
+#: scratchpad, subagentes, `done`) entra sempre, e estas famílias só entram quando
+#: o objetivo/contexto cita o domínio correspondente ou a ferramenta já está em
+#: `active_tools`. Sem `objective` (`schema()`), 100% do catálogo é retornado.
+BUILTIN_DOMAIN_GROUPS: dict[str, frozenset[str]] = {
+    "network": frozenset({
+        "network_inspect",
+        "lan_devices_scan",
+        "network_discover_lan",
+        "network_identify_device",
+        "network_watch_lan",
+        "network_establish_baseline",
+        "network_block_device",
+        "local_services_list",
+        "network_wake_on_lan",
+        "network_release_port",
+        "network_confirm_port",
+        "network_probe_service",
+        "network_dns_benchmark",
+        "network_reconnect",
+        "network_audit_exposure",
+        "network_throughput",
+        "network_diagnose_path",
+        "network_ssl_check",
+        "network_mdns_services",
+    }),
+    "study": frozenset({
+        "capture_lesson",
+        "study_generate_deck",
+        "study_summarize",
+        "study_export_anki",
+        "study_show_board",
+        "academic_search",
+    }),
+    "dev_git_docker": frozenset({
+        "git_log",
+        "git_status",
+        "git_diff",
+        "search_code",
+        "vscode_workspace",
+        "docker_list_containers",
+        "docker_container_logs",
+        "docker_container_action",
+        "system_processes",
+    }),
+    "smart_home": frozenset({
+        "smart_home_control",
+        "smart_home_status",
+        "smart_home_automate",
+        "smart_home_events",
+    }),
+    "pim_google": frozenset({
+        "contact_lookup",
+        "contact_save",
+        "email_compose",
+        "calendar_event",
+        "google_drive",
+        "google_gmail",
+    }),
+    "system_media": frozenset({
+        "media_control",
+        "system_control",
+        "system_hardware_health",
+        "system_journal_errors",
+    }),
+}
+
+ALL_SPECIALIZED_BUILTIN_TOOLS: frozenset[str] = frozenset().union(*BUILTIN_DOMAIN_GROUPS.values())
+
+BUILTIN_DOMAIN_TRIGGERS: dict[str, tuple[str, ...]] = {
+    "network": (
+        "rede", "network", "lan", "wi-fi", "wifi", "ip", "porta", "port", "dns",
+        "ssl", "tls", "ping", "latência", "latencia", "banda", "velocidade",
+        "throughput", "roteador", "dispositivo", "mac", "arp", "mdns", "wake",
+        "wol", "firewall", "conexão", "conexao", "servidor", "socket", "http",
+    ),
+    "study": (
+        "estud", "aula", "anki", "flashcard", "baralho", "deck", "resum",
+        "quadro", "lousa", "disciplina", "acadêmic", "academic", "scielo",
+        "ibge", "artigo", "tcc", "prova", "exercício", "exercicio", "equação",
+        "equacao", "matemática", "matematica", "cálculo", "calculo", "ava", "scorm",
+    ),
+    "dev_git_docker": (
+        "git", "commit", "branch", "diff", "repositór", "repositor", "código",
+        "codigo", "code", "vscode", "patch", "função", "funcao", "classe",
+        "docker", "container", "conteiner", "processo", "pid", "cpu", "ram",
+        "memória", "memoria", "porta", "servidor", "dev", "script", "python",
+        "bug", "erro", "log",
+    ),
+    "smart_home": (
+        "casa", "home assistant", "luz", "lâmpada", "lampada", "ar-condicionado",
+        "clima", "temperatura", "sensor", "interruptor", "tomada", "cena",
+        "quarto", "sala", "cozinha", "iot", "smart", "ligar a ", "apagar a ", "acender",
+    ),
+    "pim_google": (
+        "email", "e-mail", "gmail", "mensagem", "contato", "agenda", "calendário",
+        "calendario", "evento", "reunião", "reuniao", "compromisso", "drive",
+        "nuvem", "google",
+    ),
+    "system_media": (
+        "música", "musica", "áudio", "audio", "volume", "tocar", "pausar",
+        "play", "pause", "spotify", "mídia", "midia", "tema", "escuro",
+        "claro", "dark", "brilho", "energia", "bateria", "hardware",
+        "temperatura", "disco", "saúde", "saude", "journal", "systemd",
+        "erro do sistema", "falha",
+    ),
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -249,12 +358,14 @@ class ToolRegistry:
         memory: Any | None = None,
         board_opener: Any | None = None,
         subagent_runner: Any | None = None,
+        scratchpad: dict[str, str] | None = None,
     ) -> None:
         self._inspector = inspector
         self._input_driver = input_driver
         self._undo_stack = undo_stack
         self._fence = fence
         self._memory = memory
+        self._scratchpad: dict[str, str] = dict(scratchpad) if scratchpad is not None else {}
         # Gancho de UI para o Quadro Negro: callable `(graph, focus) -> dict`.
         # O registro é agnóstico de GTK; a UI injeta o abridor (pode ser definido
         # depois, via `registry.board_opener = ...`). Sem ele, a ferramenta
@@ -418,6 +529,11 @@ class ToolRegistry:
 
         return self._component("_network_inspector", build)
 
+    @property
+    def scratchpad(self) -> dict[str, str]:
+        """Bloco de notas de trabalho (Working Memory) da sessão atual."""
+        return self._scratchpad
+
 
     # -- descrição para o modelo ------------------------------------------- #
 
@@ -444,7 +560,7 @@ class ToolRegistry:
         session_context: Sequence[dict[str, str]] | None = None,
         active_tools: set[str] | None = None,
     ) -> list[ToolSpec]:
-        """Filtra ferramentas para reduzir a sobrecarga de tokens e acelerar o tempo de resposta."""
+        """Filtra ferramentas (MCP e grupos built-in especializados) para reduzir a sobrecarga de tokens."""
         all_specs = list(self._specs.values())
         if not objective:
             return all_specs
@@ -469,24 +585,38 @@ class ToolRegistry:
             if any(kw in query_text for kw in kws):
                 matched_servers.add(server)
 
+        matched_builtin_tools: set[str] = set()
+        for domain, kws in BUILTIN_DOMAIN_TRIGGERS.items():
+            if any(kw in query_text for kw in kws):
+                matched_builtin_tools.update(BUILTIN_DOMAIN_GROUPS.get(domain, ()))
+
         if active_tools:
             for tool_name in active_tools:
                 if tool_name.startswith("mcp__"):
                     parts = tool_name.split("__")
                     if len(parts) >= 2:
                         matched_servers.add(parts[1])
+                else:
+                    matched_builtin_tools.add(tool_name)
+                    for domain, domain_tools in BUILTIN_DOMAIN_GROUPS.items():
+                        if tool_name in domain_tools:
+                            matched_builtin_tools.update(domain_tools)
 
         if not matched_servers:
             matched_servers = {"filesystem", "duckduckgo"}
 
         selected: list[ToolSpec] = []
         for spec in all_specs:
-            if not spec.name.startswith("mcp__"):
-                selected.append(spec)
-            else:
+            if spec.name.startswith("mcp__"):
                 parts = spec.name.split("__")
                 if len(parts) >= 2 and parts[1] in matched_servers:
                     selected.append(spec)
+            elif spec.name in ALL_SPECIALIZED_BUILTIN_TOOLS:
+                if spec.name in matched_builtin_tools:
+                    selected.append(spec)
+            else:
+                # Ferramenta do núcleo essencial (Core) ou customizada injetada no registro
+                selected.append(spec)
 
         return selected or all_specs
 
@@ -526,7 +656,57 @@ class ToolRegistry:
         level, _ = self.classify(name, args)
         return level == RiskLevel.AUTO
 
+    def is_safe_read_only(self, name: str, args: dict[str, Any] | None = None) -> bool:
+        """True se a ferramenta existe, não é mutante, não é de encerramento e tem risco SAFE."""
+        clean_name = (name or "").strip()
+        if not clean_name or clean_name in FINISH_TOOLS:
+            return False
+        spec = self._specs.get(clean_name)
+        if spec is None or spec.mutating:
+            return False
+        level, _ = self.classify(clean_name, args)
+        return level is RiskLevel.SAFE
+
     # -- execução ----------------------------------------------------------- #
+
+    def call_batch(
+        self,
+        calls: Sequence[tuple[str, dict[str, Any]]],
+        contract: Any | None = None,
+    ) -> dict[str, Any]:
+        """Executa um lote de ferramentas SAFE de leitura em paralelo no ThreadPoolExecutor."""
+        if not calls:
+            return {"ok": False, "batch": True, "count": 0, "results": [], "error": "Lote vazio."}
+
+        started = time.monotonic()
+        executor = self._get_executor()
+        futures = [
+            executor.submit(self.call, tool_name, dict(tool_args or {}), contract)
+            for tool_name, tool_args in calls
+        ]
+        results: list[dict[str, Any]] = []
+        all_ok = True
+        errors: list[str] = []
+        for (tool_name, _), fut in zip(calls, futures):
+            try:
+                res = fut.result(timeout=self.default_timeout + 2.0)
+            except Exception as exc:
+                res = {"ok": False, "tool": tool_name, "error": f"{type(exc).__name__}: {exc}"}
+            results.append(res)
+            if not res.get("ok"):
+                all_ok = False
+                err_msg = str(res.get("error") or res.get("message") or "falha")
+                errors.append(f"{tool_name}: {err_msg}")
+
+        return {
+            "ok": all_ok,
+            "batch": True,
+            "count": len(results),
+            "tools": [name for name, _ in calls],
+            "results": results,
+            "error": "; ".join(errors) if errors else "",
+            "elapsed": round(time.monotonic() - started, 3),
+        }
 
     def call(
         self,
@@ -2324,6 +2504,79 @@ class ToolRegistry:
                     required=[],
                 ),
                 handler=self._tool_system_journal_errors,
+                mutating=False,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="scratchpad_write",
+                description=(
+                    "Grava ou atualiza uma anotação na memória de trabalho (Scratchpad) da sessão atual. "
+                    "Use para guardar dados, trechos, números ou URLs extraídos de uma janela ou pesquisa "
+                    "antes de alternar para outro aplicativo, evitando truncamento de histórico."
+                ),
+                parameters=_param(
+                    {
+                        "key": _str("Identificador da nota (ex: 'dados_pesquisa', 'tabela_custos')."),
+                        "content": _str("Conteúdo textual ou estruturado a salvar."),
+                        "append": _bool("Se True, concatena ao conteúdo já existente na chave (padrão False)."),
+                    },
+                    required=["key", "content"],
+                ),
+                handler=self._tool_scratchpad_write,
+                mutating=False,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="scratchpad_read",
+                description=(
+                    "Lê notas salvas na memória de trabalho (Scratchpad) da sessão atual "
+                    "(uma chave específica ou todo o bloco de notas)."
+                ),
+                parameters=_param(
+                    {"key": _str("Chave opcional a consultar. Omita para listar todas as notas salvas.")},
+                    required=[],
+                ),
+                handler=self._tool_scratchpad_read,
+                mutating=False,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="scratchpad_clear",
+                description=(
+                    "Remove uma chave específica ou limpa toda a memória de trabalho (Scratchpad) da sessão."
+                ),
+                parameters=_param(
+                    {"key": _str("Chave opcional a remover. Omita para limpar todo o Scratchpad.")},
+                    required=[],
+                ),
+                handler=self._tool_scratchpad_clear,
+                mutating=False,
+            )
+        )
+
+        self.register(
+            ToolSpec(
+                name="inspect_window",
+                description=(
+                    "Localiza uma janela aberta pelo nome do app ou título, opcionalmente foca nela "
+                    "e extrai imediatamente sua árvore de acessibilidade (AT-SPI) e geometria em um único passo."
+                ),
+                parameters=_param(
+                    {
+                        "query": _str("Nome do aplicativo, trecho do título ou ID da janela."),
+                        "focus": _bool("Se True, foca na janela antes de inspecionar (padrão True)."),
+                        "max_depth": _num("Profundidade máxima da árvore AT-SPI (padrão 4)."),
+                        "include_bounds": _bool("Se True, inclui coordenadas (x, y, w, h) de cada elemento."),
+                    },
+                    required=["query"],
+                ),
+                handler=self._tool_inspect_window,
                 mutating=False,
             )
         )
@@ -5342,6 +5595,108 @@ class ToolRegistry:
         except Exception as exc:
             logger.warning("Falha em system_journal_errors: %s", exc)
             return {"ok": False, "error": f"Erro ao extrair incidentes do journal: {exc}"}
+
+    def _tool_scratchpad_write(self, args: dict[str, Any]) -> dict[str, Any]:
+        key = str(args.get("key") or "").strip()
+        content = str(args.get("content") or "")
+        append = bool(args.get("append", False))
+        if not key:
+            return {"ok": False, "error": "Argumento 'key' é obrigatório."}
+        if append and key in self._scratchpad and self._scratchpad[key]:
+            self._scratchpad[key] = f"{self._scratchpad[key]}\n{content}"
+        else:
+            self._scratchpad[key] = content
+        return {
+            "ok": True,
+            "key": key,
+            "length": len(self._scratchpad[key]),
+            "keys_count": len(self._scratchpad),
+            "message": f"Nota '{key}' registrada no Scratchpad ({len(self._scratchpad[key])} caracteres).",
+        }
+
+    def _tool_scratchpad_read(self, args: dict[str, Any]) -> dict[str, Any]:
+        key = str(args.get("key") or "").strip()
+        if key:
+            if key not in self._scratchpad:
+                return {
+                    "ok": False,
+                    "error": f"Chave '{key}' não encontrada no Scratchpad.",
+                    "available_keys": list(self._scratchpad.keys()),
+                }
+            return {"ok": True, "key": key, "content": self._scratchpad[key]}
+        return {
+            "ok": True,
+            "count": len(self._scratchpad),
+            "notes": dict(self._scratchpad),
+        }
+
+    def _tool_scratchpad_clear(self, args: dict[str, Any]) -> dict[str, Any]:
+        key = str(args.get("key") or "").strip()
+        if key:
+            existed = key in self._scratchpad
+            self._scratchpad.pop(key, None)
+            return {"ok": True, "cleared_key": key, "existed": existed, "remaining": len(self._scratchpad)}
+        count = len(self._scratchpad)
+        self._scratchpad.clear()
+        return {"ok": True, "cleared_count": count, "remaining": 0}
+
+    def _tool_inspect_window(self, args: dict[str, Any]) -> dict[str, Any]:
+        query = str(args.get("query") or "").strip()
+        if not query:
+            return {"ok": False, "error": "Argumento 'query' é obrigatório."}
+        should_focus = bool(args.get("focus", True))
+        include_bounds = bool(args.get("include_bounds", False))
+
+        win_meta: dict[str, Any] | None = None
+        target_app = query
+        try:
+            from ..core.window_manager import WindowManager
+
+            win = WindowManager.find_window(query)
+            if win:
+                target_app = win.app or query
+                win_meta = {
+                    "id": win.id,
+                    "app": win.app,
+                    "title": win.title,
+                    "workspace": win.workspace,
+                    "bounds": {"x": win.x, "y": win.y, "width": win.width, "height": win.height},
+                    "display_name": win.display_name(),
+                }
+                if should_focus:
+                    WindowManager.focus_window(win.id or win.app)
+                    if self._fence is not None and hasattr(self._fence, "set_chosen_window"):
+                        self._fence.set_chosen_window(win)
+                    time.sleep(0.08)
+        except Exception as exc:
+            logger.debug("Falha ao buscar/focar janela em inspect_window: %s", exc)
+
+        tree, error = self._tree_for(target_app)
+        if error:
+            if win_meta is not None:
+                return {
+                    "ok": True,
+                    "window": win_meta,
+                    "tree": "",
+                    "tree_available": False,
+                    "warning": error,
+                }
+            return {"ok": False, "error": error}
+
+        try:
+            summary = tree.to_summary(include_bounds=include_bounds)
+        except Exception as exc:
+            return {"ok": False, "error": f"Falha ao resumir árvore da janela: {exc}"}
+
+        truncated = len(summary) > self.max_tree_chars
+        return {
+            "ok": True,
+            "window": win_meta,
+            "app": target_app,
+            "tree": summary[: self.max_tree_chars],
+            "tree_available": True,
+            "truncated": truncated,
+        }
 
 
 

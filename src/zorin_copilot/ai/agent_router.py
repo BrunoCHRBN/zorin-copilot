@@ -208,7 +208,9 @@ _SYSTEM_INSTRUCTION = (
     "Se a janela de destino não estiver em foco ou visível, use `focus_window` ou `list_open_windows` para focar nela.\n"
     "12. Navegação na Web: Para pesquisar novos tópicos, prefira `open_url` direto ou `web_search`. Ao digitar em campos de busca via `keyboard_type`, SEMPRE passe `press_enter: true`.\n"
     "13. BUSCA DE CÓDIGO E PROCESSOS: Para encontrar funções, classes, referências ou arquivos em código, use `search_code` (alta performance via ripgrep) em vez de ler arquivos individualmente. "
-    "Para verificar processos ativos, servidores locais e consumo de recursos, use `system_processes`."
+    "Para verificar processos ativos, servidores locais e consumo de recursos, use `system_processes`.\n"
+    "14. MÚLTIPLAS JANELAS E MEMÓRIA DE TRABALHO (SCRATCHPAD): Ao extrair dados de uma janela/documento/pesquisa para usar em outro aplicativo ou comparar fontes, salve os dados relevantes com `scratchpad_write` (eles permanecem visíveis no bloco SCRATCHPAD do prompt sem truncamento). Para focar e inspecionar outra janela em um único passo, use `inspect_window`.\n"
+    "15. LOTE PARALELO DE LEITURA (`tool_calls`): Para executar de 2 a 4 ferramentas independentes somente-leitura simultaneamente num único passo, responda `{\"tool_calls\": [{\"tool\": \"nome1\", \"args\": {...}}, {\"tool\": \"nome2\", \"args\": {...}}], \"rationale\": \"por quê\"}`."
 )
 
 
@@ -228,9 +230,11 @@ _DOLPHIN_AGENT_INSTRUCTION = (
     "8. ANTI-ALUCINAÇÃO: NUNCA invente, presuma ou declare vitórias ou ações concluídas sem confirmação real na tela. Se uma ferramenta falhou, relate a verdade.\n"
     "9. ANTI-REPETIÇÃO: NUNCA repita ações já realizadas em turnos anteriores (ex: não reabra páginas já abertas).\n"
     "10. ROLAGEM: Use `scroll_page` para revelar filtros ou elementos fora de vista antes de clicar.\n"
-    "11. CONFINAMENTO: Mantenha o foco na janela do aplicativo em uso com `focus_window`.\n"
+    "11. CONFINAMENTO: Mantenha o foco na janela do aplicativo em uso com `focus_window` ou `inspect_window`.\n"
     "12. Ao digitar buscas via `keyboard_type`, use `press_enter: true`.\n"
-    "13. BUSCA DE CÓDIGO E PROCESSOS: Use `search_code` para buscar código rapidamente e `system_processes` para inspecionar processos ativos."
+    "13. BUSCA DE CÓDIGO E PROCESSOS: Use `search_code` para buscar código rapidamente e `system_processes` para inspecionar processos ativos.\n"
+    "14. SCRATCHPAD E MÚLTIPLAS JANELAS: Use `scratchpad_write` para preservar dados extraídos entre janelas/etapas e `inspect_window` para alternar e inspecionar janelas em um único passo.\n"
+    "15. LOTE PARALELO (`tool_calls`): Para consultas independentes somente-leitura, use `{\"tool_calls\": [{\"tool\": \"...\", \"args\": {...}}, ...], \"rationale\": \"...\"}`."
 )
 
 
@@ -249,13 +253,22 @@ class LLMPlanner:
         history: list[dict[str, Any]],
         session_context: Sequence[dict[str, str]] | None = None,
         max_steps: int | None = None,
+        scratchpad: dict[str, str] | None = None,
+        open_windows: Sequence[dict[str, Any]] | None = None,
     ) -> AgentDecision:
         model_name = str(getattr(self.provider, "model", "")).lower()
         is_dolphin = "dolphin" in model_name or "dolphin" in self.name.lower()
         sys_inst = _DOLPHIN_AGENT_INSTRUCTION if is_dolphin else _SYSTEM_INSTRUCTION
         prompt = build_planner_prompt(
-            objective, tools, history, session_context=session_context, max_steps=max_steps,
-            system_instruction=sys_inst, trust_manager=self.trust_manager,
+            objective,
+            tools,
+            history,
+            session_context=session_context,
+            max_steps=max_steps,
+            system_instruction=sys_inst,
+            trust_manager=self.trust_manager,
+            scratchpad=scratchpad,
+            open_windows=open_windows,
         )
         try:
             if hasattr(self.provider, "complete"):
@@ -299,8 +312,10 @@ def build_planner_prompt(
     max_steps: int | None = None,
     system_instruction: str = _SYSTEM_INSTRUCTION,
     trust_manager: Any | None = None,
+    scratchpad: dict[str, str] | None = None,
+    open_windows: Sequence[dict[str, Any]] | None = None,
 ) -> str:
-    """Monta o prompt de um passo com suporte a contexto conversacional de turnos anteriores."""
+    """Monta o prompt de um passo com suporte a contexto conversacional, mapa de janelas e scratchpad."""
     lines = [
         system_instruction,
     ]
@@ -312,6 +327,22 @@ def build_planner_prompt(
             role = "Usuário" if turn.get("role") == "user" else "Assistente"
             content = _clip(turn.get("content", "").strip(), 500)
             lines.append(f"{role}: {content}")
+
+    if open_windows:
+        lines.append("")
+        lines.append("MAPA DE JANELAS ABERTAS NO DESKTOP:")
+        for w in open_windows:
+            status = "ATIVA" if w.get("active") else "ABERTA"
+            wid = w.get("id", "?")
+            app = w.get("app", "App")
+            title = _clip(str(w.get("title", "")), 90)
+            lines.append(f"- [{status}] id={wid} | app={app} | título=\"{title}\"")
+
+    if scratchpad:
+        lines.append("")
+        lines.append("MEMÓRIA DE TRABALHO (SCRATCHPAD - dados preservados entre janelas e passos):")
+        for k, v in scratchpad.items():
+            lines.append(f"- [{k}]: {_clip(str(v), 1200)}")
 
     lines.append("")
     lines.append(f"OBJETIVO ATUAL DO USUÁRIO: {objective}")
@@ -427,15 +458,41 @@ def extract_json_object(text: str) -> dict[str, Any] | None:
 
 
 def decision_from_json(payload: dict[str, Any]) -> AgentDecision:
-    """Converte o JSON do modelo em `AgentDecision`, tolerando variações de chave."""
+    """Converte o JSON do modelo em `AgentDecision`, tolerando variações de chave e lotes (`tool_calls`)."""
     answer = str(payload.get("final_answer") or payload.get("answer") or "").strip()
+    rationale = str(payload.get("rationale") or payload.get("reason") or payload.get("thought") or "")
+
+    raw_batch = payload.get("tool_calls") or payload.get("tools")
+    if isinstance(raw_batch, list) and raw_batch:
+        parsed_calls: list[ToolCall] = []
+        for item in raw_batch:
+            if not isinstance(item, dict):
+                continue
+            t_name = str(item.get("tool") or item.get("name") or item.get("action") or "").strip()
+            if not t_name:
+                continue
+            t_args = item.get("args")
+            if not isinstance(t_args, dict):
+                t_args = item.get("arguments") if isinstance(item.get("arguments"), dict) else {}
+                if not t_args and isinstance(item.get("parameters"), dict):
+                    t_args = item["parameters"]
+            t_rat = str(item.get("rationale") or item.get("reason") or rationale or "")
+            parsed_calls.append(ToolCall(name=t_name, args=dict(t_args or {}), rationale=t_rat))
+        if parsed_calls:
+            return AgentDecision(
+                tool_call=parsed_calls[0],
+                tool_calls=parsed_calls,
+                final_answer=answer,
+                preconditions=list(payload.get("preconditions") or []),
+                postconditions=list(payload.get("postconditions") or []),
+            )
+
     name = str(payload.get("tool") or payload.get("name") or payload.get("action") or "").strip()
     args = payload.get("args")
     if not isinstance(args, dict):
         args = payload.get("arguments") if isinstance(payload.get("arguments"), dict) else {}
         if not args and isinstance(payload.get("parameters"), dict):
             args = payload["parameters"]
-    rationale = str(payload.get("rationale") or payload.get("reason") or payload.get("thought") or "")
 
     # Se o modelo retornou no formato de actions do HUD Copilot
     if not name and isinstance(payload.get("actions"), list) and payload["actions"]:
@@ -514,6 +571,8 @@ class FallbackPlanner:
         history: list[dict[str, Any]],
         session_context: Sequence[dict[str, str]] | None = None,
         max_steps: int | None = None,
+        scratchpad: dict[str, str] | None = None,
+        open_windows: Sequence[dict[str, Any]] | None = None,
     ) -> AgentDecision:
         errors: list[str] = []
         for planner in self.planners:
@@ -525,6 +584,10 @@ class FallbackPlanner:
                     kwargs["session_context"] = session_context
                 if "max_steps" in sig.parameters:
                     kwargs["max_steps"] = max_steps
+                if "scratchpad" in sig.parameters:
+                    kwargs["scratchpad"] = scratchpad
+                if "open_windows" in sig.parameters:
+                    kwargs["open_windows"] = open_windows
                 decision = planner.decide(objective, tools, history, **kwargs)
             except Exception as exc:
                 decision = AgentDecision(error=f"Planejador falhou: {exc}")
