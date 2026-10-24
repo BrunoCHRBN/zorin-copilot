@@ -1,0 +1,12 @@
+[Unit]
+Description=ydotool daemon for user session
+Documentation=man:ydotoold(1)
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ydotoold --socket-path=/run/user/%U/.ydotool_socket --socket-perm=0660
+Restart=on-failure
+RestartSec=3s
+
+[Install]
+WantedBy=default.target

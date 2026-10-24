@@ -1,0 +1,2 @@
+# Permite que usuarios membros do grupo 'input' gerem eventos de teclado/mouse via /dev/uinput
+KERNEL=="uinput", MODE="0660", GROUP="input", OPTIONS+="static_node=uinput"
