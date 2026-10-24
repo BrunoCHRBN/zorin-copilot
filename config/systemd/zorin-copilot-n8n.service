@@ -1,0 +1,24 @@
+[Unit]
+Description=Zorin Copilot n8n Automation Engine
+Documentation=https://docs.n8n.io/
+After=network.target
+
+[Service]
+Type=simple
+Environment="N8N_PORT=5678"
+Environment="N8N_HOST=127.0.0.1"
+Environment="N8N_PROTOCOL=http"
+Environment="N8N_DISABLE_PRODUCTION_MAIN_PROCESS=false"
+Environment="N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true"
+Environment="N8N_USER_FOLDER=%h/.config/zorin-copilot/n8n"
+Environment="WEBHOOK_URL=http://127.0.0.1:5678/"
+ExecStart=/usr/bin/env n8n start
+Restart=on-failure
+RestartSec=5s
+
+# Hardening basico de processo
+ProtectSystem=full
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
