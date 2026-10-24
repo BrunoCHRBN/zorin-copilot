@@ -70,6 +70,12 @@ google = [
     "google-auth>=2.0.0",
     "keyring>=24.0.0",
 ]
+# Orquestração multipassos de agentes (CrewAI). Opcional para manter o core leve;
+# o cluster possui modo sequencial nativo para execução mesmo sem a biblioteca instalada.
+orchestration = [
+    "crewai>=0.28.0",
+    "langchain-core>=0.1.0",
+]
 
 [project.scripts]
 zorin-copilot = "zorin_copilot.ui.app:main"
